@@ -7,8 +7,10 @@ import os
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from . import buildings as buildings_module
 from . import classes, lanelet, scene
 from . import ground as ground_module
+from .buildings import BuildingOptions
 from .frame import LocalFrame
 from .surfaces import SurfaceOptions, extract
 
@@ -40,6 +42,8 @@ def build_city(
     clearance: float = ground_module.DEFAULT_CLEARANCE,
     ground_drop: float = 0.05,
     fill_island: float = 0.0,
+    buildings: bool = False,
+    building_options: BuildingOptions | None = None,
     verbose: bool = True,
 ) -> BuildResult:
     """Read a map and produce every surface, without touching Blender.
@@ -80,8 +84,9 @@ def build_city(
         if heightmap is None:
             raise RuntimeError("no ground-level road surfaces found; cannot build a ground surface")
 
-        mesh = ground_module.build_mesh(heightmap, surfaces, elevated,
-                                        fill_island=fill_island, drop=ground_drop)
+        mesh, road_union = ground_module.build_mesh(heightmap, surfaces, elevated,
+                                                    fill_island=fill_island, drop=ground_drop,
+                                                    return_road_union=True)
         groups["Ground"] = [mesh]
 
         measured = float((heightmap.support == 0).mean() * 100)
@@ -94,6 +99,20 @@ def build_city(
             print(f"[build] elevated lanelets: {len(elevated)} / {len(surfaces)}")
             print(f"[build] ground: {heightmap.nx}x{heightmap.ny} @ {cell:.1f} m, "
                   f"{measured:.1f}% of cells measured, {len(mesh.faces)} faces")
+
+    if buildings:
+        if heightmap is None:
+            raise RuntimeError("buildings need the ground; do not pass ground=False with buildings=True")
+        keep_clear = buildings_module.exclusion_zone(groups) or road_union
+        built = buildings_module.generate(heightmap, keep_clear, building_options)
+        if built["Buildings"]:
+            groups["Buildings"] = built["Buildings"]
+            groups["Roofs"] = built["Roofs"]
+        stats["buildings"] = len(built["Buildings"])
+        if verbose:
+            heights = [p["height"] for p in built["plots"]]
+            span = f"{min(heights):.0f}-{max(heights):.0f} m" if heights else "none"
+            print(f"[build] buildings: {len(built['Buildings'])} on the open ground, {span} tall")
 
     return BuildResult(frame, groups, heightmap, elevated, datum, stats)
 

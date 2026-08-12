@@ -46,6 +46,8 @@ def build_materials() -> dict[str, object]:
         "marking": _material("CityMarking", (0.90, 0.90, 0.88), 0.55),
         "concrete": _material("CityConcrete", (0.42, 0.42, 0.40), 0.90),
         "ground": _material("CityGround", (0.20, 0.19, 0.17), 1.00),
+        "facade": _material("CityFacade", (0.52, 0.50, 0.47), 0.65),
+        "roof": _material("CityRoof", (0.26, 0.26, 0.28), 0.80),
     }
 
 

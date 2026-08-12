@@ -349,7 +349,8 @@ def build_mesh(
     snap_tolerance: float = 0.05,
     seam_radius: float = 1.0,
     drop: float = 0.05,
-) -> Mesh:
+    return_road_union: bool = False,
+) -> Mesh | tuple[Mesh, Any]:
     """Triangulate the ground *around* the roads, meeting them at their edges.
 
     The grid is clipped cell by cell against the dissolved road outline rather
@@ -472,4 +473,7 @@ def build_mesh(
                 if piece.geom_type == "Polygon":
                     emit(piece)
 
-    return Mesh(vertices, faces)
+    mesh = Mesh(vertices, faces)
+    # The dissolved outline is expensive to build and the building layer needs
+    # exactly the same one, so hand it back rather than recomputing it.
+    return (mesh, roads) if return_road_union else mesh

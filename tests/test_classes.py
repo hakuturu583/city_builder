@@ -23,7 +23,9 @@ def test_only_painted_markings_are_preserved():
 
 def test_generated_surfaces_are_the_rest():
     generated = [name for name, c in classes.CLASSES.items() if c.paint == GENERATE]
-    assert set(generated) == {"Ground", "Roads", "Junctions", "Crosswalks", "Walkways", "Curbs"}
+    assert set(generated) == {
+        "Ground", "Roads", "Junctions", "Crosswalks", "Walkways", "Curbs", "Buildings", "Roofs",
+    }
 
 
 def test_pass_indices_are_unique_and_nonzero():

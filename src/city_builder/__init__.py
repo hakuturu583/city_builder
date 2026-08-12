@@ -13,6 +13,7 @@ the kerb line (see :mod:`city_builder.ground`).
 """
 
 from .build import BuildResult, build_city, build_scene, write_heightmap, write_manifest
+from .buildings import BuildingOptions
 from .classes import CLASSES, GENERATE, PRESERVE, SurfaceClass
 from .frame import LocalFrame
 from .geometry import Mesh, Polygon, Ribbon
@@ -24,6 +25,7 @@ __all__ = [
     "GENERATE",
     "PRESERVE",
     "BuildResult",
+    "BuildingOptions",
     "HeightMap",
     "LocalFrame",
     "Mesh",

@@ -52,6 +52,19 @@ def main():
 @click.option("--ground-drop", type=float, default=0.05, help="Hold the ground this far under the road")
 @click.option("--fill-island", type=float, default=0.0,
               help="Absorb junction scraps below this area into the carriageway (can leave holes)")
+# buildings
+@click.option("--buildings/--no-buildings", default=False,
+              help="Fill the open ground with procedural buildings")
+@click.option("--setback", type=float, default=None, help="Gap between the kerb line and any wall (m)")
+@click.option("--lot-area", "target_lot_area", type=float, default=None, help="Split blocks to about this (m2)")
+@click.option("--min-lot-area", type=float, default=None)
+@click.option("--lot-margin", type=float, default=None, help="Gap between neighbouring buildings (m)")
+@click.option("--min-height", type=float, default=None)
+@click.option("--max-height", type=float, default=None)
+@click.option("--floor-height", type=float, default=None)
+@click.option("--tall-bias", type=float, default=None, help="0 = every block low, 1 = every block tall")
+@click.option("--max-buildings", type=int, default=None)
+@click.option("--seed", type=int, default=None, help="Building layout is deterministic for a given seed")
 @click.option("--quiet", is_flag=True)
 def build_command(input_path, blend, glb, heightmap_path, manifest_path, quiet, **kwargs):
     """Build a scene from a Lanelet2 map."""
@@ -60,13 +73,23 @@ def build_command(input_path, blend, glb, heightmap_path, manifest_path, quiet, 
     if not any((blend, glb, heightmap_path, manifest_path)):
         raise click.UsageError("nothing to write: pass --output, --glb, --heightmap or --manifest")
 
+    building_keys = (
+        "setback", "target_lot_area", "min_lot_area", "lot_margin",
+        "min_height", "max_height", "floor_height", "tall_bias", "max_buildings", "seed",
+    )
+    building_values = {k: kwargs.pop(k) for k in building_keys}
+
     surface_keys = (
         "max_segment", "marking_width", "stop_line_width", "dash_length", "dash_gap", "curb_height",
         "crosswalks", "walkways", "markings", "stop_lines", "crosswalk_stripes", "curbs",
     )
     options = options_from_kwargs(**{k: kwargs.pop(k) for k in surface_keys})
 
-    result = build_city(input_path, surface_options=options, verbose=not quiet, **kwargs)
+    from .buildings import BuildingOptions
+
+    building_options = BuildingOptions(**{k: v for k, v in building_values.items() if v is not None})
+    result = build_city(input_path, surface_options=options, building_options=building_options,
+                        verbose=not quiet, **kwargs)
 
     if heightmap_path:
         write_heightmap(result, heightmap_path)

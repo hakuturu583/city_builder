@@ -125,6 +125,43 @@ about before "simplifying" this:
   is measured and where it is invented. A block interior far from any street is
   an educated guess.
 
+## Procedural buildings
+
+The map describes the carriageway and nothing else, so the blocks between the
+streets are empty. `--buildings` fills them:
+
+```bash
+uv run city-builder build --input map.osm --output scene.blend \
+    --buildings --setback 4 --lot-area 700 --max-height 60 --seed 7
+```
+
+The buildable area is the ground minus **every paved surface** minus a setback;
+each block is cut into lots by repeatedly halving its long axis; each lot is
+inset and extruded onto the ground, with the height snapped to whole floors and
+biased taller on bigger plots. The layout is deterministic for a seed.
+
+Walls (`Buildings`) and roofs (`Roofs`) are separate objects because a
+texturing pass treats a facade and a roof completely differently. Both are
+`generate` — nothing in the map says what stands here, so there is no authored
+colour worth preserving.
+
+On the Nishi-Shinjuku map: 1983 buildings, 913,000 m² of footprint, none of it
+overlapping the 99,700 m² of paved surface (exact 2-D test, not sampled).
+
+Two things this deliberately does **not** claim: the buildings are not the real
+ones, and the layout has no alleys or courtyards beyond what the road network
+implies. It is scaffolding of about the right bulk in about the right place.
+
+Two bugs worth knowing about, since both produced plausible-looking output:
+
+* the exclusion zone must include the lanelets classified as *elevated*. The
+  ground layer excludes them on purpose — a viaduct wants ground underneath —
+  but a building does not, and reusing that union put 3.7 % of wall feet on the
+  carriageway;
+* the buildable area must keep its interior rings. A road through the middle of
+  a region is a hole, and taking only the exterior handed it back as buildable:
+  449 of 2481 plots ended up on the road.
+
 ## Placing other things on this ground
 
 `--heightmap out.json` writes the grid plus the scene anchor, so a building or

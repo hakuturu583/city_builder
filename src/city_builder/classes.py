@@ -97,6 +97,14 @@ CLASSES: dict[str, SurfaceClass] = {
             "CrosswalkStripes", "road_marking", PRESERVE, "marking", (0.95, 0.85, 0.25), 9,
             note="one bar per pedestrian_marking ring in the map",
         ),
+        SurfaceClass(
+            "Buildings", "building", GENERATE, "facade", (0.75, 0.35, 0.55), 10,
+            note="procedural: the map says nothing about what stands here",
+        ),
+        SurfaceClass(
+            "Roofs", "roof", GENERATE, "roof", (0.30, 0.35, 0.85), 11,
+            note="separate from the facades; a texturing pass treats them differently",
+        ),
     )
 }
 
