@@ -1,0 +1,35 @@
+[project]
+name = "city-builder"
+version = "0.1.0"
+description = "Build ground and road-surface meshes from a Lanelet2 HD map"
+readme = "README.md"
+license = {text = "MIT"}
+# bpy publishes cp311 wheels up to 5.0.1 and cp313 from 5.1; pin to the 3.11
+# line so `pip install city-builder` resolves without hunting for a Blender.
+requires-python = ">=3.11,<3.12"
+
+dependencies = [
+    "bpy>=4.2,<6",
+    "simple-lanelet2>=1.1",
+    "shapely>=2.0",
+    "scipy>=1.10",
+    "numpy>=1.24,<2",   # bpy links against the 1.x ABI
+    "click>=8.0",
+]
+
+[project.scripts]
+city-builder = "city_builder.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=7.0", "ruff>=0.1"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/city_builder"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
