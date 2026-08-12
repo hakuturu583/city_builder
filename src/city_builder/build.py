@@ -7,8 +7,8 @@ import os
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from . import classes, lanelet, scene
 from . import ground as ground_module
-from . import lanelet, scene
 from .frame import LocalFrame
 from .surfaces import SurfaceOptions, extract
 
@@ -96,6 +96,40 @@ def build_city(
                   f"{measured:.1f}% of cells measured, {len(mesh.faces)} faces")
 
     return BuildResult(frame, groups, heightmap, elevated, datum, stats)
+
+
+def write_manifest(result: BuildResult, path: str) -> None:
+    """Describe every surface: what it is, and whether its colour may change.
+
+    A texturing pass reads this to decide where it may invent and where it must
+    not. The same information is on the objects themselves (``cb_class`` /
+    ``cb_paint``, a ``cb_mask`` colour attribute, and ``pass_index``); this file
+    is for a consumer that wants the whole picture before opening the scene.
+    """
+    payload = classes.manifest()
+    payload["scene"] = {
+        "ref_lat": result.frame.ref_lat,
+        "ref_lon": result.frame.ref_lon,
+        "z_datum": result.z_datum,
+    }
+    payload["groups"] = [
+        {
+            **classes.get(name).to_json(),
+            "shapes": len(shapes),
+            "present": True,
+        }
+        for name, shapes in result.groups.items()
+    ]
+    payload["preserve_groups"] = [
+        name for name in result.groups if classes.get(name).preserved
+    ]
+
+    directory = os.path.dirname(os.path.abspath(path))
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    print(f"[build] wrote {path}")
 
 
 def write_heightmap(result: BuildResult, path: str) -> None:

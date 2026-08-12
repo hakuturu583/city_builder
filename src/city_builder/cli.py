@@ -18,6 +18,8 @@ def main():
 @click.option("--output", "blend", default=None, help="Output .blend")
 @click.option("--glb", default=None, help="Also export a .glb")
 @click.option("--heightmap", "heightmap_path", default=None, help="Also write the ground heightmap JSON")
+@click.option("--manifest", "manifest_path", default=None,
+              help="Also write the surface manifest: class and paint policy per group")
 @click.option("--ref-lat", type=float, default=None, help="Scene anchor; defaults to the map centroid")
 @click.option("--ref-lon", type=float, default=None)
 @click.option("--projector", type=click.Choice(["utm", "mercator", "local-cartesian"]), default="utm")
@@ -51,12 +53,12 @@ def main():
 @click.option("--fill-island", type=float, default=0.0,
               help="Absorb junction scraps below this area into the carriageway (can leave holes)")
 @click.option("--quiet", is_flag=True)
-def build_command(input_path, blend, glb, heightmap_path, quiet, **kwargs):
+def build_command(input_path, blend, glb, heightmap_path, manifest_path, quiet, **kwargs):
     """Build a scene from a Lanelet2 map."""
-    from .build import build_city, build_scene, options_from_kwargs, write_heightmap
+    from .build import build_city, build_scene, options_from_kwargs, write_heightmap, write_manifest
 
-    if not blend and not glb and not heightmap_path:
-        raise click.UsageError("nothing to write: pass --output, --glb or --heightmap")
+    if not any((blend, glb, heightmap_path, manifest_path)):
+        raise click.UsageError("nothing to write: pass --output, --glb, --heightmap or --manifest")
 
     surface_keys = (
         "max_segment", "marking_width", "stop_line_width", "dash_length", "dash_gap", "curb_height",
@@ -68,6 +70,8 @@ def build_command(input_path, blend, glb, heightmap_path, quiet, **kwargs):
 
     if heightmap_path:
         write_heightmap(result, heightmap_path)
+    if manifest_path:
+        write_manifest(result, manifest_path)
     if blend or glb:
         build_scene(result, blend=blend, glb=glb, verbose=not quiet)
 
@@ -114,3 +118,14 @@ def verify_command(scene_path, samples, tolerance):
     if report["worst_m"] > tolerance:
         raise SystemExit(f"ground rises {report['worst_m']} m above the road (tolerance {tolerance} m)")
     click.echo("OK: the ground stays under the carriageway")
+
+
+@main.command("classes")
+def classes_command():
+    """List the surface classes and their texturing policy."""
+    from .classes import CLASSES
+
+    width = max(len(name) for name in CLASSES)
+    for name, surface in CLASSES.items():
+        click.echo(f"{name:<{width}}  {surface.label:<13} {surface.paint:<9} "
+                   f"idx={surface.pass_index}  {surface.note}")

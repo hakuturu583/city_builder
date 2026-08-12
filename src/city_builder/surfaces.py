@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from . import lanelet as ll
+from .classes import MATERIALS  # noqa: F401  (re-exported; the registry owns it)
 from .frame import LocalFrame
 from .geometry import (
     Polygon,
@@ -50,17 +51,7 @@ Z_BIAS = {
 # intersection), so only they get the de-tie jitter.
 JITTERED = ("Roads", "Junctions")
 
-MATERIALS = {
-    "Roads": "asphalt",
-    "Junctions": "asphalt",
-    "Crosswalks": "asphalt",
-    "Walkways": "concrete",
-    "LaneMarkings": "marking",
-    "StopLines": "marking",
-    "CrosswalkStripes": "marking",
-    "Curbs": "concrete",
-    "Ground": "ground",
-}
+
 
 
 @dataclass

@@ -12,21 +12,27 @@ at all, so the ground is reconstructed from the road elevations and clipped to
 the kerb line (see :mod:`city_builder.ground`).
 """
 
-from .build import BuildResult, build_city, build_scene, write_heightmap
+from .build import BuildResult, build_city, build_scene, write_heightmap, write_manifest
+from .classes import CLASSES, GENERATE, PRESERVE, SurfaceClass
 from .frame import LocalFrame
 from .geometry import Mesh, Polygon, Ribbon
 from .ground import HeightMap
 from .surfaces import SurfaceOptions
 
 __all__ = [
+    "CLASSES",
+    "GENERATE",
+    "PRESERVE",
     "BuildResult",
     "HeightMap",
     "LocalFrame",
     "Mesh",
     "Polygon",
     "Ribbon",
+    "SurfaceClass",
     "SurfaceOptions",
     "build_city",
     "build_scene",
     "write_heightmap",
+    "write_manifest",
 ]

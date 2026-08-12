@@ -38,6 +38,43 @@ left and right boundary of every lane in 3D, so width, curvature and elevation
 are measured instead of inferred from highway tags, and intersections are real
 turning lanelets rather than a hull over the approaching roads.
 
+## Surface classes and the texturing policy
+
+Every object carries what it *is* and whether its colour may be regenerated —
+a diffusion pass must not reinvent the colour of a stop line, but asphalt and
+terrain are placeholders and repainting them is the point.
+
+```bash
+uv run city-builder classes                       # the registry
+uv run city-builder build ... --manifest out.json # …and per-build, as JSON
+```
+
+| group | label | policy |
+|---|---|---|
+| `LaneMarkings`, `StopLines`, `CrosswalkStripes` | `road_marking` | **preserve** |
+| `Roads`, `Junctions`, `Crosswalks` | `road` | generate |
+| `Walkways` | `sidewalk` | generate |
+| `Curbs` | `curb` | generate |
+| `Ground` | `terrain` | generate |
+
+The tags reach a consumer three ways, because pipelines read different things:
+
+* **object custom properties** — `cb_class`, `cb_label`, `cb_paint`,
+  `cb_pass_index`; kept in the `.blend` and exported to glTF node `extras`;
+* **`pass_index`** — for a Cycles `IndexOB` pass, i.e. a segmentation render;
+* **`_cb_mask`**, a flat per-corner colour attribute from a well-separated
+  palette (worst pairwise separation 0.33 in L1), so the class survives a
+  consumer that joins the objects. It exports as the glTF `_CB_MASK` custom
+  attribute rather than `COLOR_0`: a viewer multiplies `COLOR_0` into the base
+  colour, which would tint the whole asset with the mask palette.
+
+```python
+import bpy
+for obj in bpy.data.objects:
+    if obj.get("cb_paint") == "preserve":
+        ...  # lock this one before running the texturing pass
+```
+
 ## The ground
 
 A Lanelet2 map has no terrain — elevation exists only on the carriageway. The

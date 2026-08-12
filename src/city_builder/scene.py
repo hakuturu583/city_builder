@@ -11,8 +11,9 @@ from __future__ import annotations
 import os
 from collections.abc import Sequence
 
+from . import classes
+from .classes import SurfaceClass
 from .geometry import Mesh, Polygon, Ribbon, merge_meshes, polygon_to_mesh, ribbon_to_mesh
-from .surfaces import MATERIALS
 
 
 def _material(name: str, colour, roughness: float, specular: float | None = None):
@@ -81,7 +82,35 @@ def group_to_mesh(shapes: Sequence[object]) -> tuple[Mesh, int]:
     return merge_meshes(meshes), skipped
 
 
-def add_object(name: str, mesh: Mesh, material=None):
+def tag_object(obj, surface_class: SurfaceClass) -> None:
+    """Record what this surface is, and whether its colour may be regenerated.
+
+    Written three ways on purpose. Custom properties are the primary record and
+    survive into glTF ``extras``; ``pass_index`` drives a Cycles ``IndexOB``
+    pass for a segmentation render; and a colour attribute keeps the class on
+    the faces themselves, so it survives a consumer that joins the objects or
+    re-exports through a format with no object metadata.
+    """
+    obj["cb_class"] = surface_class.group
+    obj["cb_label"] = surface_class.label
+    obj["cb_paint"] = surface_class.paint
+    obj["cb_pass_index"] = surface_class.pass_index
+    obj.pass_index = surface_class.pass_index
+
+    mesh = obj.data
+    mesh["cb_class"] = surface_class.group
+    mesh["cb_paint"] = surface_class.paint
+
+    colour = (*surface_class.mask_colour, 1.0)
+    # Leading underscore on purpose: glTF treats "_"-prefixed attributes as
+    # application-specific, so a viewer ignores it. Exported as COLOR_0 it
+    # would be multiplied into the base colour and tint the whole asset.
+    attribute = mesh.color_attributes.new(name="_cb_mask", type="FLOAT_COLOR", domain="CORNER")
+    for datum in attribute.data:
+        datum.color = colour
+
+
+def add_object(name: str, mesh: Mesh, material=None, surface_class: SurfaceClass | None = None):
     """Create a Blender object from a mesh and link it into its collection."""
     import bpy
 
@@ -96,6 +125,8 @@ def add_object(name: str, mesh: Mesh, material=None):
     if material is not None:
         data.materials.append(material)
     ensure_collection(name).objects.link(obj)
+    if surface_class is not None:
+        tag_object(obj, surface_class)
     return obj
 
 
@@ -105,13 +136,15 @@ def build(groups: dict[str, Sequence[object]], *, verbose: bool = True) -> dict[
     objects = {}
     for name, shapes in groups.items():
         mesh, skipped = group_to_mesh(shapes)
-        obj = add_object(name, mesh, materials.get(MATERIALS.get(name, "asphalt")))
+        surface_class = classes.get(name)
+        obj = add_object(name, mesh, materials.get(surface_class.material), surface_class)
         if obj is None:
             continue
         objects[name] = obj
         if verbose:
             note = f", {skipped} degenerate face(s) skipped" if skipped else ""
-            print(f"[scene] {name}: {len(shapes)} shape(s) → {len(mesh.faces)} face(s){note}")
+            print(f"[scene] {name}: {len(shapes)} shape(s) → {len(mesh.faces)} face(s) "
+                  f"[{surface_class.label}/{surface_class.paint}]{note}")
     return objects
 
 
@@ -131,7 +164,14 @@ def export_glb(path: str) -> None:
     directory = os.path.dirname(os.path.abspath(path))
     if directory:
         os.makedirs(directory, exist_ok=True)
-    bpy.ops.export_scene.gltf(filepath=os.path.abspath(path), export_format="GLB", use_active_scene=True)
+    bpy.ops.export_scene.gltf(
+        filepath=os.path.abspath(path),
+        export_format="GLB",
+        use_active_scene=True,
+        export_extras=True,  # carries cb_class / cb_paint through to glTF extras
+        export_attributes=True,  # …and _cb_mask as the _CB_MASK custom attribute
+        export_all_vertex_colors=False,  # keep it out of COLOR_0, see tag_object
+    )
     print(f"[scene] wrote {path}")
 
 
