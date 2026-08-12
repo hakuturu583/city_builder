@@ -15,6 +15,7 @@ road, on the ground".
 
 from __future__ import annotations
 
+import math
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -34,8 +35,15 @@ class BuildingOptions:
     setback: float = 3.0  # gap between the kerb line and any wall
     target_lot_area: float = 900.0  # split until a lot is about this big
     min_lot_area: float = 120.0  # anything smaller is left as open ground
-    lot_margin: float = 1.5  # gap between neighbouring buildings
     split_jitter: float = 0.15  # 0 = split at the middle, 0.5 = anywhere
+
+    # Density. `coverage` is the planner's one: the share of a lot its building
+    # occupies, so the gap between neighbours falls out of the lot size rather
+    # than being fixed. `lot_margin` is a floor under that gap, and `vacancy`
+    # empties lots outright — car parks, yards, the plot nobody built on.
+    coverage: float = 0.6
+    lot_margin: float = 1.5  # minimum gap between neighbouring buildings
+    vacancy: float = 0.0  # 0 = build on every lot, 0.3 = leave a third empty
 
     min_height: float = 6.0
     max_height: float = 45.0
@@ -139,6 +147,28 @@ def split_lots(block, options: BuildingOptions, rng: random.Random) -> list:
     return lots or [block]
 
 
+def inset_to_coverage(lot, coverage: float, minimum_margin: float):
+    """Shrink a lot until its building covers ``coverage`` of it.
+
+    Insetting by a fixed margin makes density depend on lot size — the same
+    1.5 m gap leaves a 400 m2 lot 74 % built and a 2500 m2 lot 88 %. Solving for
+    the inset instead makes the ratio the parameter, which is how a planner
+    states it (建蔽率), and the gap between neighbours falls out of it.
+    """
+    target = lot.area * coverage
+    low, high = minimum_margin, math.sqrt(lot.area) / 2.0
+    if lot.buffer(-low).area <= target:
+        return lot.buffer(-low)  # the minimum gap already gives us that density
+
+    for _ in range(24):
+        middle = (low + high) / 2.0
+        if lot.buffer(-middle).area > target:
+            low = middle
+        else:
+            high = middle
+    return lot.buffer(-high)
+
+
 def footprints(
     road_union,
     bounds,
@@ -153,7 +183,9 @@ def footprints(
         for lot in split_lots(block, options, rng):
             if lot.area < options.min_lot_area:
                 continue
-            plot = lot.buffer(-options.lot_margin)
+            if options.vacancy and rng.random() < options.vacancy:
+                continue  # left as open ground
+            plot = inset_to_coverage(lot, options.coverage, options.lot_margin)
             parts = list(plot.geoms) if hasattr(plot, "geoms") else [plot]
             for part in parts:
                 if part.geom_type == "Polygon" and part.area >= options.min_lot_area * 0.5:

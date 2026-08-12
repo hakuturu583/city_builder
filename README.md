@@ -135,10 +135,39 @@ uv run city-builder build --input map.osm --output scene.blend \
     --buildings --setback 4 --lot-area 700 --max-height 60 --seed 7
 ```
 
-The buildable area is the ground minus **every paved surface** minus a setback;
-each block is cut into lots by repeatedly halving its long axis; each lot is
-inset and extruded onto the ground, with the height snapped to whole floors and
-biased taller on bigger plots. The layout is deterministic for a seed.
+The steps:
+
+1. **Buildable area** — the ground minus every paved surface, minus `--setback`.
+   Interior rings are kept, so a road enclosed by a block stays a hole.
+2. **Lots** — each block is cut by a line across its longest axis, a little
+   off-centre (`--split-jitter`), recursing until a lot is about `--lot-area`.
+   Below `--min-lot-area` it is left as open ground.
+3. **Vacancy** — `--vacancy` of the lots are dropped outright: car parks, yards,
+   the plot nobody built on.
+4. **Footprint** — each lot is inset until the building covers `--coverage` of
+   it, never closer than `--lot-margin` to its neighbour.
+5. **Extrusion** — base is the *lowest* heightmap sample under the footprint, so
+   a building on a slope cuts into the hill rather than floating; walls run
+   `--skirt` below that. The height is drawn per lot, snapped to whole floors
+   (`--floor-height`) and biased taller on bigger plots (`--tall-bias`).
+
+Deterministic for a `--seed`.
+
+Density has two independent knobs, and a third for grain:
+
+| | | Nishi-Shinjuku, share of open ground built |
+|---|---|---|
+| `--coverage 0.3` | how much of a lot is building | 28.8 % |
+| `--coverage 0.6` (default) | | 57.6 % |
+| `--coverage 0.8` | | 73.4 % |
+| `--vacancy 0.4` | lots left empty | 34.0 % (1148 buildings, from 1962) |
+| `--lot-area 300` | *grain*, not density | 55.4 % across 5692 buildings |
+| `--lot-area 2500` | | 57.6 % across 713 buildings |
+
+`--coverage` is the planner's ratio (建蔽率) rather than a fixed gap on purpose:
+a fixed 1.5 m margin leaves a 400 m² lot 74 % built and a 2500 m² lot 88 %, so
+density would drift with lot size. Solving for the inset keeps the ratio the
+parameter and lets the gap between neighbours fall out of it.
 
 Walls (`Buildings`) and roofs (`Roofs`) are separate objects because a
 texturing pass treats a facade and a roof completely differently. Both are

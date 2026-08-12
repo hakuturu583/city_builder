@@ -58,7 +58,12 @@ def main():
 @click.option("--setback", type=float, default=None, help="Gap between the kerb line and any wall (m)")
 @click.option("--lot-area", "target_lot_area", type=float, default=None, help="Split blocks to about this (m2)")
 @click.option("--min-lot-area", type=float, default=None)
-@click.option("--lot-margin", type=float, default=None, help="Gap between neighbouring buildings (m)")
+@click.option("--coverage", type=float, default=None,
+              help="Share of each lot its building occupies (0-1); the density knob")
+@click.option("--vacancy", type=float, default=None,
+              help="Share of lots left as open ground (0-1)")
+@click.option("--lot-margin", type=float, default=None,
+              help="Minimum gap between neighbouring buildings (m)")
 @click.option("--min-height", type=float, default=None)
 @click.option("--max-height", type=float, default=None)
 @click.option("--floor-height", type=float, default=None)
@@ -74,7 +79,7 @@ def build_command(input_path, blend, glb, heightmap_path, manifest_path, quiet, 
         raise click.UsageError("nothing to write: pass --output, --glb, --heightmap or --manifest")
 
     building_keys = (
-        "setback", "target_lot_area", "min_lot_area", "lot_margin",
+        "setback", "target_lot_area", "min_lot_area", "lot_margin", "coverage", "vacancy",
         "min_height", "max_height", "floor_height", "tall_bias", "max_buildings", "seed",
     )
     building_values = {k: kwargs.pop(k) for k in building_keys}

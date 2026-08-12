@@ -174,3 +174,51 @@ def test_generate_returns_nothing_when_there_is_no_room():
     covered = box(-10, -10, 210, 210)
     result = B.generate(hm, covered, B.BuildingOptions(), bounds=(0, 0, 200, 200))
     assert result["Buildings"] == []
+
+
+# --- density -----------------------------------------------------------------
+
+
+def test_coverage_sets_the_share_of_a_lot_that_is_built():
+    lot = box(0, 0, 40, 40)
+    for coverage in (0.3, 0.5, 0.8):
+        plot = B.inset_to_coverage(lot, coverage, minimum_margin=0.0)
+        assert plot.area / lot.area == pytest.approx(coverage, rel=0.02)
+
+
+def test_coverage_is_independent_of_lot_size():
+    """A fixed margin does not do this: it builds small lots less densely."""
+    small = B.inset_to_coverage(box(0, 0, 20, 20), 0.6, 0.0)
+    large = B.inset_to_coverage(box(0, 0, 50, 50), 0.6, 0.0)
+    assert small.area / 400 == pytest.approx(large.area / 2500, rel=0.02)
+
+
+def test_minimum_margin_wins_when_it_is_the_tighter_constraint():
+    lot = box(0, 0, 20, 20)
+    plot = B.inset_to_coverage(lot, coverage=0.99, minimum_margin=2.0)
+    assert plot.bounds == pytest.approx((2.0, 2.0, 18.0, 18.0))
+
+
+def test_density_responds_to_coverage_on_a_whole_layout():
+    roads = _cross_roads()
+    bounds = (0, 0, 200, 200)
+    sparse = B.footprints(roads, bounds, B.BuildingOptions(coverage=0.3, seed=11))
+    dense = B.footprints(roads, bounds, B.BuildingOptions(coverage=0.8, seed=11))
+    assert sum(p.area for p in dense) > sum(p.area for p in sparse) * 2
+    assert len(sparse) == len(dense), "coverage changes size, not the lot count"
+
+
+def test_vacancy_empties_lots_without_moving_the_rest():
+    roads = _cross_roads()
+    bounds = (0, 0, 200, 200)
+    full = B.footprints(roads, bounds, B.BuildingOptions(vacancy=0.0, seed=13))
+    half = B.footprints(roads, bounds, B.BuildingOptions(vacancy=0.5, seed=13))
+    assert 0 < len(half) < len(full)
+
+
+def test_vacancy_is_deterministic():
+    roads = _cross_roads()
+    bounds = (0, 0, 200, 200)
+    a = B.footprints(roads, bounds, B.BuildingOptions(vacancy=0.4, seed=21))
+    b = B.footprints(roads, bounds, B.BuildingOptions(vacancy=0.4, seed=21))
+    assert [p.area for p in a] == [p.area for p in b]
