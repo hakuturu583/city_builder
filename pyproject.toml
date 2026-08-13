@@ -15,6 +15,18 @@ dependencies = [
     "scipy>=1.10",
     "numpy>=1.24,<2",   # bpy links against the 1.x ABI
     "click>=8.0",
+    "pillow>=10.0",  # writing tile images; tiny, and the procedural path needs it too
+]
+
+[project.optional-dependencies]
+# Diffusion-generated textures. GPU-only, and imported lazily so the geometry
+# half of the package stays fast to import and testable without any of it.
+texture = [
+    "torch>=2.1",
+    "diffusers>=0.30",
+    "transformers>=4.40",
+    "accelerate>=0.30",
+    "safetensors>=0.4",
 ]
 
 [project.scripts]

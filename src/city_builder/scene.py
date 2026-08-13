@@ -16,12 +16,9 @@ from .classes import SurfaceClass
 from .geometry import Mesh, Polygon, Ribbon, merge_meshes, polygon_to_mesh, ribbon_to_mesh
 
 
-def _material(name: str, colour, roughness: float, specular: float | None = None):
+def _material_nodes(name: str):
+    """A fresh Principled material, wired to its output."""
     import bpy
-
-    existing = bpy.data.materials.get(name)
-    if existing is not None:
-        return existing
 
     mat = bpy.data.materials.new(name=name)
     mat.use_nodes = True
@@ -31,6 +28,17 @@ def _material(name: str, colour, roughness: float, specular: float | None = None
     bsdf = nodes.new("ShaderNodeBsdfPrincipled")
     output.location = (400, 0)
     links.new(bsdf.outputs["BSDF"], output.inputs["Surface"])
+    return mat, nodes, links, bsdf
+
+
+def _material(name: str, colour, roughness: float, specular: float | None = None):
+    import bpy
+
+    existing = bpy.data.materials.get(name)
+    if existing is not None:
+        return existing
+
+    mat, _nodes, _links, bsdf = _material_nodes(name)
     bsdf.inputs["Base Color"].default_value = (*colour, 1.0)
     bsdf.inputs["Roughness"].default_value = roughness
     if specular is not None and "Specular IOR Level" in bsdf.inputs:
@@ -112,6 +120,36 @@ def tag_object(obj, surface_class: SurfaceClass) -> None:
         datum.color = colour
 
 
+def uv_from_xy(obj, tile_metres: float) -> None:
+    """Planar UVs at a metric scale, so a tile repeats every ``tile_metres``.
+
+    A generated tile is only useful if its size on the ground is known, and a
+    real UV layer (rather than a procedural coordinate node) is also the only
+    form that survives a glTF export.
+    """
+    mesh = obj.data
+    layer = mesh.uv_layers.get("UVMap") or mesh.uv_layers.new(name="UVMap")
+    scale = 1.0 / max(tile_metres, 1e-6)
+    for loop in mesh.loops:
+        x, y, _ = mesh.vertices[loop.vertex_index].co
+        layer.data[loop.index].uv = (x * scale, y * scale)
+
+
+def tiled_material(name: str, image_path: str, *, roughness: float = 0.95):
+    """A material that repeats an image across the UVs it is given."""
+    import bpy
+
+    mat, nodes, links, bsdf = _material_nodes(name)
+    bsdf.inputs["Roughness"].default_value = roughness
+
+    texture = nodes.new("ShaderNodeTexImage")
+    texture.location = (-400, 0)
+    texture.image = bpy.data.images.load(os.path.abspath(image_path))
+    texture.extension = "REPEAT"
+    links.new(texture.outputs["Color"], bsdf.inputs["Base Color"])
+    return mat
+
+
 def add_object(name: str, mesh: Mesh, material=None, surface_class: SurfaceClass | None = None):
     """Create a Blender object from a mesh and link it into its collection."""
     import bpy
@@ -130,6 +168,15 @@ def add_object(name: str, mesh: Mesh, material=None, surface_class: SurfaceClass
     if surface_class is not None:
         tag_object(obj, surface_class)
     return obj
+
+
+def apply_tiled_texture(obj, image_path: str, tile_metres: float, *, name: str | None = None):
+    """Give an object a repeating image material at a known metric scale."""
+    material = tiled_material(name or f"{obj.name}Tiled", image_path)
+    obj.data.materials.clear()
+    obj.data.materials.append(material)
+    uv_from_xy(obj, tile_metres)
+    return material
 
 
 def build(groups: dict[str, Sequence[object]], *, verbose: bool = True) -> dict[str, object]:

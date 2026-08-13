@@ -174,10 +174,24 @@ def write_heightmap(result: BuildResult, path: str) -> None:
 
 
 def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | None = None,
+                ground_texture: str | None = None, tile_metres: float = 12.0,
                 verbose: bool = True) -> None:
-    """Build the result into Blender and export it."""
+    """Build the result into Blender and export it.
+
+    ``ground_texture`` is a tile image to repeat across the ground. Only the
+    ground: every lanelet-derived surface keeps the material it was built with,
+    because the map already says what those look like.
+    """
     scene.clear_scene()
-    scene.build(result.groups, verbose=verbose)
+    objects = scene.build(result.groups, verbose=verbose)
+
+    if ground_texture:
+        ground = objects.get("Ground")
+        if ground is None:
+            raise RuntimeError("no Ground object to texture; build with ground=True")
+        scene.apply_tiled_texture(ground, ground_texture, tile_metres)
+        if verbose:
+            print(f"[scene] Ground: tiled {os.path.basename(ground_texture)} every {tile_metres:g} m")
     if blend:
         scene.save(blend)
     if glb:

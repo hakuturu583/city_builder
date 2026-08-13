@@ -70,8 +70,12 @@ def main():
 @click.option("--tall-bias", type=float, default=None, help="0 = every block low, 1 = every block tall")
 @click.option("--max-buildings", type=int, default=None)
 @click.option("--seed", type=int, default=None, help="Building layout is deterministic for a given seed")
+@click.option("--ground-texture", default=None,
+              help="Tile image to repeat across the ground (see `city-builder tile`)")
+@click.option("--tile-metres", type=float, default=12.0, help="How far one tile spans")
 @click.option("--quiet", is_flag=True)
-def build_command(input_path, blend, glb, heightmap_path, manifest_path, quiet, **kwargs):
+def build_command(input_path, blend, glb, heightmap_path, manifest_path, ground_texture,
+                  tile_metres, quiet, **kwargs):
     """Build a scene from a Lanelet2 map."""
     from .build import build_city, build_scene, options_from_kwargs, write_heightmap, write_manifest
 
@@ -101,7 +105,8 @@ def build_command(input_path, blend, glb, heightmap_path, manifest_path, quiet, 
     if manifest_path:
         write_manifest(result, manifest_path)
     if blend or glb:
-        build_scene(result, blend=blend, glb=glb, verbose=not quiet)
+        build_scene(result, blend=blend, glb=glb, ground_texture=ground_texture,
+                    tile_metres=tile_metres, verbose=not quiet)
 
 
 @main.command("inspect")
@@ -157,3 +162,29 @@ def classes_command():
     for name, surface in CLASSES.items():
         click.echo(f"{name:<{width}}  {surface.label:<13} {surface.paint:<9} "
                    f"idx={surface.pass_index}  {surface.note}")
+
+
+@main.command("tile")
+@click.option("--prompt", default="seamless top-down asphalt and dirt ground texture, "
+                                  "urban street surface, uniform lighting, photographic")
+@click.option("--output", "output_path", required=True, help="Where to write the tile PNG")
+@click.option("--size", type=int, default=1024)
+@click.option("--steps", type=int, default=24)
+@click.option("--seed", type=int, default=0)
+@click.option("--model", default=None, help="Diffusion model id [default: SDXL base]")
+@click.option("--vram-budget-gb", type=float, default=6.0,
+              help="Hard cap, so a shared card keeps working for its other tenant")
+@click.option("--diffusion/--procedural", default=True,
+              help="--procedural makes a tileable noise texture with no GPU at all")
+def tile_command(prompt, output_path, size, steps, seed, model, vram_budget_gb, diffusion):
+    """Generate one tileable ground texture."""
+    from .texture import TextureOptions, make_tile, seam_error
+
+    options = TextureOptions(size=size, steps=steps, seed=seed, vram_budget_gb=vram_budget_gb,
+                             diffusion=diffusion)
+    if model:
+        options.model = model
+
+    tile = make_tile(prompt, options, path=output_path)
+    click.echo(f"wrote {output_path}  seam_error={seam_error(tile):.2f} "
+               f"(1.0 = the wrap looks like the texture's own variation)")

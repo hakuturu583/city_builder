@@ -191,6 +191,44 @@ Two bugs worth knowing about, since both produced plausible-looking output:
   a region is a hole, and taking only the exterior handed it back as buildable:
   449 of 2481 plots ended up on the road.
 
+## Textures
+
+Roads and markings come from the map and are left exactly as built — that is
+what `paint = preserve` in the class registry means, and the texturing path
+filters on it. What has no authored colour is the ground (and, later, the
+buildings).
+
+A 1.2 km² ground mesh cannot be painted the way a model paints an *object*:
+render a few views, diffuse, project back, and you get about half a metre per
+texel. A large, statistically uniform surface wants a small **tileable** image
+repeated at a metric scale.
+
+```bash
+# one tile, wrapping, from SDXL — or --procedural for no GPU at all
+uv run city-builder tile --output ground.png --size 1024 --vram-budget-gb 6 \
+    --prompt "seamless top-down photograph of urban asphalt with fine gravel"
+
+uv run city-builder build --input map.osm --output scene.blend \
+    --buildings --ground-texture ground.png --tile-metres 10
+```
+
+Every convolution in the UNet and VAE is switched to circular padding so the
+result wraps, and the wrap is **measured rather than assumed**: `seam_error`
+compares the step across the wrap with the steps inside the texture, so 1.0
+means the seam looks like the texture's own variation. The SDXL tile above
+scores 0.97; the procedural fall-back — noise filtered in the frequency domain,
+periodic by construction — scores 0.99.
+
+`--vram-budget-gb` caps the process and the pipeline runs with model CPU
+offload, VAE tiling and attention slicing, so this stays usable on a card
+shared with something else.
+
+Install the extra for the diffusion path; the geometry half never imports it:
+
+```bash
+uv sync --extra texture
+```
+
 ## Placing other things on this ground
 
 `--heightmap out.json` writes the grid plus the scene anchor, so a building or
