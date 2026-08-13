@@ -28,6 +28,7 @@ texture = [
     "accelerate>=0.30",
     "safetensors>=0.4",
     "peft>=0.11",  # diffusers needs it to load the LCM LoRA
+    "huggingface-hub>=0.23",  # `city-builder models` reads and fills the cache
 ]
 
 [project.scripts]

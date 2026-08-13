@@ -127,6 +127,7 @@ dependencies = [
 texture = [
     { name = "accelerate" },
     { name = "diffusers" },
+    { name = "huggingface-hub" },
     { name = "peft" },
     { name = "safetensors" },
     { name = "torch" },
@@ -145,6 +146,7 @@ requires-dist = [
     { name = "bpy", specifier = ">=4.2,<6" },
     { name = "click", specifier = ">=8.0" },
     { name = "diffusers", marker = "extra == 'texture'", specifier = ">=0.30" },
+    { name = "huggingface-hub", marker = "extra == 'texture'", specifier = ">=0.23" },
     { name = "numpy", specifier = ">=1.24,<2" },
     { name = "peft", marker = "extra == 'texture'", specifier = ">=0.11" },
     { name = "pillow", specifier = ">=10.0" },

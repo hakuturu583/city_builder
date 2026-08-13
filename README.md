@@ -287,6 +287,37 @@ photographic, they are *correct*, which is what lets the UV, the texel density,
 the material slots and the export be finished and tested on a machine with no
 card in it — and what gives a generated sheet something to be compared against.
 
+### Model weights
+
+```bash
+uv sync --extra texture
+uv run city-builder models                        # what is here, and where
+uv run city-builder models --family sd15 --download
+```
+
+The report reads the Hugging Face cache and nothing else — no model is loaded
+and no CUDA context is created, so it is safe to run while the card is busy.
+It prints whether each repo is cached at half or full precision, because
+passing `variant="fp16"` when only the full-precision files are there fails
+outright.
+
+Two stacks are declared, because the choice between them is a measurement
+rather than a preference:
+
+| | resolution | LCM + ControlNet together |
+|---|---|---|
+| `sd15` | 512×768 | well-trodden — Pro-DG conditions facades exactly this way |
+| `sdxl` | 768×1024 | reportedly weakens each other's control |
+
+`floor_alignment` is what settles it. A facade sheet is 12 m of wall rather
+than a poster, so at 128 px per floor SD1.5's resolution is already about
+2.7 cm per texel; the smaller model also survives sharing the card.
+
+`--download` fetches fp16 safetensors only. These repos ship the same tensors
+three or four ways over — `.bin`, full-precision `.safetensors`, and on the
+SD1.5 base two single-file checkpoints as well — so a bare `*.safetensors`
+costs several times what is needed to run them.
+
 ## Placing other things on this ground
 
 `--heightmap out.json` writes the grid plus the scene anchor, so a building or

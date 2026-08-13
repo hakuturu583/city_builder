@@ -195,6 +195,43 @@ def tile_command(prompt, output_path, size, steps, seed, model, vram_budget_gb, 
                f"(1.0 = the wrap looks like the texture's own variation)")
 
 
+@main.command("models")
+@click.option("--family", type=click.Choice(["sd15", "sdxl", "all"]), default="all",
+              help="Which stack to look at")
+@click.option("--download", "do_download", is_flag=True, help="Fetch whatever is missing")
+def models_command(family, do_download):
+    """What the texturing path needs, and whether it is on this machine.
+
+    Reads the Hugging Face cache and nothing else — no model is loaded, no CUDA
+    context is created, so this is safe to run while the card is busy.
+    """
+    from .weights import cache_root, download, missing, report, size_on_disk, variant
+
+    click.echo(f"cache: {cache_root()}")
+
+    if do_download:
+        wanted = missing(family)
+        if not wanted:
+            click.echo("nothing missing")
+        for weight in wanted:
+            click.echo(f"fetching {weight.repo} ...")
+            download(weight)
+
+    width = max(len(weight.key) for weight, _ in report(family))
+    absent = 0
+    for weight, path in report(family):
+        if path:
+            mark = "ok     "
+            detail = f"{variant(weight) or 'fp32':>4}  {size_on_disk(weight) / 1e9:5.1f} GB"
+        else:
+            mark, detail, absent = "MISSING", "  run with --download", absent + 1
+        click.echo(f"{mark}  {weight.key:<{width}}  {detail:>21}  {weight.note}")
+
+    if absent:
+        click.echo(f"\n{absent} missing")
+        raise SystemExit(1)
+
+
 def _floor_spec(text: str) -> list[int]:
     """``"3-12"`` or ``"4,6,9"`` or ``"3-6,10"`` into a list of floor counts."""
     counts: list[int] = []
