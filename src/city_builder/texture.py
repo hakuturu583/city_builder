@@ -169,3 +169,151 @@ def make_tile(prompt: str, options: TextureOptions | None = None, *, path: str |
     if path:
         save_tile(tile, path)
     return tile
+
+
+# ---------------------------------------------------------------------------
+# Facade sheets
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class FacadeOptions:
+    """A family of facade textures: alike, but not the same.
+
+    Two knobs, deliberately: the prompt fixes what kind of building this is,
+    and ``variation`` says how far each sheet may drift from the family's
+    shared starting point. Sampling every sheet from independent noise gives a
+    street with no character; sampling them all from one latent gives a street
+    of clones.
+    """
+
+    count: int = 64
+    width: int = 768
+    height: int = 1024  # taller than wide: a facade is not square
+    steps: int = 6  # LCM territory
+    guidance: float = 1.5  # LCM wants this low
+    seed: int = 0
+    variation: float = 0.45  # 0 = identical siblings, 1 = unrelated strangers
+
+    model: str = DEFAULT_MODEL
+    lcm_lora: str = "latent-consistency/lcm-lora-sdxl"
+    batch: int = 1
+    vram_budget_gb: float = 6.0
+
+
+def _tile_horizontally(module) -> None:
+    """Circular padding across the width only.
+
+    A wall wraps around a building, so the texture has to tile left-to-right.
+    It must *not* tile top-to-bottom: the bottom of a facade is a shopfront and
+    the top is a roofline, and joining them is exactly the artefact to avoid.
+    ``padding_mode='circular'`` applies to both axes, so the padding is done by
+    hand instead.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    for layer in module.modules():
+        if not isinstance(layer, torch.nn.Conv2d) or layer.padding == (0, 0):
+            continue
+        pad_h, pad_w = layer.padding if isinstance(layer.padding, tuple) else (layer.padding,) * 2
+        layer.padding = (0, 0)
+
+        def forward(self, x, _pad_h=pad_h, _pad_w=pad_w):
+            x = F.pad(x, (_pad_w, _pad_w, 0, 0), mode="circular")
+            x = F.pad(x, (0, 0, _pad_h, _pad_h), mode="replicate")
+            return self._conv_forward(x, self.weight, self.bias)
+
+        layer.forward = forward.__get__(layer, torch.nn.Conv2d)
+
+
+def _family_latents(shape, count: int, variation: float, seed: int, device, dtype):
+    """``count`` latents drawn around one shared starting point.
+
+    Spherical interpolation between the family latent and fresh noise, so every
+    sheet keeps the norm the sampler expects while sitting a controlled
+    distance from its siblings.
+    """
+    import torch
+
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    base = torch.randn(shape, generator=generator)
+    angle = float(variation) * (torch.pi / 2)
+
+    out = []
+    for _ in range(count):
+        noise = torch.randn(shape, generator=generator)
+        latent = base * torch.cos(torch.tensor(angle)) + noise * torch.sin(torch.tensor(angle))
+        out.append(latent.to(device=device, dtype=dtype))
+    return out
+
+
+def facade_sheets(prompt: str, options: FacadeOptions | None = None, *, negative_prompt: str = ""):
+    """Generate a family of facade textures with an LCM-distilled sampler.
+
+    LCM turns 25 sampling steps into ~6, which is what makes "one sheet per
+    building" affordable at all. It does not help the multiview texturing
+    models — those UNets are custom and nobody has distilled them — which is
+    why this generates 2-D sheets for UVs we control rather than painting the
+    meshes.
+    """
+    import torch
+    from diffusers import AutoPipelineForText2Image, LCMScheduler
+
+    options = options or FacadeOptions()
+    # Explicit padding allocates a copy of every convolution input, so the
+    # horizontal-wrap trick costs memory the allocator has to find somewhere.
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+    if options.vram_budget_gb > 0 and torch.cuda.is_available():
+        total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        torch.cuda.set_per_process_memory_fraction(min(1.0, options.vram_budget_gb / total), 0)
+
+    pipeline = AutoPipelineForText2Image.from_pretrained(
+        options.model, torch_dtype=torch.float16, variant="fp16", use_safetensors=True
+    )
+    pipeline.scheduler = LCMScheduler.from_config(pipeline.scheduler.config)
+    pipeline.load_lora_weights(options.lcm_lora)
+    pipeline.fuse_lora()
+    pipeline.set_progress_bar_config(disable=True)
+    pipeline.enable_model_cpu_offload()
+    pipeline.enable_vae_tiling()
+    pipeline.enable_attention_slicing()  # the card is shared; trade speed for headroom
+
+    _tile_horizontally(pipeline.unet)
+    _tile_horizontally(pipeline.vae)
+
+    factor = pipeline.vae_scale_factor
+    shape = (1, pipeline.unet.config.in_channels, options.height // factor, options.width // factor)
+    latents = _family_latents(shape, options.count, options.variation, options.seed,
+                              pipeline._execution_device, torch.float16)
+
+    sheets = []
+    for start in range(0, options.count, options.batch):
+        chunk = latents[start:start + options.batch]
+        images = pipeline(
+            prompt=[prompt] * len(chunk),
+            negative_prompt=[negative_prompt or "people, cars, text, watermark, blurry"] * len(chunk),
+            width=options.width,
+            height=options.height,
+            num_inference_steps=options.steps,
+            guidance_scale=options.guidance,
+            latents=torch.cat(chunk, dim=0),
+        ).images
+        sheets.extend(np.asarray(image.convert("RGB")) for image in images)
+
+    del pipeline
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return sheets
+
+
+def seam_error_axis(tile: np.ndarray, axis: int) -> float:
+    """:func:`seam_error` for one axis: 0 = the vertical wrap, 1 = horizontal."""
+    image = tile.astype(np.float32)
+    if axis == 0:
+        wrap = np.abs(image[0] - image[-1]).mean()
+    else:
+        wrap = np.abs(image[:, 0] - image[:, -1]).mean()
+    inner = np.abs(np.diff(image, axis=axis)).mean()
+    return float(wrap / (inner + 1e-9))

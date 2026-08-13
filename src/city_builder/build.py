@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from . import buildings as buildings_module
-from . import classes, lanelet, scene
+from . import classes, facade_layout, lanelet, scene
 from . import ground as ground_module
 from .buildings import BuildingOptions
 from .frame import LocalFrame
@@ -23,6 +23,9 @@ class BuildResult:
     elevated: set[int]
     z_datum: float
     stats: dict[str, Any] = field(default_factory=dict)
+    # One record per generated building, in the order of ``groups["Buildings"]``.
+    # Carries the floor count, which decides which facade sheet it may wear.
+    plots: list[dict[str, Any]] = field(default_factory=list)
 
 
 def build_city(
@@ -100,6 +103,7 @@ def build_city(
             print(f"[build] ground: {heightmap.nx}x{heightmap.ny} @ {cell:.1f} m, "
                   f"{measured:.1f}% of cells measured, {len(mesh.faces)} faces")
 
+    plots: list[dict[str, Any]] = []
     if buildings:
         if heightmap is None:
             raise RuntimeError("buildings need the ground; do not pass ground=False with buildings=True")
@@ -108,13 +112,18 @@ def build_city(
         if built["Buildings"]:
             groups["Buildings"] = built["Buildings"]
             groups["Roofs"] = built["Roofs"]
+        plots = built["plots"]
         stats["buildings"] = len(built["Buildings"])
         if verbose:
-            heights = [p["height"] for p in built["plots"]]
+            heights = [p["height"] for p in plots]
             span = f"{min(heights):.0f}-{max(heights):.0f} m" if heights else "none"
+            floors = sorted({p["floors"] for p in plots})
             print(f"[build] buildings: {len(built['Buildings'])} on the open ground, {span} tall")
+            if floors:
+                print(f"[build] floor counts: {floors[0]}-{floors[-1]} "
+                      f"({len(floors)} distinct, one facade sheet family each)")
 
-    return BuildResult(frame, groups, heightmap, elevated, datum, stats)
+    return BuildResult(frame, groups, heightmap, elevated, datum, stats, plots)
 
 
 def write_manifest(result: BuildResult, path: str) -> None:
@@ -175,7 +184,7 @@ def write_heightmap(result: BuildResult, path: str) -> None:
 
 def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | None = None,
                 ground_texture: str | None = None, tile_metres: float = 12.0,
-                verbose: bool = True) -> None:
+                facade_dir: str | None = None, verbose: bool = True) -> None:
     """Build the result into Blender and export it.
 
     ``ground_texture`` is a tile image to repeat across the ground. Only the
@@ -184,6 +193,20 @@ def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | Non
     """
     scene.clear_scene()
     objects = scene.build(result.groups, verbose=verbose)
+
+    if facade_dir:
+        sheets = sorted(
+            os.path.join(facade_dir, f) for f in os.listdir(facade_dir) if f.endswith(".png")
+        )
+        walls = objects.get("Buildings")
+        if sheets and walls is not None:
+            counts = scene.build.face_counts["Buildings"]
+            floors = [plot["floors"] for plot in result.plots] or None
+            scene.apply_facade_sheets(walls, sheets, counts, floors)
+            if verbose:
+                matched = sum(1 for path in sheets if facade_layout.sheet_floors(path) is not None)
+                print(f"[scene] Buildings: {len(sheets)} facade sheet(s) "
+                      f"({matched} floor-matched) across {len(counts)} buildings")
 
     if ground_texture:
         ground = objects.get("Ground")

@@ -222,3 +222,61 @@ def test_vacancy_is_deterministic():
     a = B.footprints(roads, bounds, B.BuildingOptions(vacancy=0.4, seed=21))
     b = B.footprints(roads, bounds, B.BuildingOptions(vacancy=0.4, seed=21))
     assert [p.area for p in a] == [p.area for p in b]
+
+
+# ---------------------------------------------------------------------------
+# Facade UVs
+# ---------------------------------------------------------------------------
+
+
+def test_wall_uvs_run_from_the_pavement_to_the_roofline():
+    """V=0 is the ground and V=1 the top, so a sheet spans the building exactly.
+
+    The skirt is the one thing below zero: it is buried in the hillside and
+    whatever the sheet does down there is never seen.
+    """
+    walls, _ = B.extrude(box(0, 0, 12, 12), base_z=0.0, height=20.0, skirt=1.0)
+    v = [uv[1] for uv in walls.uvs]
+    assert max(v) == pytest.approx(1.0)
+    assert min(v) == pytest.approx(-1.0 / 20.0)
+
+
+def test_a_whole_number_of_sheets_goes_round_a_building():
+    """Otherwise the last repeat is cut off mid-window at the closing corner."""
+    for width, height in ((10, 20), (7, 7), (23, 4), (12, 12)):
+        walls, _ = B.extrude(box(0, 0, width, height), base_z=0.0, height=15.0,
+                             skirt=1.0, facade_width=12.0)
+        u_max = max(uv[0] for uv in walls.uvs)
+        assert u_max == pytest.approx(round(u_max)), f"{width}x{height} wraps mid-sheet"
+        assert u_max >= 1.0
+
+
+def test_the_stretch_needed_to_make_it_wrap_is_small():
+    """The wrap is bought by scaling the sheet, so the price has to stay invisible."""
+    for width, height in ((10, 20), (7, 7), (23, 4), (13, 9)):
+        perimeter = 2 * (width + height)
+        walls, _ = B.extrude(box(0, 0, width, height), base_z=0.0, height=15.0,
+                             facade_width=12.0)
+        metres_per_sheet = perimeter / max(uv[0] for uv in walls.uvs)
+        assert abs(metres_per_sheet - 12.0) / 12.0 < 0.25
+
+
+def test_a_courtyard_wall_wraps_on_its_own_ring():
+    footprint = ShapelyPolygon(
+        [(0, 0), (40, 0), (40, 40), (0, 40)],
+        [[(10, 10), (10, 30), (30, 30), (30, 10)]],
+    )
+    walls, _ = B.extrude(footprint, base_z=0.0, height=12.0, facade_width=12.0)
+    # Each ring restarts at U=0, so the maximum is the outer ring's whole count.
+    u_max = max(uv[0] for uv in walls.uvs)
+    assert u_max == pytest.approx(round(u_max))
+
+
+def test_every_building_records_the_floor_count_its_sheet_needs():
+    heightmap = _flat_heightmap()
+    built = B.generate(heightmap, _cross_roads(),
+                       B.BuildingOptions(seed=5, floor_height=3.5))
+    assert built["plots"]
+    for plot in built["plots"]:
+        assert plot["floors"] == pytest.approx(plot["height"] / 3.5, abs=0.01)
+        assert plot["floors"] >= 1

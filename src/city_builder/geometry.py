@@ -57,10 +57,11 @@ class Polygon:
 
 @dataclass
 class Mesh:
-    """A triangle/quad soup in scene coordinates."""
+    """A triangle/quad soup in scene coordinates, optionally with UVs."""
 
     vertices: list[tuple[float, float, float]]
     faces: list[list[int]]
+    uvs: list[tuple[float, float]] | None = None  # per vertex, when authored
 
     def __bool__(self) -> bool:
         return bool(self.faces)
@@ -332,14 +333,19 @@ def polygon_to_mesh(polygon: Polygon) -> tuple[Mesh, int]:
 
 
 def merge_meshes(meshes: Sequence[Mesh]) -> Mesh:
-    """Concatenate meshes, re-basing face indices."""
+    """Concatenate meshes, re-basing face indices and carrying UVs along."""
     vertices: list[tuple[float, float, float]] = []
     faces: list[list[int]] = []
+    uvs: list[tuple[float, float]] = []
+    authored = any(mesh.uvs for mesh in meshes)
+
     for mesh in meshes:
         offset = len(vertices)
         vertices.extend(mesh.vertices)
         faces.extend([[i + offset for i in face] for face in mesh.faces])
-    return Mesh(vertices, faces)
+        if authored:
+            uvs.extend(mesh.uvs or [(0.0, 0.0)] * len(mesh.vertices))
+    return Mesh(vertices, faces, uvs if authored else None)
 
 
 def signed_area_xy(ring: Sequence[Sequence[float]]) -> float:

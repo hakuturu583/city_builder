@@ -50,6 +50,7 @@ class BuildingOptions:
     floor_height: float = 3.5  # heights snap to whole floors
     tall_bias: float = 0.35  # 0 = every block low, 1 = every block tall
 
+    facade_width: float = 12.0  # how much wall one sheet spans horizontally
     skirt: float = 1.0  # how far the walls run below the ground
     max_buildings: int = 0  # 0 = unlimited
     seed: int = 0
@@ -229,11 +230,23 @@ def _triangulate(polygon) -> list[list[tuple[float, float]]]:
     ]
 
 
-def extrude(polygon, base_z: float, height: float, *, skirt: float = 1.0) -> tuple[Mesh, Mesh]:
-    """Walls and roof for one footprint.
+def extrude(polygon, base_z: float, height: float, *, skirt: float = 1.0,
+            facade_width: float = 12.0, roof_tile: float = 12.0) -> tuple[Mesh, Mesh]:
+    """Walls and roof for one footprint, with UVs.
 
     The walls start ``skirt`` below the base so a building on a slope has no gap
     under it — the ground is a coarse surface and the footprint is flat.
+
+    The UVs are the reason to generate buildings rather than inherit them: U
+    runs along the wall in metres, so a sheet repeats about every
+    ``facade_width`` and reads at the same scale on every building; V runs 0 at
+    the pavement to 1 at the roofline, so a sheet's shopfront lands on the
+    ground floor and its roofline at the top whatever the building's height.
+
+    That V normalisation is what makes a sheet belong to a *floor count* rather
+    than to a height: stretched over a building with a different number of
+    storeys, its windows stop lining up with anything. See
+    :mod:`city_builder.facade_layout`.
     """
     exterior = list(polygon.exterior.coords)[:-1]
     if len(exterior) < 3:
@@ -254,7 +267,18 @@ def extrude(polygon, base_z: float, height: float, *, skirt: float = 1.0) -> tup
 
     wall_vertices: list[tuple[float, float, float]] = []
     wall_faces: list[list[int]] = []
+    wall_uvs: list[tuple[float, float]] = []
     for ring in rings:
+        # Stretch the sheet slightly so a whole number of them goes round the
+        # ring. Dividing by ``facade_width`` flat leaves the last repeat cut off
+        # mid-window at the corner where the ring closes; absorbing the
+        # remainder into the scale — at most a few per cent — makes the wrap
+        # exact and puts no seam anywhere.
+        perimeter = sum(math.dist(ring[i], ring[(i + 1) % len(ring)]) for i in range(len(ring)))
+        repeats = max(1, round(perimeter / facade_width))
+        u_scale = repeats / perimeter if perimeter > 1e-9 else 0.0
+
+        run = 0.0  # metres travelled along this ring, for U
         for i, (x, y) in enumerate(ring):
             nx, ny = ring[(i + 1) % len(ring)]
             base = len(wall_vertices)
@@ -262,6 +286,12 @@ def extrude(polygon, base_z: float, height: float, *, skirt: float = 1.0) -> tup
                 (x, y, bottom_z), (nx, ny, bottom_z), (nx, ny, top_z), (x, y, top_z),
             ])
             wall_faces.append([base, base + 1, base + 2, base + 3])
+
+            span = math.dist((x, y), (nx, ny))
+            u0, u1 = run * u_scale, (run + span) * u_scale
+            v_bottom = -skirt / height  # the buried part continues below V=0
+            wall_uvs.extend([(u0, v_bottom), (u1, v_bottom), (u1, 1.0), (u0, 1.0)])
+            run += span
 
     roof_vertices: list[tuple[float, float, float]] = []
     roof_faces: list[list[int]] = []
@@ -278,7 +308,8 @@ def extrude(polygon, base_z: float, height: float, *, skirt: float = 1.0) -> tup
         if len(set(face)) == 3:
             roof_faces.append(face)
 
-    return Mesh(wall_vertices, wall_faces), Mesh(roof_vertices, roof_faces)
+    roof_uvs = [(x / roof_tile, y / roof_tile) for x, y, _ in roof_vertices]
+    return Mesh(wall_vertices, wall_faces, wall_uvs), Mesh(roof_vertices, roof_faces, roof_uvs)
 
 
 def base_height(polygon, heightmap: HeightMap) -> float:
@@ -325,7 +356,8 @@ def generate(
     for plot in plots:
         base = base_height(plot, heightmap)
         height = pick_height(plot.area, options, rng)
-        wall_mesh, roof_mesh = extrude(plot, base, height, skirt=options.skirt)
+        wall_mesh, roof_mesh = extrude(plot, base, height, skirt=options.skirt,
+                                      facade_width=options.facade_width)
         if not wall_mesh.faces or not roof_mesh.faces:
             continue
         walls.append(wall_mesh)
@@ -333,6 +365,10 @@ def generate(
         records.append({
             "area": round(plot.area, 2),
             "height": round(height, 2),
+            # The facade UV normalises V over the height, so a sheet belongs to
+            # a floor count rather than to a height. Recorded per building
+            # because that is what decides which sheet it may wear.
+            "floors": max(1, round(height / options.floor_height)),
             "base_z": round(base, 3),
             "centroid": [round(plot.centroid.x, 3), round(plot.centroid.y, 3)],
         })

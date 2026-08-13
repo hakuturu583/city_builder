@@ -27,6 +27,7 @@ texture = [
     "transformers>=4.40",
     "accelerate>=0.30",
     "safetensors>=0.4",
+    "peft>=0.11",  # diffusers needs it to load the LCM LoRA
 ]
 
 [project.scripts]

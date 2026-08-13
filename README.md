@@ -229,6 +229,64 @@ Install the extra for the diffusion path; the geometry half never imports it:
 uv sync --extra texture
 ```
 
+## Facades
+
+A texturing model is bad at exactly the thing a facade is made of: a regular
+grid of windows on evenly spaced storeys. Asked in words for "six floors", it
+returns a wall with windows somewhere. That is not a weak prompt, it is what
+samplers do to periodic structure.
+
+We do not have to ask. These buildings are *generated*, so their floor count is
+known rather than guessed — every height snaps to whole floors — and a wall is
+flat, so its UV layout and its front elevation are the same picture. Rasterise
+the structure, and a model paints materials onto it instead of inventing an
+architecture.
+
+```bash
+# sheets and their control images, from the geometry alone — no model, no GPU
+uv run city-builder layouts --output sheets/ --floors 2-8 --facade-width 12
+
+uv run city-builder build --input map.osm --output scene.blend \
+    --buildings --facade-dir sheets/ --facade-width 12
+```
+
+`build` prints the floor counts it produced (`floor counts: 2-7`), which is what
+`--floors` should be given. `--facade-width` has to match between the two.
+
+**A sheet belongs to a floor count, not to a height.** The wall UV runs V=0 at
+the pavement to V=1 at the roofline whatever the building is, so a sheet drawn
+for six floors stretches its windows off the storeys of anything else.
+Buildings are matched to sheets by floor count — the count travels in the
+filename, `facade_f06_003.png` — and shuffled only within a matching family.
+That is also why the sheets are sized at a fixed number of texels per floor
+rather than to a fixed resolution: at 128 px per floor every wall in the scene
+comes out at about 2.7 cm per texel, whether it is three storeys or twenty.
+
+Two more decisions fall out of the same UV. The sheet must tile **horizontally**
+— a wall goes round the building — and must not tile vertically, since joining a
+roofline to a shopfront is the artefact to avoid. And the sheet is stretched by
+a few per cent so a whole number of repeats goes round the ring, which puts no
+seam at the closing corner instead of cutting the last repeat mid-window.
+
+### Measuring it
+
+`floor_alignment` is the check that matters: it correlates the sheet's edges
+against the control image's, so it answers "did the windows land on *this*
+building's floors". A sheet drawn to spec scores above 0.6; noise, a flat wall,
+the right facade shifted half a storey, and a sheet drawn for a different floor
+count all score below 0.3. `bay_alignment` is the same across the sheet.
+
+This is deliberately not a measure of periodicity, which is what it was first
+built as and does not work: a facade profile has two impulses per storey — a
+head and a sill — so it carries a strong half-floor beat of its own, and "does
+this repeat once per floor" scores a correct sheet no better than one with twice
+the storeys.
+
+`procedural_facade` draws the sheets with no model at all. They are not
+photographic, they are *correct*, which is what lets the UV, the texel density,
+the material slots and the export be finished and tested on a machine with no
+card in it — and what gives a generated sheet something to be compared against.
+
 ## Placing other things on this ground
 
 `--heightmap out.json` writes the grid plus the scene anchor, so a building or

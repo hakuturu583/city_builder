@@ -76,8 +76,12 @@ def ensure_collection(name: str):
     return collection
 
 
-def group_to_mesh(shapes: Sequence[object]) -> tuple[Mesh, int]:
-    """Convert a group of ribbons/polygons into one mesh."""
+def group_to_mesh(shapes: Sequence[object], *, face_counts: list[int] | None = None) -> tuple[Mesh, int]:
+    """Convert a group of ribbons/polygons into one mesh.
+
+    ``face_counts``, if given, is filled with the face count each shape
+    contributed, so a caller can map shapes back to face ranges.
+    """
     meshes, skipped = [], 0
     for shape in shapes:
         if isinstance(shape, Ribbon):
@@ -87,6 +91,8 @@ def group_to_mesh(shapes: Sequence[object]) -> tuple[Mesh, int]:
         else:  # already a Mesh
             mesh, dropped = shape, 0
         skipped += dropped
+        if face_counts is not None:
+            face_counts.append(len(mesh.faces))
         if mesh.faces:
             meshes.append(mesh)
     return merge_meshes(meshes), skipped
@@ -150,8 +156,14 @@ def tiled_material(name: str, image_path: str, *, roughness: float = 0.95):
     return mat
 
 
-def add_object(name: str, mesh: Mesh, material=None, surface_class: SurfaceClass | None = None):
-    """Create a Blender object from a mesh and link it into its collection."""
+def add_object(name: str, mesh: Mesh, material=None, surface_class: SurfaceClass | None = None,
+               materials: Sequence[object] | None = None, face_materials: Sequence[int] | None = None):
+    """Create a Blender object from a mesh and link it into its collection.
+
+    ``materials`` + ``face_materials`` give one object several materials — a
+    facade sheet per building without one object per building, which would
+    multiply the draw calls by a thousand.
+    """
     import bpy
 
     if not mesh.faces:
@@ -161,9 +173,18 @@ def add_object(name: str, mesh: Mesh, material=None, surface_class: SurfaceClass
     data.from_pydata([tuple(v) for v in mesh.vertices], [], mesh.faces)
     data.update()
 
+    if mesh.uvs:
+        layer = data.uv_layers.new(name="UVMap")
+        for loop in data.loops:
+            layer.data[loop.index].uv = mesh.uvs[loop.vertex_index]
+
     obj = bpy.data.objects.new(name, data)
-    if material is not None:
-        data.materials.append(material)
+    for slot in (materials or ([material] if material is not None else [])):
+        data.materials.append(slot)
+    if face_materials is not None:
+        for polygon, index in zip(data.polygons, face_materials):
+            polygon.material_index = index
+
     ensure_collection(name).objects.link(obj)
     if surface_class is not None:
         tag_object(obj, surface_class)
@@ -179,12 +200,77 @@ def apply_tiled_texture(obj, image_path: str, tile_metres: float, *, name: str |
     return material
 
 
+def assign_sheets(sheet_paths: Sequence[str], floors: Sequence[int] | None = None,
+                  *, count: int | None = None, seed: int = 0) -> list[int]:
+    """Which facade sheet each building wears.
+
+    Not a free choice. The facade UV normalises V over the building's height,
+    so a sheet drawn for six floors only reads correctly on a six-floor
+    building — anywhere else its windows stretch off the storeys. Buildings are
+    matched to sheets by floor count, and the shuffling for variety happens
+    *within* a matching group.
+
+    Falls back to the nearest available floor count when nothing matches
+    exactly, and to a plain even spread when the sheets do not declare what
+    they were drawn for (a hand-made tile, say).
+    """
+    import random
+
+    from .facade_layout import sheet_floors
+
+    rng = random.Random(seed)
+    total = len(floors) if floors is not None else (count or 0)
+
+    by_floor: dict[int, list[int]] = {}
+    for index, path in enumerate(sheet_paths):
+        declared = sheet_floors(path)
+        if declared is not None:
+            by_floor.setdefault(declared, []).append(index)
+
+    if floors is None or not by_floor:
+        order = [i % max(1, len(sheet_paths)) for i in range(total)]
+        rng.shuffle(order)
+        return order
+
+    available = sorted(by_floor)
+    return [
+        rng.choice(by_floor[min(available, key=lambda f: (abs(f - wanted), f))])
+        for wanted in floors
+    ]
+
+
+def apply_facade_sheets(obj, image_paths: Sequence[str], face_counts: Sequence[int],
+                        floors: Sequence[int] | None = None, seed: int = 0):
+    """Give one merged building object a different sheet per building.
+
+    Material slots rather than objects: 1200 objects would be 1200 draw calls
+    for no visual gain, while slots split into that many primitives only when
+    a renderer needs them to.
+    """
+    materials = [tiled_material(f"CityFacade{i:03d}", path, roughness=0.6)
+                 for i, path in enumerate(image_paths)]
+    obj.data.materials.clear()
+    for material in materials:
+        obj.data.materials.append(material)
+
+    choice = assign_sheets(image_paths, floors, count=len(face_counts), seed=seed)
+    face_materials = []
+    for shape_index, faces in enumerate(face_counts):
+        face_materials.extend([choice[shape_index]] * faces)
+    for polygon, index in zip(obj.data.polygons, face_materials):
+        polygon.material_index = index
+    return materials
+
+
 def build(groups: dict[str, Sequence[object]], *, verbose: bool = True) -> dict[str, object]:
     """Build every group into its own object/collection. Returns the objects."""
     materials = build_materials()
     objects = {}
+    face_counts: dict[str, list[int]] = {}
     for name, shapes in groups.items():
-        mesh, skipped = group_to_mesh(shapes)
+        counts: list[int] = []
+        mesh, skipped = group_to_mesh(shapes, face_counts=counts)
+        face_counts[name] = counts
         surface_class = classes.get(name)
         obj = add_object(name, mesh, materials.get(surface_class.material), surface_class)
         if obj is None:
@@ -194,6 +280,8 @@ def build(groups: dict[str, Sequence[object]], *, verbose: bool = True) -> dict[
             note = f", {skipped} degenerate face(s) skipped" if skipped else ""
             print(f"[scene] {name}: {len(shapes)} shape(s) → {len(mesh.faces)} face(s) "
                   f"[{surface_class.label}/{surface_class.paint}]{note}")
+
+    build.face_counts = face_counts  # for callers wiring per-shape materials
     return objects
 
 
