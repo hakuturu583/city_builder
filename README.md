@@ -282,6 +282,15 @@ head and a sill — so it carries a strong half-floor beat of its own, and "does
 this repeat once per floor" scores a correct sheet no better than one with twice
 the storeys.
 
+`wrap_seam` is the other check, and it needs the same care. A facade repeats
+every bay, so its wrap lands on a bay boundary — a pier, which is *supposed* to
+be a hard edge. The ground tile's `seam_error` compares that against the mean
+step over the whole sheet, which compares a pier with blank wall: measured, it
+scored sheets that tile perfectly anywhere from 0.3 to 11, and the false alarm
+cost an afternoon of hunting a padding bug that was not there. `wrap_seam`
+compares the wrap against the *other bay boundaries*, reading the bay count off
+the control image so it cannot drift from the layout.
+
 `procedural_facade` draws the sheets with no model at all. They are not
 photographic, they are *correct*, which is what lets the UV, the texel density,
 the material slots and the export be finished and tested on a machine with no
@@ -301,17 +310,27 @@ It prints whether each repo is cached at half or full precision, because
 passing `variant="fp16"` when only the full-precision files are there fails
 outright.
 
-Two stacks are declared, because the choice between them is a measurement
-rather than a preference:
+Two stacks are declared, because the choice between them was a measurement
+rather than a preference. Six sheets each, 3090, floor counts 4/6/8:
 
-| | resolution | LCM + ControlNet together |
-|---|---|---|
-| `sd15` | 512×768 | well-trodden — Pro-DG conditions facades exactly this way |
-| `sdxl` | 768×1024 | reportedly weakens each other's control |
+| | floor alignment | per sheet | note |
+|---|---|---|---|
+| sd15, **no ControlNet** | **−0.01** | 0.8 s | a wall with windows somewhere |
+| sd15 + canny | 0.84 | 1.0 s | |
+| sd15 + mlsd | **0.85** | 1.0 s | most consistent bay alignment (0.97–0.99) |
+| sdxl + canny | 0.80 | 1.6 s | more varied materials; needs ~12 GB |
 
-`floor_alignment` is what settles it. A facade sheet is 12 m of wall rather
-than a poster, so at 128 px per floor SD1.5's resolution is already about
-2.7 cm per texel; the smaller model also survives sharing the card.
+Two things settled. **ControlNet is not optional** — without it the score is
+indistinguishable from noise, which is exactly the failure that prompted all
+of this. And the reported interference between LCM-LoRA and ControlNet on SDXL
+**did not show up**: 0.80 is perfectly usable, so the choice is resolution and
+VRAM against speed, not one stack working and the other not.
+
+More sampling steps do not help either. LCM at 6 steps scored 0.84; the same
+model at 12 scored 0.70, and a full 25-step non-LCM run at guidance 7 scored
+0.60 while taking three times as long. LCM-LoRA is tuned for four to eight
+steps, and higher guidance simply lets the model wander further from the lines
+it was given.
 
 `--download` fetches fp16 safetensors only. These repos ship the same tensors
 three or four ways over — `.bin`, full-precision `.safetensors`, and on the

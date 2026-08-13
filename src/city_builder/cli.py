@@ -280,6 +280,7 @@ def layouts_command(output_dir, floor_spec, variants, facade_width, bay_metres, 
         bay_alignment,
         bays_for,
         control_image,
+        control_name,
         floor_alignment,
         procedural_facade,
         sheet_name,
@@ -297,12 +298,15 @@ def layouts_command(output_dir, floor_spec, variants, facade_width, bay_metres, 
     for floors in counts:
         layout = FacadeLayout(floors=floors, bays=bays)
         width, height = layout.pixel_size(px_per_floor, px_per_bay)
+        if control:
+            # One drawing per floor count, not per variant: siblings differ in
+            # material, not in structure. That is the point of conditioning
+            # them on the same lines.
+            save_tile(control_image(layout, width, height),
+                      os.path.join(control_dir, control_name(floors)))
         for variant in range(variants):
             sheet = procedural_facade(layout, width, height, seed=seed + 1000 * floors + variant)
             save_tile(sheet, os.path.join(output_dir, sheet_name(floors, variant)))
-            if control:
-                save_tile(control_image(layout, width, height),
-                          os.path.join(control_dir, sheet_name(floors, variant, "control")))
             written += 1
             seams.append(seam_error_axis(sheet, axis=1))
             floor_scores.append(floor_alignment(sheet, layout))
@@ -319,35 +323,92 @@ def layouts_command(output_dir, floor_spec, variants, facade_width, bay_metres, 
 
 
 @main.command("facades")
+@click.option("--layouts", "layouts_dir", required=True,
+              help="Directory from `city-builder layouts`; its control/ images are the input")
 @click.option("--output", "output_dir", required=True, help="Directory to write the sheets into")
-@click.option("--prompt", default="building facade, windows in regular floors, concrete and glass, "
-                                  "orthographic elevation, uniform overcast lighting")
-@click.option("--count", type=int, default=64)
-@click.option("--width", type=int, default=768)
-@click.option("--height", type=int, default=1024)
+@click.option("--prompt", default="photograph of a building facade, glass windows in concrete, "
+                                  "flat elevation, uniform overcast daylight, no sky")
+@click.option("--negative", "negative_prompt", default="")
+@click.option("--family", type=click.Choice(["sd15", "sdxl"]), default="sd15")
+@click.option("--controlnet", type=click.Choice(["canny", "mlsd", "none"]), default="canny",
+              help="What holds the windows on the storeys; 'none' is the ablation")
+@click.option("--control-scale", type=float, default=0.9)
+@click.option("--lcm/--no-lcm", default=True, help="--no-lcm is the quality ceiling, ~4x slower")
+@click.option("--count", type=int, default=4, help="Sheets per floor count")
+@click.option("--floors", "floor_spec", default=None, help="Only these floor counts, e.g. 4,6,9")
 @click.option("--steps", type=int, default=6, help="LCM needs very few")
 @click.option("--guidance", type=float, default=1.5)
 @click.option("--variation", type=float, default=0.45,
               help="0 = identical siblings, 1 = unrelated strangers")
 @click.option("--seed", type=int, default=0)
-@click.option("--batch", type=int, default=4)
-@click.option("--vram-budget-gb", type=float, default=6.0)
-def facades_command(output_dir, prompt, count, **kwargs):
-    """Generate a family of facade sheets with an LCM-distilled sampler."""
+@click.option("--batch", type=int, default=1)
+@click.option("--vram-budget-gb", type=float, default=10.0)
+@click.option("--offload", is_flag=True, help="One module on the GPU at a time, for a shared card")
+@click.option("--keep-below", type=float, default=None,
+              help="Discard sheets whose floor alignment falls under this")
+def facades_command(layouts_dir, output_dir, prompt, negative_prompt, floor_spec, keep_below,
+                    controlnet, **kwargs):
+    """Generate facade sheets conditioned on the layouts' control images.
+
+    One family per floor count, taking `layouts`' line drawing as the structure
+    and letting the model decide only the materials. Each sheet is scored
+    against the drawing it was given before it is written, so a run that lost
+    the storeys says so instead of leaving it to a glance at a contact sheet.
+    """
     import os
+    import time
 
-    from .texture import FacadeOptions, facade_sheets, save_tile, seam_error_axis
+    import numpy as np
 
-    options = FacadeOptions(count=count, **kwargs)
-    sheets = facade_sheets(prompt, options)
+    from .facade_layout import alignment, sheet_floors, sheet_name, wrap_seam
+    from .texture import FacadeOptions, facade_sheets, load_facade_pipeline, save_tile
 
+    control_dir = os.path.join(layouts_dir, "control")
+    if not os.path.isdir(control_dir):
+        raise click.UsageError(f"no control images in {control_dir}; run `city-builder layouts` first")
+
+    wanted = set(_floor_spec(floor_spec)) if floor_spec else None
+    controls = []
+    for name in sorted(os.listdir(control_dir)):
+        floors = sheet_floors(name) if name.endswith(".png") else None
+        if floors is not None and (wanted is None or floors in wanted):
+            controls.append((floors, os.path.join(control_dir, name)))
+    if not controls:
+        raise click.UsageError(f"no control images matching {floor_spec or 'anything'}")
+
+    options = FacadeOptions(controlnet="" if controlnet == "none" else controlnet, **kwargs)
     os.makedirs(output_dir, exist_ok=True)
-    horizontal, vertical = [], []
-    for i, sheet in enumerate(sheets):
-        save_tile(sheet, os.path.join(output_dir, f"facade_{i:03d}.png"))
-        horizontal.append(seam_error_axis(sheet, axis=1))
-        vertical.append(seam_error_axis(sheet, axis=0))
 
-    click.echo(f"wrote {len(sheets)} sheet(s) to {output_dir}")
-    click.echo(f"horizontal seam {sum(horizontal)/len(horizontal):.2f} (wants ~1: a wall wraps)")
-    click.echo(f"vertical seam   {sum(vertical)/len(vertical):.2f} (wants >1: shopfront != roofline)")
+    from PIL import Image
+
+    started = time.time()
+    pipeline = load_facade_pipeline(options)
+    loaded = time.time()
+    click.echo(f"{options.family} + {controlnet}{' + lcm' if options.lcm else ''}: "
+               f"loaded in {loaded - started:.0f}s")
+
+    written, dropped, scores = 0, 0, []
+    for floors, path in controls:
+        control = np.asarray(Image.open(path).convert("RGB"))
+        sheets = facade_sheets(prompt, control, options,
+                               negative_prompt=negative_prompt, pipeline=pipeline)
+        for variant, sheet in enumerate(sheets):
+            floor_score = alignment(sheet, control, axis=0)
+            bay_score = alignment(sheet, control, axis=1)
+            seam = wrap_seam(sheet, control)
+            scores.append((floors, floor_score, bay_score, seam))
+            if keep_below is not None and floor_score < keep_below:
+                dropped += 1
+                continue
+            save_tile(sheet, os.path.join(output_dir, sheet_name(floors, variant)))
+            written += 1
+
+    elapsed = time.time() - loaded
+    click.echo(f"{len(scores)} sheet(s) in {elapsed:.0f}s ({elapsed / max(1, len(scores)):.1f}s each)"
+               f" — wrote {written}" + (f", dropped {dropped}" if dropped else ""))
+    click.echo(f"{'floors':>6} {'align':>7} {'bays':>7} {'seam':>7}")
+    for floors, floor_score, bay_score, seam in scores:
+        click.echo(f"{floors:>6} {floor_score:>7.2f} {bay_score:>7.2f} {seam:>7.2f}")
+    mean = sum(s[1] for s in scores) / len(scores)
+    click.echo(f"mean floor alignment {mean:.2f} "
+               f"(a sheet drawn to spec scores >0.6; noise scores ~0)")

@@ -11,11 +11,13 @@ from city_builder.facade_layout import (
     FacadeLayout,
     bay_alignment,
     bays_for,
+    bays_in,
     control_image,
     floor_alignment,
     procedural_facade,
     sheet_floors,
     sheet_name,
+    wrap_seam,
 )
 from city_builder.texture import seam_error_axis
 
@@ -273,3 +275,34 @@ def test_the_floor_count_survives_the_filename():
 
 def test_a_sheet_that_does_not_say_returns_none():
     assert sheet_floors("hand_made_tile.png") is None
+
+
+def test_the_bay_count_is_read_off_the_drawing():
+    """So the seam measurement cannot drift from the layout that made the sheet."""
+    for bays in (2, 3, 4, 6):
+        layout = FacadeLayout(floors=6, bays=bays)
+        width, height = layout.pixel_size(64, 64)
+        assert bays_in(control_image(layout, width, height)) == bays
+
+
+def test_a_wrapping_sheet_looks_like_its_other_bay_divisions():
+    """The wrap lands on a bay boundary, which is a pier, not a fault.
+
+    Comparing it against the sheet's mean step compares a pier with blank
+    wall — measured, that scored sheets which tile perfectly anywhere from 0.3
+    to 11, and sent the diagnosis chasing the padding for an afternoon.
+    """
+    layout = FacadeLayout(floors=6, bays=4)
+    width, height = layout.pixel_size(64, 64)
+    sheet = procedural_facade(layout, width, height, seed=3)
+    control = control_image(layout, width, height)
+    assert wrap_seam(sheet, control) < 1.5
+
+
+def test_a_real_seam_still_shows_up():
+    layout = FacadeLayout(floors=6, bays=4)
+    width, height = layout.pixel_size(64, 64)
+    sheet = procedural_facade(layout, width, height, seed=3).astype(np.int16)
+    sheet[:, : width // 2] = np.clip(sheet[:, : width // 2] + 60, 0, 255)
+    control = control_image(layout, width, height)
+    assert wrap_seam(sheet.astype(np.uint8), control) > 3.0

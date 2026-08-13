@@ -178,27 +178,34 @@ def make_tile(prompt: str, options: TextureOptions | None = None, *, path: str |
 
 @dataclass
 class FacadeOptions:
-    """A family of facade textures: alike, but not the same.
+    """A family of facade textures: alike, but not the same, and on the storeys.
 
-    Two knobs, deliberately: the prompt fixes what kind of building this is,
-    and ``variation`` says how far each sheet may drift from the family's
-    shared starting point. Sampling every sheet from independent noise gives a
-    street with no character; sampling them all from one latent gives a street
-    of clones.
+    Three knobs that matter. The prompt fixes what kind of building this is.
+    ``variation`` says how far each sheet may drift from the family's shared
+    starting point — sampling every sheet from independent noise gives a street
+    with no character, sampling them all from one latent gives a street of
+    clones. ``controlnet`` is what puts the windows on the floors, and it is not
+    optional in practice: without it the model returns a wall with windows
+    somewhere, which is what the first attempt at this produced.
+
+    The sheet's size comes from the control image, not from here, because the
+    control image is drawn at a fixed number of texels per floor.
     """
 
-    count: int = 64
-    width: int = 768
-    height: int = 1024  # taller than wide: a facade is not square
-    steps: int = 6  # LCM territory
+    family: str = "sd15"  # sd15 | sdxl
+    controlnet: str = "canny"  # canny | mlsd | "" for none
+    control_scale: float = 0.9
+    lcm: bool = True
+
+    count: int = 4
+    steps: int = 6  # LCM territory; ~25 without it
     guidance: float = 1.5  # LCM wants this low
     seed: int = 0
     variation: float = 0.45  # 0 = identical siblings, 1 = unrelated strangers
 
-    model: str = DEFAULT_MODEL
-    lcm_lora: str = "latent-consistency/lcm-lora-sdxl"
     batch: int = 1
-    vram_budget_gb: float = 6.0
+    vram_budget_gb: float = 10.0
+    offload: bool = False  # one module on the GPU at a time; only worth it when tight
 
 
 def _tile_horizontally(module) -> None:
@@ -209,6 +216,13 @@ def _tile_horizontally(module) -> None:
     the top is a roofline, and joining them is exactly the artefact to avoid.
     ``padding_mode='circular'`` applies to both axes, so the padding is done by
     hand instead.
+
+    Vertically the padding stays **zeros**, which is what these convolutions
+    were trained with. Replicate seems the more sensible choice and is not:
+    measured, it put a band of colour noise along the top and bottom edge of
+    every sheet, because the decoder has never seen an edge that behaves that
+    way. The horizontal axis gets away with circular precisely because a
+    tileable image has no edge there to get wrong.
     """
     import torch
     import torch.nn.functional as F
@@ -221,7 +235,7 @@ def _tile_horizontally(module) -> None:
 
         def forward(self, x, _pad_h=pad_h, _pad_w=pad_w):
             x = F.pad(x, (_pad_w, _pad_w, 0, 0), mode="circular")
-            x = F.pad(x, (0, 0, _pad_h, _pad_h), mode="replicate")
+            x = F.pad(x, (0, 0, _pad_h, _pad_h), mode="constant", value=0.0)
             return self._conv_forward(x, self.weight, self.bias)
 
         layer.forward = forward.__get__(layer, torch.nn.Conv2d)
@@ -248,17 +262,86 @@ def _family_latents(shape, count: int, variation: float, seed: int, device, dtyp
     return out
 
 
-def facade_sheets(prompt: str, options: FacadeOptions | None = None, *, negative_prompt: str = ""):
-    """Generate a family of facade textures with an LCM-distilled sampler.
+def load_facade_pipeline(options: FacadeOptions):
+    """Build the sampler described by ``options``, weights taken from the cache.
 
-    LCM turns 25 sampling steps into ~6, which is what makes "one sheet per
-    building" affordable at all. It does not help the multiview texturing
-    models — those UNets are custom and nobody has distilled them — which is
-    why this generates 2-D sheets for UVs we control rather than painting the
-    meshes.
+    The repo ids come from :mod:`city_builder.weights` rather than being written
+    here, so ``city-builder models`` cannot claim a machine is ready for
+    something a run then fails to load. The precision comes from there too: a
+    repo cached at full precision must not be asked for ``variant="fp16"``.
     """
     import torch
-    from diffusers import AutoPipelineForText2Image, LCMScheduler
+    from diffusers import (
+        AutoPipelineForText2Image,
+        ControlNetModel,
+        LCMScheduler,
+        StableDiffusionControlNetPipeline,
+        StableDiffusionXLControlNetPipeline,
+    )
+
+    from . import weights as W
+
+    base = W.find(options.family, "base")
+    common = {"torch_dtype": torch.float16, "use_safetensors": True}
+
+    if options.controlnet:
+        control = W.find(options.family, "controlnet", options.controlnet)
+        net = ControlNetModel.from_pretrained(control.repo, variant=W.variant(control), **common)
+        pipeline_class = (StableDiffusionXLControlNetPipeline if options.family == "sdxl"
+                          else StableDiffusionControlNetPipeline)
+        pipeline = pipeline_class.from_pretrained(
+            base.repo, controlnet=net, variant=W.variant(base),
+            safety_checker=None, requires_safety_checker=False, **common,
+        )
+    else:
+        pipeline = AutoPipelineForText2Image.from_pretrained(
+            base.repo, variant=W.variant(base), safety_checker=None, **common
+        )
+
+    if options.lcm:
+        lora = W.find(options.family, "lcm-lora")
+        pipeline.scheduler = LCMScheduler.from_config(pipeline.scheduler.config)
+        pipeline.load_lora_weights(lora.repo)
+        pipeline.fuse_lora()
+
+    pipeline.set_progress_bar_config(disable=True)
+    if options.offload:
+        pipeline.enable_model_cpu_offload()
+        pipeline.enable_attention_slicing()
+        # Only when memory is tight: tiling splits the decode into windows and
+        # blends them, which severs the circular padding across the full width
+        # and hands back a sheet that does not wrap.
+        pipeline.vae.enable_tiling()
+    else:
+        pipeline.to("cuda")
+
+    # A wall goes round the building, so the sheet has to meet itself. The
+    # ControlNet convolves the line drawing, so it needs the same treatment or
+    # the structure stops wrapping even where the pixels do.
+    _tile_horizontally(pipeline.unet)
+    _tile_horizontally(pipeline.vae)
+    if options.controlnet:
+        _tile_horizontally(pipeline.controlnet)
+    return pipeline
+
+
+def facade_sheets(prompt: str, control=None, options: FacadeOptions | None = None, *,
+                  negative_prompt: str = "", pipeline=None):
+    """A family of facade sheets, conditioned on a control image.
+
+    LCM turns 25 sampling steps into ~6, which is what makes "a sheet per
+    building" affordable at all. It does not help the multiview texturing
+    models — their UNets are custom and nobody has distilled them — which is
+    why this generates 2-D sheets for UVs we control rather than painting the
+    meshes. What LCM costs is structure, and ``control`` is what buys it back:
+    the line drawing from :mod:`city_builder.facade_layout`, which knows where
+    this building's floors are.
+
+    Pass ``pipeline`` to reuse a loaded one across several control images —
+    loading is most of the wall clock once the sampler is down to six steps.
+    """
+    import torch
+    from PIL import Image
 
     options = options or FacadeOptions()
     # Explicit padding allocates a copy of every convolution input, so the
@@ -269,43 +352,44 @@ def facade_sheets(prompt: str, options: FacadeOptions | None = None, *, negative
         total = torch.cuda.get_device_properties(0).total_memory / 1024**3
         torch.cuda.set_per_process_memory_fraction(min(1.0, options.vram_budget_gb / total), 0)
 
-    pipeline = AutoPipelineForText2Image.from_pretrained(
-        options.model, torch_dtype=torch.float16, variant="fp16", use_safetensors=True
-    )
-    pipeline.scheduler = LCMScheduler.from_config(pipeline.scheduler.config)
-    pipeline.load_lora_weights(options.lcm_lora)
-    pipeline.fuse_lora()
-    pipeline.set_progress_bar_config(disable=True)
-    pipeline.enable_model_cpu_offload()
-    pipeline.enable_vae_tiling()
-    pipeline.enable_attention_slicing()  # the card is shared; trade speed for headroom
+    owned = pipeline is None
+    pipeline = pipeline or load_facade_pipeline(options)
 
-    _tile_horizontally(pipeline.unet)
-    _tile_horizontally(pipeline.vae)
+    if control is None:
+        raise ValueError("a facade needs a control image; see facade_layout.control_image")
+    height, width = control.shape[:2]
+    control_image = Image.fromarray(control).convert("RGB")
 
     factor = pipeline.vae_scale_factor
-    shape = (1, pipeline.unet.config.in_channels, options.height // factor, options.width // factor)
+    shape = (1, pipeline.unet.config.in_channels, height // factor, width // factor)
     latents = _family_latents(shape, options.count, options.variation, options.seed,
                               pipeline._execution_device, torch.float16)
 
     sheets = []
     for start in range(0, options.count, options.batch):
         chunk = latents[start:start + options.batch]
-        images = pipeline(
-            prompt=[prompt] * len(chunk),
-            negative_prompt=[negative_prompt or "people, cars, text, watermark, blurry"] * len(chunk),
-            width=options.width,
-            height=options.height,
-            num_inference_steps=options.steps,
-            guidance_scale=options.guidance,
-            latents=torch.cat(chunk, dim=0),
-        ).images
-        sheets.extend(np.asarray(image.convert("RGB")) for image in images)
+        arguments = {
+            "prompt": [prompt] * len(chunk),
+            "negative_prompt": [negative_prompt or _NEGATIVE] * len(chunk),
+            "width": width,
+            "height": height,
+            "num_inference_steps": options.steps,
+            "guidance_scale": options.guidance,
+            "latents": torch.cat(chunk, dim=0),
+        }
+        if options.controlnet:
+            arguments["image"] = [control_image] * len(chunk)
+            arguments["controlnet_conditioning_scale"] = options.control_scale
+        sheets.extend(np.asarray(image.convert("RGB")) for image in pipeline(**arguments).images)
 
-    del pipeline
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    if owned:
+        del pipeline
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     return sheets
+
+
+_NEGATIVE = "people, cars, text, watermark, blurry, tilted, perspective, sky, ground"
 
 
 def seam_error_axis(tile: np.ndarray, axis: int) -> float:

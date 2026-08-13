@@ -90,6 +90,19 @@ STACKS: dict[str, tuple[Weight, ...]] = {
 }
 
 
+def find(family: str, role: str, tag: str = "") -> Weight:
+    """One declared weight. ``tag`` picks between same-role repos, e.g. canny/mlsd.
+
+    Looking the repo id up here rather than writing it into the texturing code
+    keeps one place that knows what this machine is expected to have, so
+    ``city-builder models`` cannot drift from what a run actually loads.
+    """
+    for weight in STACKS.get(family, ()):
+        if weight.role == role and tag in weight.repo:
+            return weight
+    raise KeyError(f"no {role} weight for {family!r}" + (f" matching {tag!r}" if tag else ""))
+
+
 def stack(family: str | None = None) -> list[Weight]:
     """The declared weights, for one family or all of them."""
     if family in (None, "all"):

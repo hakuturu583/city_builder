@@ -37,7 +37,7 @@ import numpy as np
 
 # Sheets carry their floor count in the filename: a sheet is only valid on a
 # building with that many floors, and the assembly step has to be able to tell.
-SHEET_PATTERN = re.compile(r"_f(\d+)_")
+SHEET_PATTERN = re.compile(r"_f(\d+)(?=[_.])")
 
 
 @dataclass
@@ -376,6 +376,61 @@ def floor_alignment(sheet: np.ndarray, layout: FacadeLayout, *, tolerance: float
                      tolerance=tolerance / floors_tall)
 
 
+def bays_in(control: np.ndarray) -> int:
+    """How many times the control image repeats across its width.
+
+    Read off the drawing rather than passed in, so the seam measurement cannot
+    drift from the layout that produced the sheet.
+
+    Tested directly rather than read off a spectrum: each bay contributes
+    several edges — two window sides, each drawn as an outline, so a doublet
+    apiece — and the strongest frequency in the drawing is a high harmonic of
+    the bay count, not the bay count. Rolling the image and checking it lands
+    on itself has no such ambiguity.
+    """
+    grey = _grey(control)
+    width = grey.shape[1]
+    contrast = float(np.abs(grey - grey.mean()).mean())
+    if contrast < 1e-9:
+        return 1
+
+    found = 1
+    for bays in range(2, 17):
+        shift, remainder = divmod(width, bays)
+        if remainder:
+            continue
+        if float(np.abs(grey - np.roll(grey, shift, axis=1)).mean()) < 0.02 * contrast:
+            found = bays  # keep the largest: a pattern repeating N times also
+    return found        # repeats under every divisor of N
+
+
+def wrap_seam(sheet: np.ndarray, control: np.ndarray) -> float:
+    """The step across the wrap, against the steps it is equivalent to.
+
+    A facade sheet repeats every bay, so its wrap falls on a bay boundary — a
+    pier, a mullion, a structural line that is *supposed* to be a hard edge.
+    :func:`city_builder.texture.seam_error` compares that against the mean step
+    over the whole sheet, which compares a pier with blank wall: measured,
+    sheets whose wrap is exactly as continuous as every other bay division
+    scored anywhere from 0.3 to 11 that way, and the diagnosis cost an
+    afternoon.
+
+    The wrap's peers are the other bay boundaries. Against them, 1.0 means the
+    wrap looks like every other bay division — which is the most a sheet that
+    tiles can be asked for — and a real seam pushes it well above 1.
+    """
+    grey = _grey(sheet)
+    width = grey.shape[1]
+    bays = bays_in(control)
+
+    steps = np.abs(np.diff(grey, axis=1)).mean(axis=0)
+    wrap = float(np.abs(grey[:, 0] - grey[:, -1]).mean())
+    peers = [steps[min(round(k * width / bays), steps.size) - 1] for k in range(1, bays)]
+    if not peers:
+        return wrap / (float(np.median(steps)) + 1e-9)
+    return wrap / (float(np.median(peers)) + 1e-9)
+
+
 def bay_alignment(sheet: np.ndarray, layout: FacadeLayout, *, tolerance: float = 0.10) -> float:
     """:func:`alignment` across the sheet. ``tolerance`` is a share of one bay."""
     height, width = _grey(sheet).shape
@@ -391,6 +446,15 @@ def bay_alignment(sheet: np.ndarray, layout: FacadeLayout, *, tolerance: float =
 def sheet_name(floors: int, variant: int, prefix: str = "facade") -> str:
     """``facade_f06_003.png`` — the floor count has to survive the filesystem."""
     return f"{prefix}_f{floors:02d}_{variant:03d}.png"
+
+
+def control_name(floors: int) -> str:
+    """``control_f06.png``. One per floor count: the drawing has no variants.
+
+    What varies between sibling sheets is the material, not the structure —
+    that is the whole point of conditioning them on the same lines.
+    """
+    return f"control_f{floors:02d}.png"
 
 
 def sheet_floors(path: str) -> int | None:
