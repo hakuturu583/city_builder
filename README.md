@@ -208,6 +208,16 @@ first and all of them build a wall down the middle of the carriageway:
 | skip boundaries that coincide geometrically | inside a junction, turning lanelets *overlap* rather than tile |
 | the outline of the union of all decks | picks up the outline of every shoulder strip inside the carriageway |
 
+What works is asking whether a **lanelet boundary lies on** that outline, rather
+than building the outline itself. It keeps the parapet on the surveyed lines —
+smooth, and at the right height — while the outline decides which of them are
+edges. Probing a fixed distance sideways for a neighbour was the version before
+it, and it under-reads: measured, the probe found 3323 m of edge where the
+outline finds 4199 m, because a separate structure passing 1.6 m away stops the
+probe from saying the deck ends. The barrier is then closed over inner
+stretches shorter than `parapet_bridge_gap`, since the test flickers where a
+deck brushes past another at a junction mouth.
+
 A road_border is only a kerb where something stops at it. Measured, 689 of
 8055 kerb vertices had lanelet surface on *either* side of them — a lane
 divider, a give-way line, the seam between a carriageway and its slip road —

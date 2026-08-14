@@ -107,37 +107,59 @@ def test_slicing_keeps_the_identity_of_the_lane():
 def test_only_the_outermost_lanes_have_an_outer_edge():
     """A parapet belongs on the edge of the carriageway, not between its lanes."""
     lanes = [_lane(1, -6, -2), _lane(2, -2, 2), _lane(3, 2, 6)]
-    occupied = V.occupancy(lanes, {1, 2, 3})
-    probe = 1.5
+    outline = V.deck_outline(lanes, {1, 2, 3})
 
-    left, right = V.outer_flags(lanes[0], occupied, probe)
-    assert all(left) and not any(right)      # only its far side is open
+    # The two ends of every lane really are on the outline — the deck stops
+    # there — so the question is about the length in between.
+    def middle(flags):
+        return flags[1:-1]
 
-    left, right = V.outer_flags(lanes[1], occupied, probe)
-    assert not any(left) and not any(right)  # the middle lane has no outer edge
+    left, right = V.outer_flags(lanes[0], outline, 0.7)
+    assert all(middle(left)) and not any(middle(right))   # only its far side is open
 
-    left, right = V.outer_flags(lanes[2], occupied, probe)
-    assert not any(left) and all(right)
+    left, right = V.outer_flags(lanes[1], outline, 0.7)
+    assert not any(middle(left)) and not any(middle(right))  # the middle lane has none
+
+    left, right = V.outer_flags(lanes[2], outline, 0.7)
+    assert not any(middle(left)) and all(middle(right))
 
 
 def test_a_lane_on_its_own_is_outer_on_both_sides():
     lane = _lane(1, -2, 2)
-    left, right = V.outer_flags(lane, V.occupancy([lane], {1}), 1.5)
+    left, right = V.outer_flags(lane, V.deck_outline([lane], {1}), 0.7)
     assert all(left) and all(right)
 
 
 def test_a_survey_gap_between_lanes_is_not_open_air():
     """Neighbouring lanelets do not quite meet; the sliver must not read as an edge."""
     lanes = [_lane(1, -6.0, -2.0), _lane(2, -1.7, 2.0)]  # 30 cm apart
-    occupied = V.occupancy(lanes, {1, 2}, close_gap=0.5)
-    _left, right = V.outer_flags(lanes[0], occupied, 1.5)
-    assert not any(right)
+    outline = V.deck_outline(lanes, {1, 2}, close_gap=0.5)
+    _left, right = V.outer_flags(lanes[0], outline, 0.7)
+    assert not any(right[1:-1])
+
+
+def test_a_deck_just_past_a_boundary_does_not_hide_the_edge():
+    """Probing a fixed distance sideways under-reads: measured, it found 3323 m
+    of edge where the outline finds 4199 m, because a separate structure passing
+    within the probe distance stops it from saying so."""
+    lanes = [_lane(1, -6.0, -2.0), _lane(2, -0.4, 3.0)]  # 1.6 m apart, not joined
+    outline = V.deck_outline(lanes, {1, 2}, close_gap=0.5)
+    _left, right = V.outer_flags(lanes[0], outline, 0.7)
+    assert all(right), "the deck really does stop here"
+
+
+def test_the_end_of_a_deck_is_on_the_outline_too():
+    """It is: the structure stops there, whatever the lane beside it is doing."""
+    lanes = [_lane(1, -6, -2), _lane(2, -2, 2)]
+    left, _right = V.outer_flags(lanes[1], V.deck_outline(lanes, {1, 2}), 0.7)
+    assert left[0] and left[-1]
+    assert not any(left[1:-1])
 
 
 def test_ground_level_lanes_are_not_part_of_the_structure():
     lanes = [_lane(1, -6, -2), _lane(2, -2, 2)]
-    occupied = V.occupancy(lanes, {1})  # lane 2 is at grade
-    _left, right = V.outer_flags(lanes[0], occupied, 1.5)
+    outline = V.deck_outline(lanes, {1})  # lane 2 is at grade
+    _left, right = V.outer_flags(lanes[0], outline, 0.7)
     assert all(right), "a road at grade is not a neighbouring deck"
 
 
