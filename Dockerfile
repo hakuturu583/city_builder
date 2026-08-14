@@ -1,18 +1,25 @@
 # The MCP server, ready to run over stdio.
 #
-#     docker run -i --rm -v "$PWD:/work" ghcr.io/hakuturu583/city_builder-mcp
+#     docker run -i --rm --gpus all \
+#       -v city-builder-models:/cache -v "$PWD:/work" \
+#       ghcr.io/hakuturu583/city_builder-mcp
 #
 # Two things decide what is in here. `bpy` is a real Blender, so the image needs
 # Blender's shared libraries even though nothing ever opens a window — it links
-# X11 and GL at import, not at render. And the diffusion extra is left out: it
-# would add several gigabytes of CUDA that cannot do anything without a GPU on
-# the host anyway, so the geometry, export, survey and render tools are what
-# this image serves, and `generate_facades` reports that its weights are
-# missing rather than pretending.
+# X11 and GL at import, not at render. And the diffusion stack is in, which is
+# most of the 6.9 GB: the texture tools are half of what this server is for, and
+# an image that cannot run them is an image whose documentation is hypothetical.
 #
-# To build the GPU image instead, and then run it with `--gpus all`:
+# No CUDA base image. The torch wheels carry their own CUDA runtime, so a slim
+# Python and `--gpus all` is the whole of it — measured here, `torch.cuda` sees
+# the card and paints a facade in 1.7 s.
 #
-#     docker build --build-arg EXTRAS="mcp texture" -t city-builder-mcp:cuda .
+# Model *weights* are not in here. They are downloaded, and a few gigabytes
+# each, so they belong on the volume at /cache rather than in a layer.
+#
+# Drop the diffusion stack for a 1.8 GB image without the texture tools:
+#
+#     docker build --build-arg EXTRAS=mcp -t city-builder-mcp:slim .
 
 FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim AS build
 
@@ -20,9 +27,9 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never
 
-# Which optional dependency groups go in. "mcp texture" adds the diffusion
-# stack, which is only worth carrying if the host has a GPU to give it.
-ARG EXTRAS="mcp"
+# Which optional dependency groups go in. Drop `texture` for an image without
+# the diffusion stack — a quarter of the size, and three fewer working tools.
+ARG EXTRAS="mcp texture"
 
 WORKDIR /app
 

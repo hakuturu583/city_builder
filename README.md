@@ -680,66 +680,24 @@ Or from the container, which every push to `main` publishes:
 
 ```json
 {"mcpServers": {"city-builder": {"command": "docker", "args": [
-  "run", "-i", "--rm", "-v", "/path/to/maps:/maps:ro", "-v", "/path/to/out:/work",
-  "--user", "1000:1000", "ghcr.io/hakuturu583/city_builder-mcp"]}}}
+  "run", "-i", "--rm", "--gpus", "all", "--user", "1000:1000",
+  "-v", "city-builder-models:/cache",
+  "-v", "/path/to/maps:/maps:ro",
+  "-v", "/path/to/out:/work",
+  "ghcr.io/hakuturu583/city_builder-mcp"]}}}
 ```
 
 `-i` is not optional: the client speaks MCP on the process's stdin and stdout.
 Mount the maps and an output directory — scenes, exports and textures are
-written where you ask for them, and nothing else leaves the container. Build,
-survey, export and render all work in there (the render falls back to software
-GL, so it is slow but correct); the diffusion tools do not, because the image
-leaves out several gigabytes of CUDA that would need a GPU on the host anyway.
-Calling them there fails with that sentence rather than with an ImportError
-from three frames down.
+written where you ask for them, and nothing else leaves the container. `--user`
+keeps the files yours rather than root's.
 
-### Model weights, and where they land
-
-The weights are **downloaded, not shipped** — about 3 GB for the SD1.5 stack,
-21 GB more if you use SDXL. Nothing in the image or the repository holds them,
-so where they land is a setting, and getting it wrong means paying for the
-download again on every run.
-
-One environment variable decides: `HF_HOME`. The container sets it to `/cache`
-and declares that a volume, so persisting the weights is a mount:
-
-```bash
-docker volume create city-builder-models
-
-docker run -i --rm \
-  -v city-builder-models:/cache \        # the weights, kept between runs
-  -v /path/to/maps:/maps:ro \
-  -v /path/to/out:/work \
-  --gpus all city-builder-mcp:cuda
-```
-
-A named volume is the simple case. Mounting a host cache you already have works
-just as well and shares it with everything else on the machine — point it at
-whatever `HF_HOME` is set to outside:
-
-```bash
--v "${HF_HOME:-$HOME/.cache/huggingface}:/cache"
-```
-
-Two things worth knowing. Without either mount the weights go into the
-container's writable layer and are thrown away with the container, so the next
-run downloads them again. And even with a full cache the hub is still asked
-whether each file is current, which needs the network; `-e HF_HUB_OFFLINE=1`
-stops that and makes a cached run genuinely offline.
-
-`city-builder models` reports what is in the cache without loading anything or
-touching a GPU, and `--download` fills it — worth running once, before wiring
-the server into anything, so the first real call is not a 3 GB wait.
-
-The published image has no diffusion stack at all, so it never downloads
-anything. Build the GPU one when you want the texture tools:
-
-```bash
-docker build --build-arg EXTRAS="mcp texture" -t city-builder-mcp:cuda .
-```
-
-That comes to 6.9 GB against the default 1.8, which is why it is not what
-`main` publishes.
+Everything works in there, including the texture tools: the image carries the
+diffusion stack, which is most of its 6.9 GB. There is no CUDA base image
+underneath — the torch wheels bring their own runtime, so a slim Python and
+`--gpus all` is the whole of it. Without `--gpus`, the geometry, export, survey
+and render tools carry on regardless (the render falls back to software GL: slow
+but correct) and the diffusion tools say what is missing.
 
 The tools are not the CLI with a different coat on. Two things change when the
 caller is a language model rather than a person at a shell.
@@ -803,6 +761,50 @@ meant to be there. A hole that nowhere admits a one-metre circle is a *seam*
 and should be zero; the rest are *openings*. Levels are judged separately,
 since a viaduct and the street beneath it share a plan view, and a single union
 would call the ground beside the deck a hole through it.
+
+### Where the model weights live
+
+The weights are **downloaded, not shipped** — about 3 GB for the SD1.5 stack,
+21 GB more if you use SDXL. Nothing in the image or the repository holds them,
+so where they land is a setting, and getting it wrong means paying for the
+download again on every run.
+
+One environment variable decides: `HF_HOME`. The container sets it to `/cache`
+and declares that a volume, so persisting the weights is a mount — the
+`-v city-builder-models:/cache` in the invocation above, after a one-off:
+
+```bash
+docker volume create city-builder-models
+```
+
+A named volume is the simple case. Mounting a host cache you already have works
+just as well and shares it with everything else on the machine — point it at
+whatever `HF_HOME` is set to outside:
+
+```bash
+-v "${HF_HOME:-$HOME/.cache/huggingface}:/cache"
+```
+
+Two things worth knowing. Without either mount the weights go into the
+container's writable layer and are thrown away with the container, so the next
+run downloads them again. And even with a full cache the hub is still asked
+whether each file is current, which needs the network; `-e HF_HUB_OFFLINE=1`
+stops that and makes a cached run genuinely offline.
+
+`city-builder models` reports what is in the cache without loading anything or
+touching a GPU, and `--download` fills it — worth running once, before wiring
+the server into anything, so the first real call is not a 3 GB wait.
+
+`/cache` is the whole of it, for anything the Hugging Face hub serves — the
+SD1.5 and SDXL stacks this uses today, and whatever gets added next. One volume,
+shared by all of them.
+
+If you want none of that, the diffusion stack comes out with a build argument
+and takes the image from 6.9 GB to 1.8:
+
+```bash
+docker build --build-arg EXTRAS=mcp -t city-builder-mcp:slim .
+```
 
 ## Requirements
 

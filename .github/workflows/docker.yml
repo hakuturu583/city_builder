@@ -25,6 +25,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The image is about 7 GB and the runner ships with roughly 14 GB free.
+      # The dotnet, Android and Haskell toolchains are the biggest things
+      # nothing in this build uses.
+      - name: Make room on the runner
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/local/share/powershell \
+                      /usr/share/swift "$AGENT_TOOLSDIRECTORY"
+          df -h /
+
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
@@ -54,21 +64,26 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # bpy is most of the image and does not change between commits.
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # bpy and torch are most of the image and do not change between
+          # commits, but together they are past the 10 GB the Actions cache
+          # allows — so the layer cache goes in the registry beside the image.
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE }}:buildcache,mode=max
 
       # An image that starts but serves no tools is the failure worth catching:
-      # bpy imports Blender's shared libraries, and a missing one only shows up
-      # at run time. So ask the built image to list its tools.
+      # bpy imports Blender's shared libraries and torch its CUDA runtime, and a
+      # missing one only shows up when something asks. The runner has no GPU, so
+      # this checks that the stack imports and that the tools are all there —
+      # not that the card works.
       - name: The server answers
         if: github.event_name != 'pull_request'
         run: |
           docker run --rm --entrypoint python \
             ${{ env.REGISTRY }}/${{ env.IMAGE }}:sha-${{ github.sha }} -c '
-          import asyncio
+          import asyncio, diffusers, torch
           from city_builder.mcp_server import server
           tools = asyncio.run(server.list_tools())
           print(f"{len(tools)} tools: " + ", ".join(t.name for t in tools))
+          print(f"torch {torch.__version__}, diffusers {diffusers.__version__}")
           assert len(tools) >= 13, "the server came up short of its tools"
           '
