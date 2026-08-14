@@ -25,16 +25,18 @@ def _stripe(shape_id, x0, x1, y0, y1, z=0.0):
 # ---------------------------------------------------------------------------
 
 
-def test_a_page_must_be_a_whole_number_of_columns():
+def test_a_page_must_be_a_whole_number_of_steps():
     """Otherwise the last column runs off the edge and takes its lane with it."""
     with pytest.raises(ValueError):
-        MarkingOptions(across_pixels=48, page_pixels=4096)
-    MarkingOptions(across_pixels=64, page_pixels=4096)
+        MarkingOptions(column_step=48, page_pixels=4096)
+    MarkingOptions(column_step=32, page_pixels=4096)
 
 
-def test_a_lane_needs_enough_texels_to_draw_a_line():
+def test_a_texel_has_to_have_a_size():
     with pytest.raises(ValueError):
-        MarkingOptions(across_pixels=4)
+        MarkingOptions(texel_metres=0.0)
+    with pytest.raises(ValueError):
+        MarkingOptions(column_step=4)
 
 
 # ---------------------------------------------------------------------------
@@ -87,38 +89,50 @@ def test_the_frame_follows_a_curve():
 # ---------------------------------------------------------------------------
 
 
-def test_texels_stay_square_along_the_lane():
-    options = MarkingOptions(across_pixels=64)
-    width, height = M.lane_pixels(LaneFrame(_lane(y0=-1.5, y1=1.5, x0=0, x1=30)), options)
-    assert width == 64
-    assert height == pytest.approx(64 * 30 / 3, rel=0.02)
+def test_a_texel_is_the_same_size_on_every_lane():
+    """A fixed count across a lane made a 15 cm line anywhere from 1.0 to 6.7
+    texels wide across this map, and it visibly thinned and thickened."""
+    options = MarkingOptions(texel_metres=0.05, column_step=32)
+    narrow = M.lane_pixels(LaneFrame(_lane(y0=-1.0, y1=1.0, x0=0, x1=30)), options)
+    wide = M.lane_pixels(LaneFrame(_lane(y0=-4.0, y1=4.0, x0=0, x1=30)), options)
+
+    assert wide[0] > narrow[0], "a wider lane needs a wider strip"
+    assert narrow[1] == wide[1] == pytest.approx(30 / 0.05, rel=0.02)
 
 
-def test_the_resolution_across_a_lane_does_not_depend_on_the_map():
-    """That is what makes the whole thing fit: a wide lane gets coarser texels."""
-    options = MarkingOptions(across_pixels=64)
-    narrow = M.lane_pixels(LaneFrame(_lane(y0=-1.0, y1=1.0)), options)
-    wide = M.lane_pixels(LaneFrame(_lane(y0=-5.0, y1=5.0)), options)
-    assert narrow[0] == wide[0] == 64
-    assert narrow[1] > wide[1]  # same length, finer texels, so more rows
+def test_a_strip_is_wide_enough_for_its_lane():
+    options = MarkingOptions(texel_metres=0.05, column_step=32)
+    width, _height = M.lane_pixels(LaneFrame(_lane(y0=-1.5, y1=1.5)), options)
+    assert width >= 3.0 / 0.05
+    assert width % options.column_step == 0
 
 
 def test_strips_fill_a_column_then_start_the_next():
-    options = MarkingOptions(across_pixels=64, page_pixels=256)
+    options = MarkingOptions(column_step=32, page_pixels=256)
     places = M.pack([(64, 200), (64, 100), (64, 100)], options)
     assert (places[0].page, places[0].x, places[0].y) == (0, 0, 0)
     assert (places[1].page, places[1].x, places[1].y) == (0, 64, 0)
     assert (places[2].page, places[2].x, places[2].y) == (0, 64, 100)
 
 
+def test_strips_of_different_widths_get_their_own_columns():
+    """Widest first, so a column's strips share a width and the packing is
+    shelf packing rather than the general rectangle problem."""
+    options = MarkingOptions(column_step=32, page_pixels=512)
+    places = M.pack([(64, 100), (128, 100), (64, 100)], options)
+    assert places[1].x == 0 and places[1].width == 128   # the widest goes first
+    assert places[0].x == places[2].x == 128
+    assert {p.page for p in places} == {0}
+
+
 def test_a_full_page_starts_another():
-    options = MarkingOptions(across_pixels=64, page_pixels=128)  # two columns
+    options = MarkingOptions(column_step=32, page_pixels=128)  # two 64 columns
     places = M.pack([(64, 128), (64, 128), (64, 128)], options)
-    assert [p.page for p in places] == [0, 0, 1]
+    assert sorted(p.page for p in places) == [0, 0, 1]
 
 
 def test_a_lane_with_no_length_is_skipped():
-    options = MarkingOptions(across_pixels=64, page_pixels=256)
+    options = MarkingOptions(column_step=32, page_pixels=256)
     assert M.pack([(0, 0)], options) == [None]
 
 

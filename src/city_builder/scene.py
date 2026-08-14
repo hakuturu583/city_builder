@@ -522,7 +522,7 @@ def marking_material(name: str, page_path: str, options, *, asphalt=(0.055, 0.05
     mask.image = bpy.data.images.load(os.path.abspath(page_path))
     mask.image.colorspace_settings.name = "Non-Color"  # it is a mask, not a colour
     mask.extension = "CLIP"
-    mask.interpolation = "Closest" if options.across_pixels < 64 else "Linear"
+    mask.interpolation = "Linear"
 
     base = nodes.new("ShaderNodeMixRGB") if "ShaderNodeMixRGB" in dir(bpy.types) else nodes.new("ShaderNodeMix")
     base.location = (-250, 0)

@@ -89,8 +89,8 @@ def main():
 # markings
 @click.option("--marking-texture/--marking-geometry", "texture", default=None,
               help="Bake the paint into the road texture, or keep it as coplanar slabs")
-@click.option("--marking-pixels", "across_pixels", type=int, default=None,
-              help="Texels across a lane; 64 puts three of them across a thin line")
+@click.option("--marking-texel", "texel_metres", type=float, default=None,
+              help="Ground covered by one texel of paint (m); 0.05 puts three across a thin line")
 @click.option("--road-texture", default=None,
               help="Tile image for the carriageway, under the paint (see `city-builder tile`)")
 @click.option("--quiet", is_flag=True)
@@ -121,7 +121,7 @@ def build_command(input_path, blend, glb, heightmap_path, manifest_path, ground_
                       "vacancy", "min_height", "max_height", "floor_height", "facade_width",
                       "tall_bias", "max_buildings", "seed"),
         "viaduct": ("deck_thickness", "parapet_height", "pier_spacing"),
-        "markings": ("texture", "across_pixels"),
+        "markings": ("texture", "texel_metres"),
     }
     for section, keys in sections.items():
         config = merge_overrides(config, section, **{k: kwargs.pop(k) for k in keys})

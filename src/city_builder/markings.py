@@ -27,6 +27,7 @@ where it is not.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -51,7 +52,8 @@ class MarkingOptions:
     """How the paint is baked, and how finely."""
 
     texture: bool = True  # False keeps the old coplanar geometry
-    across_pixels: int = 64  # texels across a lane, whatever its width
+    texel_metres: float = 0.05  # how much ground one texel covers, everywhere
+    column_step: int = 32  # strip widths are rounded up to a multiple of this
     page_pixels: int = 4096
     reach: float = 0.6  # how far outside a lane to collect paint (m)
     supersample: int = 2  # draw this much larger, then shrink, for smooth edges
@@ -64,23 +66,23 @@ class MarkingOptions:
     colour: tuple[float, float, float] = (0.92, 0.92, 0.90)
     roughness: float = 0.55  # paint is smoother than the asphalt around it
 
-    # Measured on the Nishi-Shinjuku carriageway, 887 lanes:
-    #
-    #   across   cm/texel   Mtexel   pages   a 15 cm line
-    #       32       9.5      13.5       1        1.6 px
-    #       64       4.7      52.5       4        3.2 px
-    #      128       2.4     189.2      15        6.3 px
-    #
-    # 64 is the knee: a thin line still has three texels across it, and the
-    # whole map's paint fits in four pages.
+    # A fixed *count* of texels across a lane was the first version, and it
+    # makes the texel size depend on the lane: measured over 887 lanes, widths
+    # run 1.43 m to 9.42 m, so a 15 cm line came out anywhere between 1.0 and
+    # 6.7 texels across and visibly thinned and thickened along a drive. A fixed
+    # size in metres is the invariant that matters; the strips then have
+    # different widths and the packing has to cope, which is cheaper than the
+    # alternative — 124 452 m2 of carriageway is 50 Mtexel at 5 cm either way.
 
     def __post_init__(self) -> None:
-        if self.across_pixels < 8:
-            raise ValueError("across_pixels below 8 cannot draw a line")
-        if self.page_pixels % self.across_pixels:
+        if self.texel_metres <= 0:
+            raise ValueError("texel_metres must be positive")
+        if self.column_step < 8:
+            raise ValueError("column_step below 8 wastes more than it saves")
+        if self.page_pixels % self.column_step:
             raise ValueError(
                 f"page_pixels ({self.page_pixels}) must be a whole number of "
-                f"columns of across_pixels ({self.across_pixels})"
+                f"steps of column_step ({self.column_step})"
             )
 
 
@@ -173,14 +175,20 @@ class LaneFrame:
 def lane_pixels(frame: LaneFrame, options: MarkingOptions) -> tuple[int, int]:
     """``(width, height)`` of the strip for this lane, in texels.
 
-    Across is fixed, so the texel size across a lane is set by its width; along
-    is whatever keeps the texels square, bounded by the page.
+    One texel is ``texel_metres`` on the ground whatever the lane, so a painted
+    line is the same number of texels wide everywhere. The width is rounded up
+    to a multiple of ``column_step`` so that strips of similar lanes share a
+    column and the packing does not fray.
     """
     if frame.width <= 0 or frame.length <= 0:
         return 0, 0
-    texel = frame.width / options.across_pixels
+
+    texel = options.texel_metres
+    step = options.column_step
+    across = math.ceil(frame.width / texel / step) * step
     height = round(frame.length / texel)
-    return options.across_pixels, max(2, min(height, options.page_pixels))
+    return (max(step, min(across, options.page_pixels)),
+            max(2, min(height, options.page_pixels)))
 
 
 # ---------------------------------------------------------------------------
@@ -287,27 +295,38 @@ class Placement:
 
 
 def pack(sizes: Sequence[tuple[int, int]], options: MarkingOptions) -> list[Placement | None]:
-    """Place fixed-width strips into columns, columns into pages.
+    """Place strips into columns, columns into pages.
 
-    Every strip is the same width, so the general rectangle-packing problem
-    does not arise: a page is a fixed number of columns and a column is filled
-    top to bottom.
+    Shelf packing, one shelf per column. The strips no longer share a width, so
+    they are placed widest first: that keeps a column's strips the same width
+    as each other, which is what stops the general rectangle-packing problem
+    from turning up in a road builder.
     """
-    columns = options.page_pixels // options.across_pixels
-    placements: list[Placement | None] = []
-    page = column = cursor = 0
+    page_size = options.page_pixels
+    order = sorted(range(len(sizes)), key=lambda i: (-sizes[i][0], -sizes[i][1]))
+    placements: list[Placement | None] = [None] * len(sizes)
 
-    for width, height in sizes:
+    page = x = cursor = 0
+    column_width = 0
+    for i in order:
+        width, height = sizes[i]
         if width <= 0 or height <= 0:
-            placements.append(None)
             continue
-        if cursor + height > options.page_pixels:
-            column += 1
+        width = min(width, page_size)
+        height = min(height, page_size)
+
+        if column_width == 0:
+            column_width = width
+        if width != column_width or cursor + height > page_size:
+            x += column_width
             cursor = 0
-        if column >= columns:
+            column_width = width
+        if x + width > page_size:
             page += 1
-            column = cursor = 0
-        placements.append(Placement(page, column * options.across_pixels, cursor, width, height))
+            x = cursor = 0
+            column_width = width
+
+        placements[i] = Placement(page, x, cursor, width, height)
         cursor += height
     return placements
 

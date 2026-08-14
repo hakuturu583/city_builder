@@ -51,19 +51,25 @@ They are baked into the carriageway's own texture instead. The paint is clipped
 to the surface by construction, there is no second surface to fight, and 12 483
 faces go away.
 
-**Resolution is the whole problem.** The carriageway is about 60 000 m²; one
-image over the map at a resolution that keeps a 15 cm line crisp would be
-hundreds of megatexels. But a lanelet is a *ribbon*, so it has a natural
-parameterisation — along it and across it — and across it the useful resolution
-is set by the lane width rather than by the map. Each lane is rasterised
-`across_pixels` texels wide and however many long it needs, and the strips are
-packed into columns and pages.
+**Resolution is the whole problem.** The carriageway is 124 452 m²; one image
+over the map at a resolution that keeps a 15 cm line crisp would be hundreds of
+megatexels. But a lanelet is a *ribbon*, so it has a natural parameterisation —
+along it and across it — and each lane can be rasterised into its own strip and
+packed with the others.
 
-| `across_pixels` | cm/texel | total | pages | a 15 cm line |
+One texel is `texel_metres` on the ground, everywhere. A fixed *count* of
+texels across a lane was the first version and it is wrong in a way that shows:
+lane widths here run 1.43 m to 9.42 m, so a 15 cm line came out anywhere
+between 1.0 and 6.7 texels across and visibly thinned and thickened along a
+drive. Strips then have different widths, so they are packed widest first —
+which keeps a column's strips the same width as each other and stops the
+general rectangle-packing problem from turning up in a road builder.
+
+| `texel_metres` | total | pages | fill | a 15 cm line |
 |---|---|---|---|---|
-| 32 | 9.5 | 13.5 Mtexel | 1 | 1.6 px |
-| **64** | **4.7** | **52.5 Mtexel** | **4** | **3.2 px** |
-| 128 | 2.4 | 189.2 Mtexel | 15 | 6.3 px |
+| 0.04 | 92.7 Mtexel | 7 | 79 % | 3.8 texels |
+| **0.05** | **58.4 Mtexel** | **5** | **70 %** | **3.0 texels** |
+| 0.06 | 43.9 Mtexel | 4 | 65 % | 2.5 texels |
 
 ```bash
 uv run city-builder build --input map.osm --output scene.blend \
