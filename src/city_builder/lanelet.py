@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-import numpy as np
-
 from .frame import LocalFrame
 
 ROAD_SUBTYPES = ("road", "road_shoulder", "highway")
@@ -154,7 +152,3 @@ def apply_z_datum(groups: dict[str, list], datum: float | None, z_offset: float)
             for shape in shapes:
                 shape.shift_z(shift)
     return datum
-
-
-def collect_points(shapes) -> np.ndarray:
-    return np.array([p for s in shapes for p in (*s.left, *s.right)], dtype=float)

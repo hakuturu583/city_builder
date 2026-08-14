@@ -14,7 +14,6 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
 
 import numpy as np
 
@@ -356,12 +355,6 @@ def signed_area_xy(ring: Sequence[Sequence[float]]) -> float:
         ring[i][0] * ring[(i + 1) % len(ring)][1] - ring[(i + 1) % len(ring)][0] * ring[i][1]
         for i in range(len(ring))
     )
-
-
-def as_json(value: Any) -> Any:  # pragma: no cover - convenience for debugging dumps
-    if isinstance(value, (Ribbon, Polygon)):
-        return value.__dict__
-    raise TypeError(type(value))
 
 
 def height_lookup(samples: Sequence[Sequence[float]]):

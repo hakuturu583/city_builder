@@ -529,15 +529,6 @@ def sheet_name(floors: int, variant: int, prefix: str = "facade") -> str:
     return f"{prefix}_f{floors:02d}_{variant:03d}.png"
 
 
-def control_name(floors: int) -> str:
-    """``control_f06.png``. One per floor count: the drawing has no variants.
-
-    What varies between sibling sheets is the material, not the structure —
-    that is the whole point of conditioning them on the same lines.
-    """
-    return f"control_f{floors:02d}.png"
-
-
 def sheet_floors(path: str) -> int | None:
     """The floor count a sheet was drawn for, or None if it does not say."""
     match = SHEET_PATTERN.search(path.replace("\\", "/").rsplit("/", 1)[-1])

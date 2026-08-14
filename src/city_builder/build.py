@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any
 
 from . import buildings as buildings_module
@@ -474,8 +474,3 @@ def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | Non
         scene.save(blend)
     if glb:
         scene.export_glb(glb)
-
-
-def options_from_kwargs(**kwargs) -> SurfaceOptions:
-    known = {f for f in asdict(SurfaceOptions())}
-    return SurfaceOptions(**{k: v for k, v in kwargs.items() if k in known and v is not None})
