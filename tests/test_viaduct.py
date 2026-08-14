@@ -318,8 +318,7 @@ def test_a_middle_lane_gets_a_deck_but_no_parapet():
 
 def test_without_a_terrain_nothing_can_be_decided():
     built = V.build([_lane(1, -2, 2)], {1}, None, ViaductOptions())
-    assert built == {"ViaductDecks": [], "ViaductParapets": [],
-                     "ViaductPiers": [], "ViaductInfill": []}
+    assert built == {"ViaductDecks": [], "ViaductParapets": [], "ViaductPiers": []}
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +329,8 @@ def test_without_a_terrain_nothing_can_be_decided():
 def test_a_gap_between_lanes_is_patched():
     """On the ground a sliver shows the terrain; on a deck it is a slot to the street."""
     lanes = [_lane(1, -6.0, -2.0, z=10.0), _lane(2, -1.7, 2.0, z=10.0)]  # 30 cm apart
-    patches = V.deck_infill(lanes, ViaductOptions(infill_gap=0.8))
+    options = ViaductOptions(infill_gap=0.8)
+    patches = V.infill_meshes(lanes, V.infill_polygons(lanes, options)[0])
     assert patches
 
     ys = [v[1] for mesh in patches for v in mesh.vertices]
@@ -339,26 +339,42 @@ def test_a_gap_between_lanes_is_patched():
     assert all(z == pytest.approx(10.0) for z in zs), "and at the height of the deck"
 
 
+def _patch_meshes(lanes, options):
+    return V.infill_meshes(lanes, V.infill_polygons(lanes, options)[0])
+
+
 def test_lanes_that_meet_need_no_patch():
     lanes = [_lane(1, -6.0, -2.0, z=10.0), _lane(2, -2.0, 2.0, z=10.0)]
-    assert V.deck_infill(lanes, ViaductOptions(infill_gap=0.8)) == []
+    assert _patch_meshes(lanes, ViaductOptions(infill_gap=0.8)) == []
 
 
 def test_a_real_opening_is_left_alone():
     """Two carriageways with a proper gap between them are not a survey artefact."""
     lanes = [_lane(1, -20.0, -10.0, z=10.0), _lane(2, 10.0, 20.0, z=10.0)]
-    assert V.deck_infill(lanes, ViaductOptions(infill_gap=0.8)) == []
+    assert _patch_meshes(lanes, ViaductOptions(infill_gap=0.8)) == []
 
 
 def test_infill_can_be_turned_off():
     lanes = [_lane(1, -6.0, -2.0, z=10.0), _lane(2, -1.7, 2.0, z=10.0)]
-    assert V.deck_infill(lanes, ViaductOptions(infill=False)) == []
+    assert _patch_meshes(lanes, ViaductOptions(infill=False)) == []
+
+
+def test_a_patch_takes_its_height_from_the_lanes_around_it():
+    """Not from the nearest vertex in plan view: a viaduct passes directly over
+    a street, and the gap in the street is not seven metres up."""
+    street = [_lane(1, -6.0, -2.0, z=0.0), _lane(2, -1.7, 2.0, z=0.0)]
+    overhead = _lane(3, -8.0, 8.0, z=7.0)
+    options = ViaductOptions(infill_gap=0.8)
+    patches, _ = V.infill_polygons(street, options)
+    meshes = V.infill_meshes(street + [overhead], patches)
+    assert meshes
+    assert all(v[2] < 1.0 for mesh in meshes for v in mesh.vertices)
 
 
 def test_the_patch_follows_a_sloping_deck():
     lanes = [_lane(1, -6.0, -2.0, z=10.0, z_end=16.0),
              _lane(2, -1.7, 2.0, z=10.0, z_end=16.0)]
-    patches = V.deck_infill(lanes, ViaductOptions(infill_gap=0.8))
+    patches = _patch_meshes(lanes, ViaductOptions(infill_gap=0.8))
     zs = [v[2] for mesh in patches for v in mesh.vertices]
     assert min(zs) == pytest.approx(10.0, abs=0.5)
     assert max(zs) == pytest.approx(16.0, abs=0.5)
@@ -480,5 +496,25 @@ def test_the_infill_is_the_same_geometry_the_outline_was_told_about():
     lanes = [_lane(1, -6.0, -2.0), _lane(2, -1.7, 2.0)]
     options = ViaductOptions(infill_gap=0.8)
     patches, _ = V.infill_polygons(lanes, options)
-    meshes = V.deck_infill(lanes, options, patches)
-    assert len(meshes) == len(patches)
+    assert len(V.infill_meshes(lanes, patches)) == len(patches)
+
+
+def test_the_road_surface_is_patched_everywhere_not_just_on_the_deck():
+    """A gap at grade is a 5 cm drop into the terrain; on a deck it is a slot
+    through to the street. Both are holes in a drivable surface."""
+    from city_builder.build import infill_roads
+
+    groups = {"Roads": [_lane(1, -6.0, -2.0, z=0.0), _lane(2, -1.7, 2.0, z=0.0)]}
+    count, area = infill_roads(groups, ViaductOptions(infill_gap=0.8))
+    assert count and area > 0
+    assert groups["RoadInfill"]
+    assert all(v[2] == pytest.approx(0.0, abs=0.01)
+               for mesh in groups["RoadInfill"] for v in mesh.vertices)
+
+
+def test_a_carriageway_with_no_gaps_gets_no_patches():
+    from city_builder.build import infill_roads
+
+    groups = {"Roads": [_lane(1, -6.0, -2.0), _lane(2, -2.0, 2.0)]}
+    assert infill_roads(groups, ViaductOptions()) == (0, 0.0)
+    assert "RoadInfill" not in groups

@@ -455,61 +455,34 @@ def infill_polygons(sections: Sequence[object], options: ViaductOptions):
     return patches, covered
 
 
-def deck_infill(sections: Sequence[object], options: ViaductOptions,
-                patches: Sequence[object] | None = None) -> list[Mesh]:
-    """Patches for the slivers between neighbouring decks.
+def infill_meshes(shapes: Sequence[object], patches: Sequence[object],
+                  *, reach: float = 1.0) -> list[Mesh]:
+    """Patches as meshes, each standing at the height of the lanes around it.
 
-    Lanelets are surveyed one at a time and do not tile exactly, so a few
-    centimetres of nothing run down the line between two lanes. On the ground
-    that shows the terrain through the carriageway, which is ugly; on a viaduct
-    there is no terrain, so it is a slot straight through to the street below.
-
-    The patch is the difference between the network's footprint and the same
-    footprint with its gaps closed — dilate, erode, subtract. Anything larger
-    than ``infill_max_area`` is left alone: a real opening between two
-    carriageways is meant to be there.
+    The height comes from the shapes that touch the patch rather than from the
+    network as a whole: a viaduct passes directly over a street, so the nearest
+    surveyed vertex in plan view can be seven metres above the gap it is being
+    asked about.
     """
-    if not options.infill or options.infill_gap <= 0:
+    from shapely.strtree import STRtree
+
+    if not patches:
         return []
 
-    from shapely.geometry import Polygon as ShapelyPolygon
-    from shapely.ops import unary_union
-
-    polygons = _footprints(sections, None)
-    if not polygons:
-        return []
-
-    covered = unary_union(polygons)
-    gap = options.infill_gap
-    closed = covered.buffer(gap, join_style=2).buffer(-gap, join_style=2)
-    # Explicitly close the interiors too: a slot ringed by lanelets survives the
-    # erosion, because dilation cannot reach into a hole from outside it.
-    without_holes = []
-    for polygon in getattr(closed, "geoms", [closed]):
-        if polygon.geom_type != "Polygon":
-            continue
-        keep = [ring for ring in polygon.interiors
-                if ShapelyPolygon(ring).area >= options.infill_max_area]
-        without_holes.append(ShapelyPolygon(polygon.exterior, keep))
-    if not without_holes:
-        return []
-
-    patches = unary_union(without_holes).difference(covered)
-    lift = height_lookup(_deck_samples(sections))
+    footprints = _footprints(shapes, None)
+    usable = [shape for shape in shapes if _footprints([shape], None)]
+    tree = STRtree(footprints)
 
     meshes = []
-    for patch in getattr(patches, "geoms", [patches]):
-        if patch.geom_type != "Polygon" or not (0.02 < patch.area < options.infill_max_area):
+    for patch in patches:
+        neighbours = [usable[i] for i in tree.query(patch.buffer(reach))]
+        samples = _deck_samples(neighbours or usable)
+        if not samples:
             continue
-        mesh = triangulate_polygon(patch, lift)
+        mesh = triangulate_polygon(patch, height_lookup(samples))
         if mesh.faces:
             meshes.append(mesh)
     return meshes
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 
 def build(ribbons: Sequence[object], elevated: set[int], heightmap,
@@ -520,7 +493,7 @@ def build(ribbons: Sequence[object], elevated: set[int], heightmap,
     clearance there is no telling a viaduct from a road lying on the ground.
     """
     options = options or ViaductOptions()
-    empty = {"ViaductDecks": [], "ViaductParapets": [], "ViaductPiers": [], "ViaductInfill": []}
+    empty = {"ViaductDecks": [], "ViaductParapets": [], "ViaductPiers": []}
     if heightmap is None:
         return empty
 
@@ -559,5 +532,4 @@ def build(ribbons: Sequence[object], elevated: set[int], heightmap,
         walls.extend(parapet_walls(section, left_outer, right_outer, options))
         piers.extend(pier_boxes(section, heightmap, options))
 
-    return {"ViaductDecks": decks, "ViaductParapets": walls, "ViaductPiers": piers,
-            "ViaductInfill": deck_infill(only, options, patches)}
+    return {"ViaductDecks": decks, "ViaductParapets": walls, "ViaductPiers": piers}

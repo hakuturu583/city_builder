@@ -245,14 +245,6 @@ them: without it the outline still has a hole where the patch went, and the
 barrier runs all the way round the island between two turning lanes. One
 description of the gap, used by both.
 
-**Infill.** Lanelets are surveyed one at a time and do not tile exactly, so a
-few centimetres of nothing run down the line between two lanes. On the ground
-that shows the terrain through the carriageway; on a viaduct it is a slot
-straight through to the street below. The patch is the difference between the
-network's footprint and the same footprint with its gaps closed — dilate,
-erode, subtract — with anything larger than `infill_max_area` left alone,
-because a real opening between two carriageways is meant to be there.
-
 **Clipped crossings.** A crossing lanelet covers the road *and* the footway
 either side, and the road is already there. Measured, 67 of 84 crossing
 surfaces overlapped the carriageway, a median 81 % of their area, 4646 m² in
@@ -266,6 +258,28 @@ uv run city-builder build --input map.osm --output scene.blend \
     --parapet-height 1.1 --deck-thickness 1.2 --pier-spacing 28
 uv run city-builder build ... --no-viaduct     # just the driving surfaces
 ```
+
+## Gaps between lanelets
+
+Lanelets are surveyed one at a time and do not tile exactly. Measured here, 306
+gaps totalling 2922 m² — 3 % of a 98 120 m² carriageway, most of them a hand's
+breadth wide. On a viaduct each one is a slot through to the street below; at
+grade the ground shows through, and since the ground is held 5 cm under the
+road, **a wheel crossing a sliver drops into it**. Either way the drivable
+surface is not a surface, which matters more to a simulator than to a camera.
+
+The patch is the difference between the network's footprint and the same
+footprint with its gaps closed — dilate, erode, subtract — with anything larger
+than `infill_max_area` left alone, because a real opening between two
+carriageways is meant to be there. Each patch takes its height from the lanes
+that *touch* it rather than from the nearest surveyed vertex in plan view: a
+viaduct passes directly over a street, and the gap in the street is not seven
+metres up.
+
+| slivers under 1 m wide | count | area | largest |
+|---|---|---|---|
+| before | 300 | 221.3 m² | 16.0 m² |
+| after | 20 | 13.9 m² | 7.6 m² |
 
 ## Procedural buildings
 

@@ -118,8 +118,9 @@ CLASSES: dict[str, SurfaceClass] = {
             note="columns from the reconstructed ground to the soffit",
         ),
         SurfaceClass(
-            "ViaductInfill", "road", GENERATE, "asphalt", (0.00, 0.55, 1.00), 15,
-            note="the slivers between lanelets, which on a deck are holes to the street",
+            "RoadInfill", "road", GENERATE, "asphalt", (0.00, 0.55, 1.00), 15,
+            note="the slivers between lanelets: a hole to the street on a deck, "
+                 "and a 5 cm drop into the terrain at grade",
         ),
     )
 }

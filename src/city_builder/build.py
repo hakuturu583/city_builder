@@ -135,6 +135,11 @@ def build_city(
             print(f"[build] ground: {heightmap.nx}x{heightmap.ny} @ {cell:.1f} m, "
                   f"{measured:.1f}% of cells measured, {len(mesh.faces)} faces")
 
+    patched, patched_area = infill_roads(groups, viaduct_options or ViaductOptions())
+    if patched and verbose:
+        print(f"[build] road infill: {patched} patch(es), {patched_area:.0f} m2 of gap "
+              f"between lanelets closed")
+
     plots: list[dict[str, Any]] = []
     if buildings:
         if heightmap is None:
@@ -270,6 +275,30 @@ def clip_curbs(groups: dict[str, list], probe: float = 0.6,
 
     groups["Curbs"] = kept
     return dropped
+
+
+def infill_roads(groups: dict[str, list], options) -> tuple[int, float]:
+    """Patch the gaps the lanelets leave between themselves, everywhere.
+
+    Lanelets are surveyed one at a time and do not tile exactly. Measured on
+    this map, 306 gaps totalling 2922 m2 — 3 % of a 98 120 m2 carriageway, most
+    of them a hand's breadth wide. On a viaduct each one is a slot through to
+    the street below; at grade the ground shows through, and since the ground
+    is held 5 cm under the road a wheel crossing a sliver drops into it. Either
+    way the drivable surface is not a surface.
+    """
+    from .viaduct import infill_meshes, infill_polygons
+
+    carriageway = [shape for name in ("Roads", "Junctions")
+                   for shape in groups.get(name, ()) if hasattr(shape, "ring")]
+    if not carriageway:
+        return 0, 0.0
+
+    patches, _covered = infill_polygons(carriageway, options)
+    meshes = infill_meshes(carriageway, patches)
+    if meshes:
+        groups["RoadInfill"] = meshes
+    return len(meshes), sum(patch.area for patch in patches)
 
 
 def build_city_from_config(input_path: str, config, *, buildings: bool = False,
