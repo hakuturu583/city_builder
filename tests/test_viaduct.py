@@ -296,4 +296,79 @@ def test_a_middle_lane_gets_a_deck_but_no_parapet():
 
 def test_without_a_terrain_nothing_can_be_decided():
     built = V.build([_lane(1, -2, 2)], {1}, None, ViaductOptions())
-    assert built == {"ViaductDecks": [], "ViaductParapets": [], "ViaductPiers": []}
+    assert built == {"ViaductDecks": [], "ViaductParapets": [],
+                     "ViaductPiers": [], "ViaductInfill": []}
+
+
+# ---------------------------------------------------------------------------
+# Infill — the slivers lanelets leave between themselves
+# ---------------------------------------------------------------------------
+
+
+def test_a_gap_between_lanes_is_patched():
+    """On the ground a sliver shows the terrain; on a deck it is a slot to the street."""
+    lanes = [_lane(1, -6.0, -2.0, z=10.0), _lane(2, -1.7, 2.0, z=10.0)]  # 30 cm apart
+    patches = V.deck_infill(lanes, ViaductOptions(infill_gap=0.8))
+    assert patches
+
+    ys = [v[1] for mesh in patches for v in mesh.vertices]
+    assert -2.1 < min(ys) and max(ys) < -1.6, "the patch should sit in the gap"
+    zs = [v[2] for mesh in patches for v in mesh.vertices]
+    assert all(z == pytest.approx(10.0) for z in zs), "and at the height of the deck"
+
+
+def test_lanes_that_meet_need_no_patch():
+    lanes = [_lane(1, -6.0, -2.0, z=10.0), _lane(2, -2.0, 2.0, z=10.0)]
+    assert V.deck_infill(lanes, ViaductOptions(infill_gap=0.8)) == []
+
+
+def test_a_real_opening_is_left_alone():
+    """Two carriageways with a proper gap between them are not a survey artefact."""
+    lanes = [_lane(1, -20.0, -10.0, z=10.0), _lane(2, 10.0, 20.0, z=10.0)]
+    assert V.deck_infill(lanes, ViaductOptions(infill_gap=0.8)) == []
+
+
+def test_infill_can_be_turned_off():
+    lanes = [_lane(1, -6.0, -2.0, z=10.0), _lane(2, -1.7, 2.0, z=10.0)]
+    assert V.deck_infill(lanes, ViaductOptions(infill=False)) == []
+
+
+def test_the_patch_follows_a_sloping_deck():
+    lanes = [_lane(1, -6.0, -2.0, z=10.0, z_end=16.0),
+             _lane(2, -1.7, 2.0, z=10.0, z_end=16.0)]
+    patches = V.deck_infill(lanes, ViaductOptions(infill_gap=0.8))
+    zs = [v[2] for mesh in patches for v in mesh.vertices]
+    assert min(zs) == pytest.approx(10.0, abs=0.5)
+    assert max(zs) == pytest.approx(16.0, abs=0.5)
+
+
+# ---------------------------------------------------------------------------
+# Crossings sit on the carriageway rather than beside it
+# ---------------------------------------------------------------------------
+
+
+def test_a_crossing_is_cut_down_to_the_road_it_lies_on():
+    """Measured on the map: 67 of 84 crossings overlapped the carriageway, a
+    median 81 % of their area, at a median 7 cm apart in z."""
+    from city_builder.build import clip_crosswalks
+
+    road = _lane(1, -6.0, 6.0, z=10.0, x0=0.0, x1=100.0, n=11)
+    crossing = _lane(2, -12.0, 12.0, z=9.93, x0=40.0, x1=45.0, n=3)  # spills over both kerbs
+    groups = {"Roads": [road], "Crosswalks": [crossing]}
+    clip_crosswalks(groups, 0.005)
+
+    assert groups["Crosswalks"]
+    ys = [v[1] for mesh in groups["Crosswalks"] for v in mesh.vertices]
+    assert min(ys) >= -6.1 and max(ys) <= 6.1, "it should stop at the carriageway edge"
+
+    zs = [v[2] for mesh in groups["Crosswalks"] for v in mesh.vertices]
+    assert all(z == pytest.approx(10.005) for z in zs), "and sit just on top of the road"
+
+
+def test_a_crossing_with_no_road_under_it_is_dropped():
+    from city_builder.build import clip_crosswalks
+
+    groups = {"Roads": [_lane(1, -6.0, 6.0, z=10.0)],
+              "Crosswalks": [_lane(2, 40.0, 50.0, z=10.0, x0=0.0, x1=10.0, n=3)]}
+    clip_crosswalks(groups, 0.005)
+    assert groups["Crosswalks"] == []

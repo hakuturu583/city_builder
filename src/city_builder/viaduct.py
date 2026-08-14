@@ -38,7 +38,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from itertools import pairwise
 
-from .geometry import Mesh, Ribbon
+from .geometry import Mesh, Ribbon, height_lookup, triangulate_polygon
 
 Point = tuple[float, float, float]
 
@@ -73,6 +73,10 @@ class ViaductOptions:
     pier_min_clearance: float = 3.0  # below this the deck is close enough to grade
 
     neighbour_probe: float = 1.5  # how far past a boundary to look for another deck
+
+    infill: bool = True  # patch the slivers between lanelets
+    infill_gap: float = 0.8  # widest sliver to treat as a survey gap rather than a hole
+    infill_max_area: float = 80.0  # bigger than this is a real opening, not a gap
 
     def __post_init__(self) -> None:
         for name in ("bridge_clearance", "deck_thickness", "parapet_height",
@@ -158,21 +162,13 @@ def _outward_normals(ribbon) -> tuple[list[tuple[float, float]], list[tuple[floa
     return out_left, out_right
 
 
-def occupancy(ribbons: Sequence[object], elevated: set[int], *, close_gap: float = 0.5):
-    """A predicate: is this spot covered by the elevated network?
-
-    Neighbouring lanelets are surveyed independently and do not quite meet, so
-    each footprint is dilated a little before the union. Otherwise the sliver
-    between two lanes reads as open air and both of them get a parapet.
-    """
-    from shapely.geometry import Point as ShapelyPoint
+def _footprints(ribbons: Sequence[object], elevated: set[int] | None):
+    """Plan-view polygons of the given ribbons, made valid."""
     from shapely.geometry import Polygon as ShapelyPolygon
-    from shapely.ops import unary_union
-    from shapely.prepared import prep
 
     polygons = []
     for ribbon in ribbons:
-        if ribbon.id not in elevated:
+        if elevated is not None and ribbon.id not in elevated:
             continue
         ring = [(p[0], p[1]) for p in ribbon.ring()]
         if len(ring) < 4:
@@ -181,8 +177,23 @@ def occupancy(ribbons: Sequence[object], elevated: set[int], *, close_gap: float
         if not polygon.is_valid:
             polygon = polygon.buffer(0)
         if not polygon.is_empty and polygon.area > 1e-6:
-            polygons.append(polygon.buffer(close_gap, join_style=2))
+            polygons.append(polygon)
+    return polygons
 
+
+def occupancy(ribbons: Sequence[object], elevated: set[int] | None = None, *,
+              close_gap: float = 0.5):
+    """A predicate: is this spot covered by the elevated network?
+
+    Neighbouring lanelets are surveyed independently and do not quite meet, so
+    each footprint is dilated a little before the union. Otherwise the sliver
+    between two lanes reads as open air and both of them get a parapet.
+    """
+    from shapely.geometry import Point as ShapelyPoint
+    from shapely.ops import unary_union
+    from shapely.prepared import prep
+
+    polygons = [p.buffer(close_gap, join_style=2) for p in _footprints(ribbons, elevated)]
     if not polygons:
         return lambda _x, _y: False
 
@@ -363,6 +374,61 @@ def pier_boxes(ribbon, heightmap, options: ViaductOptions) -> list[Mesh]:
     return boxes
 
 
+def _deck_samples(ribbons: Sequence[object]) -> list[Point]:
+    return [p for ribbon in ribbons for p in list(ribbon.left) + list(ribbon.right)]
+
+
+def deck_infill(sections: Sequence[object], options: ViaductOptions) -> list[Mesh]:
+    """Patches for the slivers between neighbouring decks.
+
+    Lanelets are surveyed one at a time and do not tile exactly, so a few
+    centimetres of nothing run down the line between two lanes. On the ground
+    that shows the terrain through the carriageway, which is ugly; on a viaduct
+    there is no terrain, so it is a slot straight through to the street below.
+
+    The patch is the difference between the network's footprint and the same
+    footprint with its gaps closed — dilate, erode, subtract. Anything larger
+    than ``infill_max_area`` is left alone: a real opening between two
+    carriageways is meant to be there.
+    """
+    if not options.infill or options.infill_gap <= 0:
+        return []
+
+    from shapely.geometry import Polygon as ShapelyPolygon
+    from shapely.ops import unary_union
+
+    polygons = _footprints(sections, None)
+    if not polygons:
+        return []
+
+    covered = unary_union(polygons)
+    gap = options.infill_gap
+    closed = covered.buffer(gap, join_style=2).buffer(-gap, join_style=2)
+    # Explicitly close the interiors too: a slot ringed by lanelets survives the
+    # erosion, because dilation cannot reach into a hole from outside it.
+    without_holes = []
+    for polygon in getattr(closed, "geoms", [closed]):
+        if polygon.geom_type != "Polygon":
+            continue
+        keep = [ring for ring in polygon.interiors
+                if ShapelyPolygon(ring).area >= options.infill_max_area]
+        without_holes.append(ShapelyPolygon(polygon.exterior, keep))
+    if not without_holes:
+        return []
+
+    patches = unary_union(without_holes).difference(covered)
+    lift = height_lookup(_deck_samples(sections))
+
+    meshes = []
+    for patch in getattr(patches, "geoms", [patches]):
+        if patch.geom_type != "Polygon" or not (0.02 < patch.area < options.infill_max_area):
+            continue
+        mesh = triangulate_polygon(patch, lift)
+        if mesh.faces:
+            meshes.append(mesh)
+    return meshes
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -376,36 +442,43 @@ def build(ribbons: Sequence[object], elevated: set[int], heightmap,
     clearance there is no telling a viaduct from a road lying on the ground.
     """
     options = options or ViaductOptions()
-    decks: list[Mesh] = []
-    walls: list[Mesh] = []
-    piers: list[Mesh] = []
+    empty = {"ViaductDecks": [], "ViaductParapets": [], "ViaductPiers": [], "ViaductInfill": []}
     if heightmap is None:
-        return {"ViaductDecks": decks, "ViaductParapets": walls, "ViaductPiers": piers}
+        return empty
 
-    occupied = occupancy(ribbons, elevated)
-
+    # Which stretches are a bridge is decided first, and everything else is
+    # decided against those stretches rather than against whole lanelets: a ramp
+    # lying on the ground is not deck, so nothing may treat it as a neighbour.
+    sections: list[tuple[object, bool, bool]] = []
     for ribbon in ribbons:
         if ribbon.id not in elevated:
             continue
         vertices = min(len(ribbon.left), len(ribbon.right))
         for start, end in bridge_runs(ribbon, heightmap, options):
-            section = slice_ribbon(ribbon, start, end)
-            left_outer, right_outer = outer_flags(section, occupied, options.neighbour_probe)
+            # An end stopping mid-ribbon is where the deck meets grade: that is
+            # an abutment and wants a face. An end at the lanelet's own end is a
+            # joint with the next lanelet, and capping it walls the beam.
+            sections.append((slice_ribbon(ribbon, start, end),
+                             start > 0, end < vertices - 1))
+    if not sections:
+        return empty
 
-            if options.deck:
-                shell = deck_shell(
-                    section, options.deck_thickness,
-                    # An end stopping mid-ribbon is where the deck meets grade:
-                    # that is an abutment and wants a face. An end at the
-                    # lanelet's own end is a joint with the next lanelet, and
-                    # capping it would put a wall inside the beam.
-                    cap_start=start > 0, cap_end=end < vertices - 1,
-                    left_outer=left_outer, right_outer=right_outer,
-                )
-                if shell.faces:
-                    decks.append(shell)
+    only = [section for section, _s, _e in sections]
+    occupied = occupancy(only)
 
-            walls.extend(parapet_walls(section, left_outer, right_outer, options))
-            piers.extend(pier_boxes(section, heightmap, options))
+    decks: list[Mesh] = []
+    walls: list[Mesh] = []
+    piers: list[Mesh] = []
+    for section, cap_start, cap_end in sections:
+        left_outer, right_outer = outer_flags(section, occupied, options.neighbour_probe)
+        if options.deck:
+            shell = deck_shell(section, options.deck_thickness,
+                               cap_start=cap_start, cap_end=cap_end,
+                               left_outer=left_outer, right_outer=right_outer)
+            if shell.faces:
+                decks.append(shell)
+        walls.extend(parapet_walls(section, left_outer, right_outer, options))
+        piers.extend(pier_boxes(section, heightmap, options))
 
-    return {"ViaductDecks": decks, "ViaductParapets": walls, "ViaductPiers": piers}
+    return {"ViaductDecks": decks, "ViaductParapets": walls, "ViaductPiers": piers,
+            "ViaductInfill": deck_infill(only, options)}

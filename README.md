@@ -162,6 +162,24 @@ first and all of them build a wall down the middle of the carriageway:
 | skip boundaries that coincide geometrically | inside a junction, turning lanelets *overlap* rather than tile |
 | the outline of the union of all decks | picks up the outline of every shoulder strip inside the carriageway |
 
+Two more things a deck needs that the ground does not.
+
+**Infill.** Lanelets are surveyed one at a time and do not tile exactly, so a
+few centimetres of nothing run down the line between two lanes. On the ground
+that shows the terrain through the carriageway; on a viaduct it is a slot
+straight through to the street below. The patch is the difference between the
+network's footprint and the same footprint with its gaps closed — dilate,
+erode, subtract — with anything larger than `infill_max_area` left alone,
+because a real opening between two carriageways is meant to be there.
+
+**Clipped crossings.** A crossing lanelet covers the road *and* the footway
+either side, and the road is already there. Measured, 67 of 84 crossing
+surfaces overlapped the carriageway, a median 81 % of their area, 4646 m² in
+total, at a median 7 cm apart in z — a z-fight at best, and on a viaduct the
+overhang sails past the deck edge with nothing under it. Each crossing is
+intersected with the carriageway and lifted `crosswalk_lift` onto it, so it
+survives as a region a consumer can select without being a second road.
+
 ```bash
 uv run city-builder build --input map.osm --output scene.blend \
     --parapet-height 1.1 --deck-thickness 1.2 --pier-spacing 28

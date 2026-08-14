@@ -65,6 +65,7 @@ class SurfaceOptions:
     dash_length: float = 3.0
     dash_gap: float = 5.0
     curb_height: float = 0.15
+    crosswalk_lift: float = 0.005  # a crossing sits on the carriageway, not in it
     z_fight_bias: float = 0.0002
 
     crosswalks: bool = True

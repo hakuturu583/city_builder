@@ -359,3 +359,42 @@ def as_json(value: Any) -> Any:  # pragma: no cover - convenience for debugging 
     if isinstance(value, (Ribbon, Polygon)):
         return value.__dict__
     raise TypeError(type(value))
+
+
+def height_lookup(samples: Sequence[Sequence[float]]):
+    """Nearest surveyed height, for plan-view geometry that has only x and y."""
+    import numpy as np
+    from scipy.spatial import cKDTree
+
+    points = np.asarray([(p[0], p[1]) for p in samples], dtype=float)
+    heights = np.asarray([p[2] for p in samples], dtype=float)
+    tree = cKDTree(points)
+    return lambda x, y: float(heights[tree.query((x, y))[1]])
+
+
+def triangulate_polygon(polygon, lift, *, offset: float = 0.0) -> Mesh:
+    """A shapely polygon as a mesh, standing at the height ``lift`` reports.
+
+    Delaunay over the polygon, keeping the triangles whose interior point is
+    inside it — which is how holes and concave outlines survive.
+    """
+    from shapely.ops import triangulate
+    from shapely.prepared import prep
+
+    inside = prep(polygon)
+    vertices: list[tuple[float, float, float]] = []
+    faces: list[list[int]] = []
+    index: dict[tuple[int, int], int] = {}
+    for triangle in triangulate(polygon):
+        if not inside.contains(triangle.representative_point()):
+            continue
+        face = []
+        for x, y in list(triangle.exterior.coords)[:-1]:
+            key = (round(x * 1000), round(y * 1000))
+            if key not in index:
+                index[key] = len(vertices)
+                vertices.append((x, y, lift(x, y) + offset))
+            face.append(index[key])
+        if len(set(face)) == 3:
+            faces.append(face)
+    return Mesh(vertices, faces)
