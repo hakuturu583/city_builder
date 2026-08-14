@@ -468,7 +468,8 @@ def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | Non
                 fbx: str | None = None,
                 ground_texture: str | None = None, tile_metres: float = 12.0,
                 facade_dir: str | None = None, road_texture: str | None = None,
-                marking_options: MarkingOptions | None = None, verbose: bool = True) -> None:
+                marking_options: MarkingOptions | None = None,
+                markings_dir: str | None = None, verbose: bool = True) -> None:
     """Build the result into Blender and export it.
 
     ``ground_texture`` is a tile image to repeat across the ground. Only the
@@ -479,8 +480,14 @@ def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | Non
     objects = scene.build(result.groups, verbose=verbose)
 
     if result.marking_pages:
-        anchor = blend or glb or fbx or "scene"
-        pages = write_marking_pages(result, os.path.splitext(os.path.abspath(anchor))[0] + "_markings")
+        # The pages live beside whatever is being written. Nothing being
+        # written — a render, say — means the caller has to say where, or the
+        # scene would leave a directory behind in whatever cwd it ran in.
+        anchor = blend or glb or fbx
+        directory = markings_dir or (
+            os.path.splitext(os.path.abspath(anchor))[0] + "_markings" if anchor
+            else os.path.abspath("scene_markings"))
+        pages = write_marking_pages(result, directory)
         options = marking_options or MarkingOptions()
         for name, page_of_shape in result.marking_page_of_shape.items():
             carrier = objects.get(name)

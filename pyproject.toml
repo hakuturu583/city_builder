@@ -31,9 +31,13 @@ texture = [
     "peft>=0.11",  # diffusers needs it to load the LCM LoRA
     "huggingface-hub>=0.23",  # `city-builder models` reads and fills the cache
 ]
+mcp = [
+    "mcp>=1.2",
+]
 
 [project.scripts]
 city-builder = "city_builder.cli:main"
+city-builder-mcp = "city_builder.mcp_server:main"
 
 [dependency-groups]
 dev = ["pytest>=7.0", "ruff>=0.1"]
