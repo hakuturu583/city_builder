@@ -78,3 +78,32 @@ def test_applying_a_tile_replaces_only_that_object(tmp_path):
     assert ground.data.uv_layers, "the tile needs UVs to repeat over"
     assert markings.data.materials[0].name == before, "a preserved surface must not change"
     assert not markings.data.uv_layers, "and must not be re-parameterised either"
+
+
+# ---------------------------------------------------------------------------
+# Choosing the material
+# ---------------------------------------------------------------------------
+
+
+def test_a_named_subset_of_styles_comes_back_in_the_order_asked_for():
+    from city_builder.texture import styles_named
+
+    assert [name for name, _ in styles_named(["brick", "concrete"])] == ["brick", "concrete"]
+
+
+def test_a_misspelt_style_is_an_error_not_a_shrug():
+    # Silently narrowing a street to one material is only visible in the render.
+    import pytest
+
+    from city_builder.texture import styles_named
+
+    with pytest.raises(ValueError, match="unknown facade style"):
+        styles_named(["brick", "brik"])
+
+
+def test_prompts_cycle_so_a_short_run_still_covers_every_style():
+    from city_builder.texture import styled_prompts, styles_named
+
+    prompts = styled_prompts(6, styles=styles_named(["brick", "concrete"]))
+    assert len({p for p in prompts}) == 2
+    assert sum(1 for p in prompts if "brick" in p) == 3

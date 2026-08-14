@@ -676,6 +676,21 @@ uv run city-builder-mcp          # stdio
   "args": ["run", "--directory", "/path/to/city_builder", "city-builder-mcp"]}}}
 ```
 
+Or from the container, which every push to `main` publishes:
+
+```json
+{"mcpServers": {"city-builder": {"command": "docker", "args": [
+  "run", "-i", "--rm", "-v", "/path/to/maps:/maps:ro", "-v", "/path/to/out:/work",
+  "--user", "1000:1000", "ghcr.io/hakuturu583/city_builder-mcp"]}}}
+```
+
+`-i` is not optional: the client speaks MCP on the process's stdin and stdout.
+Mount the maps and an output directory — scenes, exports and textures are
+written where you ask for them, and nothing else leaves the container. Build,
+survey, export and render all work in there (the render falls back to software
+GL, so it is slow but correct); the diffusion tools do not, because the image
+leaves out several gigabytes of CUDA that would need a GPU on the host anyway.
+
 The tools are not the CLI with a different coat on. Two things change when the
 caller is a language model rather than a person at a shell.
 
@@ -701,8 +716,8 @@ between them without a wall clock in front of it.
 | `list_scenes` / `forget_scene` | what is held, and dropping it |
 | `survey_scene` | the scene in numbers — see below |
 | `make_layouts` | facade layouts and control images. Seconds, no GPU |
-| `generate_facades` | paint them with a diffusion model. **GPU, minutes** |
-| `make_tile` | a tileable ground or road texture |
+| `generate_facades` | paint them from your prompts. **GPU, minutes** |
+| `make_tile` | a tileable ground or road texture, from a prompt |
 | `export` | `.blend` / `.glb` / `.fbx` |
 | `render_view` | aerial, plan or street still, returned as an image |
 | `render_drive` | a drive along the roads. **Minutes** |
@@ -720,6 +735,16 @@ each of them was a bug before it was a metric:
                "decks": 93, "parapets": 87, "piers": 168},
  "route": {"lanelets": 60, "length_m": 3045.4, "z_range_m": [3.53, 12.68]}}
 ```
+
+The texture tools take the prompts. The control image fixes the architecture —
+where the floors and windows are — so the prompt is the only thing left
+deciding what a building is *made of*: one prompt gives a street built entirely
+of one material, and several are spread across the sheets. Each is given a
+suffix that keeps the result usable as a texture (flat elevation, overcast, no
+sky, no perspective), so an agent writes the material rather than the
+photograph. `list_styles` hands back the built-in set to copy or narrow with,
+and both tools answer with a picture — a contact sheet of the sheets kept, the
+tile itself — because a wrap that scores well can still be the wrong material.
 
 Holes are split by **width, not area**, because width is what makes one a
 defect: a forty-metre seam a handspan wide is eight square metres and a wheel
