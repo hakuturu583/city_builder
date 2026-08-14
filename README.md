@@ -234,6 +234,11 @@ still does.
 
 Two more things a deck needs that the ground does not.
 
+The infilled gaps count as deck for that test, which is the point of filling
+them: without it the outline still has a hole where the patch went, and the
+barrier runs all the way round the island between two turning lanes. One
+description of the gap, used by both.
+
 **Infill.** Lanelets are surveyed one at a time and do not tile exactly, so a
 few centimetres of nothing run down the line between two lanes. On the ground
 that shows the terrain through the carriageway; on a viaduct it is a slot

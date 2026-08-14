@@ -208,8 +208,14 @@ def _footprints(ribbons: Sequence[object], elevated: set[int] | None):
 
 
 def deck_outline(ribbons: Sequence[object], elevated: set[int] | None = None, *,
-                 close_gap: float = 0.5):
+                 close_gap: float = 0.5, patches: Sequence[object] = ()):
     """The outline of the elevated network, as one geometry.
+
+    ``patches`` are the infilled gaps, and they belong in here: they are deck,
+    so nothing about them is an edge. Left out, the outline still has a hole
+    where the patch went and the barrier runs all the way round the island
+    between two turning lanes — which was there in the render and is exactly
+    the thing the infill exists to remove.
 
     Footprints are dilated before the union because neighbouring lanelets are
     surveyed independently and do not quite meet; without it the sliver between
@@ -218,6 +224,7 @@ def deck_outline(ribbons: Sequence[object], elevated: set[int] | None = None, *,
     from shapely.ops import unary_union
 
     polygons = [p.buffer(close_gap, join_style=2) for p in _footprints(ribbons, elevated)]
+    polygons += [p.buffer(close_gap, join_style=2) for p in patches]
     if not polygons:
         return None
     return unary_union(polygons).boundary
@@ -407,7 +414,49 @@ def _deck_samples(ribbons: Sequence[object]) -> list[Point]:
     return [p for ribbon in ribbons for p in list(ribbon.left) + list(ribbon.right)]
 
 
-def deck_infill(sections: Sequence[object], options: ViaductOptions) -> list[Mesh]:
+def infill_polygons(sections: Sequence[object], options: ViaductOptions):
+    """``(patches, covered)``: the gaps to fill, and what the lanelets cover.
+
+    The patch is the difference between the network's footprint and the same
+    footprint with its gaps closed — dilate, erode, subtract — with anything
+    larger than ``infill_max_area`` left alone, because a real opening between
+    two carriageways is meant to be there.
+    """
+    from shapely.geometry import Polygon as ShapelyPolygon
+    from shapely.ops import unary_union
+
+    polygons = _footprints(sections, None)
+    if not polygons:
+        return [], None
+
+    covered = unary_union(polygons)
+    if not options.infill or options.infill_gap <= 0:
+        return [], covered
+
+    gap = options.infill_gap
+    closed = covered.buffer(gap, join_style=2).buffer(-gap, join_style=2)
+    # Explicitly close the interiors too: a slot ringed by lanelets survives the
+    # erosion, because dilation cannot reach into a hole from outside it.
+    without_holes = []
+    for polygon in getattr(closed, "geoms", [closed]):
+        if polygon.geom_type != "Polygon":
+            continue
+        keep = [ring for ring in polygon.interiors
+                if ShapelyPolygon(ring).area >= options.infill_max_area]
+        without_holes.append(ShapelyPolygon(polygon.exterior, keep))
+    if not without_holes:
+        return [], covered
+
+    difference = unary_union(without_holes).difference(covered)
+    patches = [
+        patch for patch in getattr(difference, "geoms", [difference])
+        if patch.geom_type == "Polygon" and 0.02 < patch.area < options.infill_max_area
+    ]
+    return patches, covered
+
+
+def deck_infill(sections: Sequence[object], options: ViaductOptions,
+                patches: Sequence[object] | None = None) -> list[Mesh]:
     """Patches for the slivers between neighbouring decks.
 
     Lanelets are surveyed one at a time and do not tile exactly, so a few
@@ -493,7 +542,8 @@ def build(ribbons: Sequence[object], elevated: set[int], heightmap,
         return empty
 
     only = [section for section, _s, _e in sections]
-    outline = deck_outline(only, close_gap=options.edge_buffer)
+    patches, _covered = infill_polygons(only, options)
+    outline = deck_outline(only, close_gap=options.edge_buffer, patches=patches)
 
     decks: list[Mesh] = []
     walls: list[Mesh] = []
@@ -510,4 +560,4 @@ def build(ribbons: Sequence[object], elevated: set[int], heightmap,
         piers.extend(pier_boxes(section, heightmap, options))
 
     return {"ViaductDecks": decks, "ViaductParapets": walls, "ViaductPiers": piers,
-            "ViaductInfill": deck_infill(only, options)}
+            "ViaductInfill": deck_infill(only, options, patches)}

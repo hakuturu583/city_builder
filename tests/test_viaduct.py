@@ -453,3 +453,32 @@ def test_the_kerb_at_the_edge_of_the_road_survives():
     clip_curbs(groups)
     assert groups["Curbs"]
     assert len(groups["Curbs"][0].left) == len(edge)
+
+
+def test_an_infilled_gap_is_deck_and_so_has_no_edge():
+    """The barrier used to run all the way round the island between two turning
+    lanes: the patch filled the gap, and the outline still had the hole."""
+    ring = [_lane(1, -8.0, -4.0, x0=0.0, x1=60.0),
+            _lane(2, 4.0, 8.0, x0=0.0, x1=60.0),
+            _lane(3, -4.0, 4.0, x0=0.0, x1=6.0),
+            _lane(4, -4.0, 4.0, x0=54.0, x1=60.0)]
+    options = ViaductOptions(infill_gap=0.8, infill_max_area=1e6)
+    patches, _covered = V.infill_polygons(ring, options)
+    assert patches, "the island between the lanes should be patched"
+
+    with_hole = V.deck_outline(ring, close_gap=0.5)
+    filled = V.deck_outline(ring, close_gap=0.5, patches=patches)
+    inner = np.array([[30.0, 0.0]])  # the middle of the island
+
+    import shapely
+    assert shapely.distance(with_hole, shapely.points(inner))[0] < 5.0
+    assert shapely.distance(filled, shapely.points(inner))[0] > 7.0
+
+
+def test_the_infill_is_the_same_geometry_the_outline_was_told_about():
+    """Two descriptions of the same gap drift; one description cannot."""
+    lanes = [_lane(1, -6.0, -2.0), _lane(2, -1.7, 2.0)]
+    options = ViaductOptions(infill_gap=0.8)
+    patches, _ = V.infill_polygons(lanes, options)
+    meshes = V.deck_infill(lanes, options, patches)
+    assert len(meshes) == len(patches)
