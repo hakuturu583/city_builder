@@ -105,6 +105,18 @@ CLASSES: dict[str, SurfaceClass] = {
             "Roofs", "roof", GENERATE, "roof", (0.30, 0.35, 0.85), 11,
             note="separate from the facades; a texturing pass treats them differently",
         ),
+        SurfaceClass(
+            "ViaductDecks", "viaduct", GENERATE, "concrete", (0.25, 1.00, 0.25), 12,
+            note="soffit and sides of an elevated road; the map surveys only its top",
+        ),
+        SurfaceClass(
+            "ViaductParapets", "viaduct", GENERATE, "concrete", (0.75, 1.00, 0.00), 13,
+            note="the wall along an elevated deck, distinct from a kerb at grade",
+        ),
+        SurfaceClass(
+            "ViaductPiers", "viaduct", GENERATE, "concrete", (1.00, 0.25, 1.00), 14,
+            note="columns from the reconstructed ground to the soffit",
+        ),
     )
 }
 

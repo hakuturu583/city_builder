@@ -10,9 +10,11 @@ from typing import Any
 from . import buildings as buildings_module
 from . import classes, facade_layout, lanelet, scene
 from . import ground as ground_module
+from . import viaduct as viaduct_module
 from .buildings import BuildingOptions
 from .frame import LocalFrame
 from .surfaces import SurfaceOptions, extract
+from .viaduct import ViaductOptions
 
 
 @dataclass
@@ -47,6 +49,7 @@ def build_city(
     fill_island: float = 0.0,
     buildings: bool = False,
     building_options: BuildingOptions | None = None,
+    viaduct_options: ViaductOptions | None = None,
     verbose: bool = True,
 ) -> BuildResult:
     """Read a map and produce every surface, without touching Blender.
@@ -92,6 +95,19 @@ def build_city(
                                                     return_road_union=True)
         groups["Ground"] = [mesh]
 
+        # An elevated lanelet is surveyed as a driving surface and nothing
+        # else: no slab, no soffit, no columns. Which *parts* of it are a bridge
+        # is decided by clearance to the terrain, per cross-section — a ramp is
+        # a bridge at one end and a road at the other.
+        structure = viaduct_module.build(surfaces, elevated, heightmap, viaduct_options)
+        for name, meshes in structure.items():
+            if meshes:
+                groups[name] = meshes
+                stats[name] = len(meshes)
+        if verbose and any(structure.values()):
+            print("[build] viaduct: "
+                  + ", ".join(f"{len(v)} {k[7:].lower()}" for k, v in structure.items() if v))
+
         measured = float((heightmap.support == 0).mean() * 100)
         stats.update({
             "elevated_lanelets": len(elevated),
@@ -124,6 +140,25 @@ def build_city(
                       f"({len(floors)} distinct, one facade sheet family each)")
 
     return BuildResult(frame, groups, heightmap, elevated, datum, stats, plots)
+
+
+def build_city_from_config(input_path: str, config, *, buildings: bool = False,
+                           ref_lat: float | None = None, ref_lon: float | None = None,
+                           projector: str = "utm", z_datum: float | None = None,
+                           z_offset: float = 0.0, verbose: bool = True) -> BuildResult:
+    """:func:`build_city`, with every option group taken from a
+    :class:`city_builder.config.CityConfig`."""
+    g = config.ground
+    return build_city(
+        input_path, ref_lat=ref_lat, ref_lon=ref_lon, projector=projector,
+        z_datum=z_datum, z_offset=z_offset,
+        surface_options=config.surfaces,
+        ground=g.enabled, cell=g.cell, smooth=g.smooth, z_gap=g.z_gap,
+        min_overlap=g.min_overlap, clearance=g.clearance,
+        ground_drop=g.drop, fill_island=g.fill_island,
+        buildings=buildings, building_options=config.buildings,
+        viaduct_options=config.viaduct, verbose=verbose,
+    )
 
 
 def write_manifest(result: BuildResult, path: str) -> None:

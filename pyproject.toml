@@ -16,6 +16,7 @@ dependencies = [
     "numpy>=1.24,<2",   # bpy links against the 1.x ABI
     "click>=8.0",
     "pillow>=10.0",  # writing tile images; tiny, and the procedural path needs it too
+    "pyyaml>=6.0",  # the config file; tiny, and every knob lives in one now
 ]
 
 [project.optional-dependencies]

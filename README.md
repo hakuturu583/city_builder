@@ -125,6 +125,49 @@ about before "simplifying" this:
   is measured and where it is invented. A block interior far from any street is
   an educated guess.
 
+## Elevated roads
+
+A Lanelet2 map surveys the driving surface and nothing else, so an elevated
+lanelet arrives as a flat ribbon in the air with no thickness, no soffit and
+nothing holding it up. Measured on the Nishi-Shinjuku map, the column under the
+deck held **no geometry at all between 5 m and 9 m** — from a car on the deck
+the road ends in a knife edge with the city visible below it, which reads as a
+height bug rather than as a missing model.
+
+Where a bridge exists follows [Galin et al., *Procedural Generation of Roads*
+(CGF 2010)](https://perso.liris.cnrs.fr/egalin/Articles/2010-roads.pdf), §6.1:
+sample the trajectory, take the difference between its height and the terrain
+under it, and label each sample by that clearance. Only the stretches above
+`bridge_clearance` get the bridge model.
+
+**The granularity is the whole point.** Working per lanelet — "this lanelet is
+in the elevated set, extrude all of it downwards" — puts girders on the street
+below, because an approach ramp is one lanelet running from deck height down to
+grade. A ramp is a bridge at one end and a road at the other.
+
+Piers follow [Kapu, *Procedural Generation of Bridges and Tunnels* (MSc, NCCA
+2010)](https://nccastaff.bournemouth.ac.uk/jmacey/MastersProject/MSc10/06ChaitanyaKapu/thesis.pdf):
+generated between the deck path and the same path projected onto the terrain,
+then thinned by spacing and a minimum clearance.
+
+Parapets go on the **outer edge of the outermost lanelets and nowhere else**. A
+boundary counts as outer when there is no other deck just beyond it, probed
+against the footprint of the elevated network. Three cheaper rules were tried
+first and all of them build a wall down the middle of the carriageway:
+
+| rule | why it fails |
+|---|---|
+| a parapet on every lanelet boundary | a carriageway is several lanelets wide; each lane ends up in its own trench |
+| skip boundaries shared by linestring id | this map names 136 of its 165 elevated boundaries exactly once |
+| skip boundaries that coincide geometrically | inside a junction, turning lanelets *overlap* rather than tile |
+| the outline of the union of all decks | picks up the outline of every shoulder strip inside the carriageway |
+
+```bash
+uv run city-builder build --input map.osm --output scene.blend \
+    --parapet-height 1.1 --deck-thickness 1.2 --pier-spacing 28
+uv run city-builder build ... --no-viaduct     # just the driving surfaces
+```
+
 ## Procedural buildings
 
 The map describes the carriageway and nothing else, so the blocks between the
@@ -415,6 +458,32 @@ ground = HeightMap.from_json(data["heightmap"])
 x, y = frame.to_local(35.6902, 139.6914)
 z = ground.sample(x, y)
 ```
+
+## Configuration
+
+Every option group is a dataclass, and `CityConfig` nests them so a whole build
+can be written down instead of assembled from flags.
+
+```bash
+uv run city-builder config --output city.yaml   # the defaults, as a file
+uv run city-builder config                      # every key, type and default
+uv run city-builder config --check city.yaml    # what it changes, before a build
+uv run city-builder build --input map.osm --output scene.blend --config city.yaml
+```
+
+```yaml
+surfaces:
+  curb_height: 0.15
+viaduct:
+  parapet_height: 1.1
+  bridge_clearance: 2.0
+  pier_spacing: 28.0
+```
+
+Unknown keys are an error rather than a shrug — a silently ignored typo in a
+config file is the worst outcome available, since the run succeeds, the setting
+does nothing, and the only evidence is in the geometry. Any flag passed
+explicitly beats the file.
 
 ## Requirements
 

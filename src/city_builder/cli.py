@@ -6,8 +6,6 @@ import os
 
 import click
 
-from . import ground as ground_module
-
 
 @click.group()
 @click.version_option(package_name="city-builder")
@@ -42,17 +40,18 @@ def main():
               help="Zebra bars from the map's pedestrian_marking rings")
 @click.option("--curbs/--no-curbs", default=None, help="Stand road_border lines up into kerbs")
 # ground
-@click.option("--ground/--no-ground", default=True)
-@click.option("--cell", type=float, default=ground_module.DEFAULT_CELL, help="Ground grid cell (m)")
-@click.option("--smooth", type=float, default=ground_module.DEFAULT_SMOOTH, help="Smoothing radius in cells")
-@click.option("--z-gap", type=float, default=ground_module.DEFAULT_Z_GAP,
+@click.option("--ground/--no-ground", "ground_enabled", default=None)
+@click.option("--cell", type=float, default=None, help="Ground grid cell (m)")
+@click.option("--smooth", type=float, default=None, help="Smoothing radius in cells")
+@click.option("--z-gap", type=float, default=None,
               help="Separation before two overlapping lanelets count as stacked")
-@click.option("--min-overlap", type=float, default=ground_module.DEFAULT_MIN_OVERLAP,
+@click.option("--min-overlap", type=float, default=None,
               help="Minimum overlap area (m2) for the stacked test")
-@click.option("--clearance", type=float, default=ground_module.DEFAULT_CLEARANCE,
+@click.option("--clearance", type=float, default=None,
               help="Height above the local street before a connected ramp counts as elevated")
-@click.option("--ground-drop", type=float, default=0.05, help="Hold the ground this far under the road")
-@click.option("--fill-island", type=float, default=0.0,
+@click.option("--ground-drop", "drop", type=float, default=None,
+              help="Hold the ground this far under the road")
+@click.option("--fill-island", type=float, default=None,
               help="Absorb junction scraps below this area into the carriageway (can leave holes)")
 # buildings
 @click.option("--buildings/--no-buildings", default=False,
@@ -79,33 +78,51 @@ def main():
 @click.option("--tile-metres", type=float, default=12.0, help="How far one tile spans")
 @click.option("--facade-dir", default=None,
               help="Directory of facade sheets (see `city-builder layouts` / `facades`)")
+# viaduct — the rest of its knobs live in the config file
+@click.option("--config", "config_path", default=None,
+              help="YAML config; see `city-builder config --output city.yaml`")
+@click.option("--deck-thickness", type=float, default=None, help="Slab depth of an elevated road (m)")
+@click.option("--parapet-height", type=float, default=None, help="Wall along an elevated deck (m)")
+@click.option("--pier-spacing", type=float, default=None, help="Distance between columns (m)")
+@click.option("--viaduct/--no-viaduct", "viaduct_on", default=None,
+              help="Build the structure under an elevated road at all")
 @click.option("--quiet", is_flag=True)
 def build_command(input_path, blend, glb, heightmap_path, manifest_path, ground_texture,
-                  tile_metres, facade_dir, quiet, **kwargs):
-    """Build a scene from a Lanelet2 map."""
-    from .build import build_city, build_scene, options_from_kwargs, write_heightmap, write_manifest
+                  tile_metres, facade_dir, config_path, viaduct_on, quiet, **kwargs):
+    """Build a scene from a Lanelet2 map.
+
+    Options come from ``--config`` if given, and any flag passed explicitly
+    wins over the file: someone who typed ``--curb-height 0.2`` means it.
+    """
+    from .build import build_city_from_config, build_scene, write_heightmap, write_manifest
+    from .config import CityConfig, merge_overrides
 
     if not any((blend, glb, heightmap_path, manifest_path)):
         raise click.UsageError("nothing to write: pass --output, --glb, --heightmap or --manifest")
 
-    building_keys = (
-        "setback", "target_lot_area", "min_lot_area", "lot_margin", "coverage", "vacancy",
-        "min_height", "max_height", "floor_height", "facade_width", "tall_bias",
-        "max_buildings", "seed",
-    )
-    building_values = {k: kwargs.pop(k) for k in building_keys}
+    try:
+        config = CityConfig.from_yaml(config_path) if config_path else CityConfig()
+    except ValueError as error:
+        raise click.UsageError(f"{config_path}: {error}") from error
 
-    surface_keys = (
-        "max_segment", "marking_width", "stop_line_width", "dash_length", "dash_gap", "curb_height",
-        "crosswalks", "walkways", "markings", "stop_lines", "crosswalk_stripes", "curbs",
-    )
-    options = options_from_kwargs(**{k: kwargs.pop(k) for k in surface_keys})
+    sections = {
+        "surfaces": ("max_segment", "marking_width", "stop_line_width", "dash_length",
+                     "dash_gap", "curb_height", "crosswalks", "walkways", "markings",
+                     "stop_lines", "crosswalk_stripes", "curbs"),
+        "ground": ("cell", "smooth", "z_gap", "min_overlap", "clearance", "drop", "fill_island"),
+        "buildings": ("setback", "target_lot_area", "min_lot_area", "lot_margin", "coverage",
+                      "vacancy", "min_height", "max_height", "floor_height", "facade_width",
+                      "tall_bias", "max_buildings", "seed"),
+        "viaduct": ("deck_thickness", "parapet_height", "pier_spacing"),
+    }
+    for section, keys in sections.items():
+        config = merge_overrides(config, section, **{k: kwargs.pop(k) for k in keys})
+    config = merge_overrides(config, "ground", enabled=kwargs.pop("ground_enabled"))
+    if viaduct_on is not None:
+        config = merge_overrides(config, "viaduct",
+                                 deck=viaduct_on, parapets=viaduct_on, piers=viaduct_on)
 
-    from .buildings import BuildingOptions
-
-    building_options = BuildingOptions(**{k: v for k, v in building_values.items() if v is not None})
-    result = build_city(input_path, surface_options=options, building_options=building_options,
-                        verbose=not quiet, **kwargs)
+    result = build_city_from_config(input_path, config, verbose=not quiet, **kwargs)
 
     if heightmap_path:
         write_heightmap(result, heightmap_path)
@@ -504,3 +521,37 @@ def drive_command(input_path, scene_path, output_path, seconds, speed, fps, eye_
         samples=samples, engine="CYCLES" if engine == "cycles" else "BLENDER_EEVEE",
         verbose=not quiet)
     click.echo(f"wrote {written}")
+
+
+@main.command("config")
+@click.option("--output", "output_path", default=None, help="Write the defaults to this YAML file")
+@click.option("--check", "check_path", default=None, help="Load this config and report what it sets")
+def config_command(output_path, check_path):
+    """Show, write or check the option file.
+
+    Every knob is a field on a dataclass, so this listing and the file are the
+    same thing seen twice.
+    """
+    from .config import CityConfig, describe
+
+    if output_path:
+        CityConfig().write_yaml(output_path)
+        click.echo(f"wrote {output_path}")
+        return
+
+    if check_path:
+        try:
+            config = CityConfig.from_yaml(check_path)
+        except (ValueError, TypeError) as error:
+            raise click.ClickException(f"{check_path}: {error}") from error
+        defaults = CityConfig().to_dict()
+        changed = [(s, k, v) for s, keys in config.to_dict().items()
+                   for k, v in keys.items() if defaults[s][k] != v]
+        click.echo(f"{check_path}: valid, {len(changed)} setting(s) differ from the defaults")
+        for section, key, value in changed:
+            click.echo(f"  {section}.{key} = {value}  (default {defaults[section][key]})")
+        return
+
+    width = max(len(f"{s}.{k}") for s, k, _t, _d in describe())
+    for section, key, kind, default in describe():
+        click.echo(f"{f'{section}.{key}':<{width}}  {kind!s:<6}  {default}")
