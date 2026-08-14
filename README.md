@@ -133,6 +133,52 @@ for obj in bpy.data.objects:
         ...  # lock this one before running the texturing pass
 ```
 
+## The edge of the map
+
+A Lanelet2 map is cut out of a city, so its roads stop at an arbitrary line
+with nothing beyond them. Everything downstream reads that stopping point as
+ordinary ground: the terrain is interpolated across it, and the building
+generator — which fills whatever the roads leave — puts a block squarely across
+the end of the street. The scene comes out as a city with a wall around it.
+
+So the ends the map cut are run out to its edge. An end is loose when no
+lanelet *starts* where it finishes — the successor relation read off the shared
+boundary point ids, and directional, because two lanelets starting on the same
+pair is a fork rather than a connection. Each loose end continues straight, at
+the width and grade it had, until it reaches the edge or comes within
+`clearance` of another lanelet. A stub pointing into the side of a road that is
+already there gets nothing, which is "do not interfere with other lanelets"
+stated as geometry.
+
+Two things stop this from doing damage:
+
+* **A loose end is not always an edge.** A road that stops in the middle of the
+  city is a dead end the survey meant, and running it to the far corner draws a
+  lane-wide scratch across half a kilometre of blocks — 578 m of it, measured,
+  on Nishi-Shinjuku. So an end only counts as cut off if it leaves the road
+  network's own outline within `cut_off_within` metres. On that map this is the
+  difference between extending 73 loose ends and extending 23 of them; the
+  other 112 are inland dead ends left alone.
+* **The edge is fixed before anything moves.** It is a margin around the roads,
+  and the roads are what is being lengthened, so the ground is built to the box
+  the *surveyed* geometry gave. Taking a fresh margin around the extended roads
+  would push the edge out again and leave another ring of ground with no road
+  reaching it, which is the thing being fixed.
+
+The extension is applied to the **boundary polylines**, not to the finished
+lane surfaces. A lane bound, the line painted along it and the kerb beside it
+are one linestring as far as the map is concerned, so lengthening it once gives
+all three the same continuation — and the widening, dashing and pairing happen
+downstream as usual, so new dashes keep the phase of the old ones.
+
+```yaml
+extend:
+  enabled: true
+  margin: 30.0           # how far past the surveyed roads the edge sits
+  cut_off_within: 60.0   # farther inland than this and it is a dead end, not an edge
+  clearance: 1.0         # keep this far from any other lanelet
+```
+
 ## The ground
 
 A Lanelet2 map has no terrain — elevation exists only on the carriageway. The

@@ -91,11 +91,28 @@ def extract(
     options: SurfaceOptions | None = None,
     *,
     road_subtypes: Sequence[str] = ll.ROAD_SUBTYPES,
+    extensions=None,
+    converter=None,
 ) -> dict[str, list]:
-    """Read a loaded map into named groups of ribbons and polygons."""
+    """Read a loaded map into named groups of ribbons and polygons.
+
+    ``extensions`` is a :class:`city_builder.extend.Plan`. It is applied here,
+    to the boundary polylines, rather than to the finished surfaces: a lane
+    bound, the line painted along it and the kerb beside it are one linestring
+    as far as the map is concerned, so lengthening the polyline once gives all
+    three the same continuation, and the widening, dashing and pairing below
+    carry on as if the survey had gone that bit further.
+    """
     options = options or SurfaceOptions()
-    convert = ll.PointConverter(ll2, projector, frame)
+    convert = converter or ll.PointConverter(ll2, projector, frame)
     road_subtypes = tuple(road_subtypes)
+
+    def polyline(primitive) -> list:
+        """The primitive's points, continued past the edge of the survey."""
+        points = convert.polyline(primitive)
+        if extensions is None or len(primitive) < 2:
+            return points
+        return extensions.extended(points, primitive[0].id, primitive[-1].id)
 
     groups: dict[str, list] = {name: [] for name in Z_BIAS}
 
@@ -112,9 +129,12 @@ def extract(
         else:
             continue
 
+        # Only a road's bounds are continued: a crossing or a footway that
+        # happens to end on the same point is not the thing running off the map.
+        read = polyline if subtype in road_subtypes else convert.polyline
         paired = pair_bounds(
-            convert.polyline(lanelet.leftBound),
-            convert.polyline(lanelet.rightBound),
+            read(lanelet.leftBound),
+            read(lanelet.rightBound),
             max_segment=options.max_segment,
         )
         if paired is not None:
@@ -138,7 +158,7 @@ def extract(
             continue
 
         if options.curbs and ls_type == "road_border":
-            standing = extrude_curb(convert.polyline(linestring), options.curb_height)
+            standing = extrude_curb(polyline(linestring), options.curb_height)
             if standing:
                 groups["Curbs"].append(Ribbon(linestring.id, standing[0], standing[1], attrs))
             continue
@@ -147,7 +167,7 @@ def extract(
             continue
 
         width = options.thick_marking_width if ls_type == "line_thick" else options.marking_width
-        points = convert.polyline(linestring)
+        points = polyline(linestring)
         pieces = (
             split_dashes(points, options.dash_length, options.dash_gap)
             if attrs.get("subtype") == "dashed"

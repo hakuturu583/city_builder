@@ -23,6 +23,7 @@ from typing import Any
 
 from . import ground as ground_module
 from .buildings import BuildingOptions
+from .extend import ExtendOptions
 from .markings import MarkingOptions
 from .surfaces import SurfaceOptions
 from .viaduct import ViaductOptions
@@ -47,6 +48,7 @@ class CityConfig:
     """Every option group, in one object that can be read from a file."""
 
     surfaces: SurfaceOptions = field(default_factory=SurfaceOptions)
+    extend: ExtendOptions = field(default_factory=ExtendOptions)
     ground: GroundOptions = field(default_factory=GroundOptions)
     buildings: BuildingOptions = field(default_factory=BuildingOptions)
     markings: MarkingOptions = field(default_factory=MarkingOptions)
@@ -97,6 +99,7 @@ class CityConfig:
 
 _SECTIONS = {
     "surfaces": SurfaceOptions,
+    "extend": ExtendOptions,
     "ground": GroundOptions,
     "buildings": BuildingOptions,
     "markings": MarkingOptions,

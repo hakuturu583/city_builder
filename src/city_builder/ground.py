@@ -97,6 +97,7 @@ def build_heightmap(
     *,
     cell: float = DEFAULT_CELL,
     margin: float = 30.0,
+    bounds: Sequence[float] | None = None,
     smooth: float = DEFAULT_SMOOTH,
     relax_iterations: int = 400,
     percentile: float = 10.0,
@@ -110,15 +111,26 @@ def build_heightmap(
     it deeper than a kerb. Cells therefore take a low percentile, and after
     interpolation and smoothing the surface is clamped back under the lowest
     sample in every cell that has one.
+
+    ``bounds`` fixes the extent instead of taking ``margin`` around the samples.
+    That matters once the roads have been run out to the map edge: the edge is
+    a margin around the roads, so taking a fresh margin around the *extended*
+    roads would push it out again and leave another ring of ground with no road
+    reaching it — which is the thing the extension was for.
     """
     arr = np.asarray(points, dtype=float)
     if len(arr) < 3:
         return None
 
-    x0 = float(arr[:, 0].min() - margin)
-    y0 = float(arr[:, 1].min() - margin)
-    nx = math.ceil((arr[:, 0].max() + margin - x0) / cell) + 1
-    ny = math.ceil((arr[:, 1].max() + margin - y0) / cell) + 1
+    if bounds is not None:
+        x0, y0, x1, y1 = (float(v) for v in bounds)
+    else:
+        x0 = float(arr[:, 0].min() - margin)
+        y0 = float(arr[:, 1].min() - margin)
+        x1 = float(arr[:, 0].max() + margin)
+        y1 = float(arr[:, 1].max() + margin)
+    nx = math.ceil((x1 - x0) / cell) + 1
+    ny = math.ceil((y1 - y0) / cell) + 1
 
     ix = np.clip(((arr[:, 0] - x0) / cell).astype(int), 0, nx - 1)
     iy = np.clip(((arr[:, 1] - y0) / cell).astype(int), 0, ny - 1)
@@ -321,6 +333,7 @@ def classify(
     clearance: float = DEFAULT_CLEARANCE,
     smooth: float = DEFAULT_SMOOTH,
     drop: float = 0.05,
+    bounds: Sequence[float] | None = None,
 ) -> tuple[set[int], HeightMap | None]:
     """Split lanelets into ground and elevated, and build the ground heightmap."""
     footprints = [fp for fp in (footprint_of(r) for r in ribbons) if fp is not None]
@@ -331,7 +344,8 @@ def classify(
     elevated = grow_elevated(seeds, footprints, adjacency, clearance=clearance)
 
     ground_points = [tuple(p) for r in ribbons if r.id not in elevated for p in (*r.left, *r.right)]
-    return elevated, build_heightmap(ground_points, cell=cell, smooth=smooth, drop=drop)
+    return elevated, build_heightmap(ground_points, cell=cell, smooth=smooth, drop=drop,
+                                     bounds=bounds)
 
 
 # ---------------------------------------------------------------------------
