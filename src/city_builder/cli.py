@@ -54,6 +54,11 @@ def main():
               help="Hold the ground this far under the road")
 @click.option("--fill-island", type=float, default=None,
               help="Absorb junction scraps below this area into the carriageway (can leave holes)")
+# extend
+@click.option("--extend/--no-extend", "extend_enabled", default=None,
+              help="Run the roads the map cut off out to its edge")
+@click.option("--map-margin", "margin", type=float, default=None,
+              help="How far beyond the surveyed roads the map edge sits (m)")
 # buildings
 @click.option("--buildings/--no-buildings", default=False,
               help="Fill the open ground with procedural buildings")
@@ -119,6 +124,7 @@ def build_command(input_path, blend, glb, fbx, heightmap_path, manifest_path, gr
                      "dash_gap", "curb_height", "crosswalks", "walkways", "markings",
                      "stop_lines", "crosswalk_stripes", "curbs"),
         "ground": ("cell", "smooth", "z_gap", "min_overlap", "clearance", "drop", "fill_island"),
+        "extend": ("margin",),
         "buildings": ("setback", "target_lot_area", "min_lot_area", "lot_margin", "coverage",
                       "vacancy", "min_height", "max_height", "floor_height", "facade_width",
                       "tall_bias", "max_buildings", "seed"),
@@ -128,6 +134,7 @@ def build_command(input_path, blend, glb, fbx, heightmap_path, manifest_path, gr
     for section, keys in sections.items():
         config = merge_overrides(config, section, **{k: kwargs.pop(k) for k in keys})
     config = merge_overrides(config, "ground", enabled=kwargs.pop("ground_enabled"))
+    config = merge_overrides(config, "extend", enabled=kwargs.pop("extend_enabled"))
     if viaduct_on is not None:
         config = merge_overrides(config, "viaduct",
                                  deck=viaduct_on, parapets=viaduct_on, piers=viaduct_on)

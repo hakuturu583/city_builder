@@ -114,6 +114,25 @@ def lanelet_end_keys(lmap, subtypes: Sequence[str] = ROAD_SUBTYPES):
     return ends
 
 
+def lanelet_end_points(lmap, subtypes: Sequence[str] = ROAD_SUBTYPES):
+    """``(lanelet id, "start"|"end")`` → the *ordered* (left, right) point ids.
+
+    :func:`lanelet_end_keys` sets are the right shape for asking whether two
+    lanelets meet, and the wrong one for lengthening a boundary: a frozenset
+    has forgotten which of the two points is the left bound's.
+    """
+    ends: dict[tuple[int, str], tuple[int, int]] = {}
+    for lanelet in lmap.laneletLayer:
+        if attributes(lanelet).get("subtype") not in subtypes:
+            continue
+        left, right = lanelet.leftBound, lanelet.rightBound
+        if len(left) < 2 or len(right) < 2:
+            continue
+        ends[(lanelet.id, "start")] = (left[0].id, right[0].id)
+        ends[(lanelet.id, "end")] = (left[-1].id, right[-1].id)
+    return ends
+
+
 def build_adjacency(lanelet_ends) -> dict[int, set[int]]:
     """Lanelet graph from shared boundary endpoints.
 

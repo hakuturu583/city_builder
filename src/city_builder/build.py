@@ -9,9 +9,11 @@ from typing import Any
 
 from . import buildings as buildings_module
 from . import classes, facade_layout, lanelet, scene
+from . import extend as extend_module
 from . import ground as ground_module
 from . import viaduct as viaduct_module
 from .buildings import BuildingOptions
+from .extend import ExtendOptions
 from .frame import LocalFrame
 from .markings import MarkingOptions
 from .surfaces import SurfaceOptions, extract
@@ -56,6 +58,7 @@ def build_city(
     building_options: BuildingOptions | None = None,
     viaduct_options: ViaductOptions | None = None,
     marking_options: MarkingOptions | None = None,
+    extend_options: ExtendOptions | None = None,
     verbose: bool = True,
 ) -> BuildResult:
     """Read a map and produce every surface, without touching Blender.
@@ -75,7 +78,21 @@ def build_city(
             print(f"[build] anchoring the scene at the map centroid {ref_lat:.7f},{ref_lon:.7f}")
 
     frame = LocalFrame(ref_lat, ref_lon)
-    groups = extract(ll2, projection, lmap, frame, surface_options)
+
+    # Where the map ends, decided before anything moves. A lanelet that stops
+    # inside the map leaves ground behind it, and the building generator fills
+    # ground — which is how a street comes to end in the side of a block.
+    converter = lanelet.PointConverter(ll2, projection, frame)
+    plan = extend_module.from_map(ll2, projection, lmap, frame, extend_options,
+                                  converter=converter)
+    if verbose and plan.stats.get("extended"):
+        span = plan.stats["length_m"]
+        print(f"[build] roads run to the map edge: {plan.stats['extended']} of "
+              f"{plan.stats['dangling_ends']} loose end(s) extended, "
+              f"{span['min']:.0f}-{span['max']:.0f} m each")
+
+    groups = extract(ll2, projection, lmap, frame, surface_options,
+                     extensions=plan, converter=converter)
     datum = lanelet.apply_z_datum(groups, z_datum, z_offset)
 
     clipped = clip_crosswalks(groups, surface_options.crosswalk_lift
@@ -83,6 +100,8 @@ def build_city(
     buried = clip_curbs(groups)
 
     stats = {name: len(shapes) for name, shapes in groups.items()}
+    stats["extended_ends"] = plan.stats.get("extended", 0)
+    stats["dangling_ends"] = plan.stats.get("dangling_ends", 0)
     if verbose:
         print(f"[build] surfaces: {stats}")
         if clipped:
@@ -102,6 +121,7 @@ def build_city(
             surfaces, adjacency,
             cell=cell, z_gap=z_gap, min_overlap=min_overlap,
             clearance=clearance, smooth=smooth, drop=ground_drop,
+            bounds=plan.box if plan.points else None,
         )
         if heightmap is None:
             raise RuntimeError("no ground-level road surfaces found; cannot build a ground surface")
@@ -333,7 +353,7 @@ def build_city_from_config(input_path: str, config, *, buildings: bool = False,
         min_overlap=g.min_overlap, clearance=g.clearance,
         ground_drop=g.drop, fill_island=g.fill_island,
         buildings=buildings, building_options=config.buildings,
-        viaduct_options=config.viaduct, verbose=verbose,
+        viaduct_options=config.viaduct, extend_options=config.extend, verbose=verbose,
     )
 
 
