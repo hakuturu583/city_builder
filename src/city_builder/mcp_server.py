@@ -191,6 +191,27 @@ def forget_scene(
 # ---------------------------------------------------------------------------
 
 
+def _require_diffusion() -> None:
+    """Fail with the reason rather than with a missing module.
+
+    The published container leaves the diffusion stack out — it is several
+    gigabytes of CUDA that can do nothing without a GPU on the host — so an
+    agent calling these tools there gets an ImportError from three frames down
+    unless it is told what is actually going on.
+    """
+    try:
+        import diffusers  # noqa: F401
+        import torch  # noqa: F401
+    except ImportError as missing:
+        raise RuntimeError(
+            f"the diffusion stack is not installed here ({missing.name}). "
+            "This tool needs a GPU and the `texture` extra: `uv sync --extra texture`, "
+            'or build the container with --build-arg EXTRAS="mcp texture" and run it '
+            "with --gpus all. Everything else in this server works without it, and "
+            "`make_layouts` draws usable stand-in sheets with no model at all."
+        ) from missing
+
+
 @server.tool()
 def make_layouts(
     out_dir: Annotated[str, Field(description="Directory to write the layouts into")],
@@ -303,6 +324,8 @@ def generate_facades(
     you can see the street you asked for rather than infer it from a diversity
     number.
     """
+    _require_diffusion()
+
     import numpy as np
     from mcp.server.mcpserver import Image
     from PIL import Image as PILImage
@@ -426,6 +449,9 @@ def make_tile(
     Answers with the tile itself as well as its seam score — a wrap that scores
     well can still be the wrong material.
     """
+    if not procedural:
+        _require_diffusion()
+
     from mcp.server.mcpserver import Image
 
     from .texture import TextureOptions, seam_error

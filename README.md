@@ -690,6 +690,56 @@ written where you ask for them, and nothing else leaves the container. Build,
 survey, export and render all work in there (the render falls back to software
 GL, so it is slow but correct); the diffusion tools do not, because the image
 leaves out several gigabytes of CUDA that would need a GPU on the host anyway.
+Calling them there fails with that sentence rather than with an ImportError
+from three frames down.
+
+### Model weights, and where they land
+
+The weights are **downloaded, not shipped** — about 3 GB for the SD1.5 stack,
+21 GB more if you use SDXL. Nothing in the image or the repository holds them,
+so where they land is a setting, and getting it wrong means paying for the
+download again on every run.
+
+One environment variable decides: `HF_HOME`. The container sets it to `/cache`
+and declares that a volume, so persisting the weights is a mount:
+
+```bash
+docker volume create city-builder-models
+
+docker run -i --rm \
+  -v city-builder-models:/cache \        # the weights, kept between runs
+  -v /path/to/maps:/maps:ro \
+  -v /path/to/out:/work \
+  --gpus all city-builder-mcp:cuda
+```
+
+A named volume is the simple case. Mounting a host cache you already have works
+just as well and shares it with everything else on the machine — point it at
+whatever `HF_HOME` is set to outside:
+
+```bash
+-v "${HF_HOME:-$HOME/.cache/huggingface}:/cache"
+```
+
+Two things worth knowing. Without either mount the weights go into the
+container's writable layer and are thrown away with the container, so the next
+run downloads them again. And even with a full cache the hub is still asked
+whether each file is current, which needs the network; `-e HF_HUB_OFFLINE=1`
+stops that and makes a cached run genuinely offline.
+
+`city-builder models` reports what is in the cache without loading anything or
+touching a GPU, and `--download` fills it — worth running once, before wiring
+the server into anything, so the first real call is not a 3 GB wait.
+
+The published image has no diffusion stack at all, so it never downloads
+anything. Build the GPU one when you want the texture tools:
+
+```bash
+docker build --build-arg EXTRAS="mcp texture" -t city-builder-mcp:cuda .
+```
+
+That comes to 6.9 GB against the default 1.8, which is why it is not what
+`main` publishes.
 
 The tools are not the CLI with a different coat on. Two things change when the
 caller is a language model rather than a person at a shell.
