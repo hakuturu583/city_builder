@@ -22,6 +22,7 @@ come from the map and are left exactly as they are.
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -159,11 +160,12 @@ def save_tile(tile: np.ndarray, path: str) -> str:
     return path
 
 
-def make_tile(prompt: str, options: TextureOptions | None = None, *, path: str | None = None):
+def make_tile(prompt: str, options: TextureOptions | None = None, *, path: str | None = None,
+              negative_prompt: str = ""):
     """A tile from the model if one is available, procedurally otherwise."""
     options = options or TextureOptions()
     if options.diffusion:
-        tile = diffusion_tile(prompt, options)
+        tile = diffusion_tile(prompt, options, negative_prompt=negative_prompt)
     else:
         tile = procedural_tile(options.size, options.seed)
     if path:
@@ -199,6 +201,20 @@ FACADE_STYLES: tuple[tuple[str, str], ...] = (
 )
 
 COMMON_PROMPT = "flat elevation, uniform overcast daylight, no sky, no perspective"
+
+
+def styles_named(names: Sequence[str]):
+    """The named subset of :data:`FACADE_STYLES`, in the order asked for.
+
+    An unknown name is an error rather than a shrug: a typo that silently
+    narrows a street to one material is only visible in the render.
+    """
+    known = dict(FACADE_STYLES)
+    missing = [name for name in names if name not in known]
+    if missing:
+        raise ValueError(f"unknown facade style(s): {', '.join(missing)}; "
+                         f"choose from {', '.join(known)}")
+    return tuple((name, known[name]) for name in names)
 
 
 def styled_prompts(count: int, *, seed: int = 0, styles=FACADE_STYLES) -> list[str]:

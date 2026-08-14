@@ -263,34 +263,59 @@ def make_layouts(
 def generate_facades(
     layouts_dir: Annotated[str, Field(description="Directory from make_layouts")],
     out_dir: Annotated[str, Field(description="Directory to write the painted sheets into")],
+    prompts: Annotated[list[str] | None,
+                       Field(description="What the buildings are made of, one prompt per "
+                                         "material; spread over the sheets. Beats `styles`")] = None,
+    styles: Annotated[list[str] | None,
+                      Field(description="Names from list_styles, to narrow the built-in "
+                                        "spread instead of writing prompts")] = None,
+    negative: Annotated[str | None, Field(description="What to keep out of the sheets")] = None,
     count: Annotated[int, Field(description="Sheets per floor count")] = 4,
+    variation: Annotated[float, Field(description="0 = identical siblings, 1 = strangers")] = 0.45,
+    seed: Annotated[int, Field(description="Same seed and prompts give the same sheets")] = 0,
     family: Annotated[Literal["sd15", "sdxl"], Field(description="Which model stack")] = "sd15",
     controlnet: Annotated[Literal["canny", "mlsd", "none"],
                           Field(description="What holds the windows on the storeys")] = "mlsd",
     keep_below: Annotated[float, Field(description="Discard sheets scoring under this")] = 0.5,
     vram_budget_gb: Annotated[float, Field(description="Cap, for a shared card")] = 10.0,
-) -> dict[str, Any]:
+):
     """Paint the layouts with a diffusion model. **Needs a GPU. Minutes.**
 
     About a second a sheet once the model is loaded, plus ten seconds to load.
     Check `city-builder models` has the weights before calling, and that the
     card is free — this is the only tool here that competes for one.
 
+    **The prompt is the whole of the material.** The control image fixes the
+    architecture — where the floors and windows are — so the prompt is the only
+    thing left deciding what the building is *made of*. One prompt therefore
+    gives a street built entirely of one material; pass several and they are
+    spread across the sheets. Each is given a suffix that keeps the result
+    usable as a texture (flat elevation, overcast, no sky, no perspective),
+    so write the material, not the photograph: "photograph of a red brick
+    warehouse facade, steel window frames" rather than "a street at sunset".
+
     `controlnet` is not optional in practice: without it the model returns a
     wall with windows somewhere, scoring about zero against the layout. Every
     sheet is scored before it is written, and `keep_below` drops the ones that
     lost the structure.
+
+    Answers with a contact sheet of what it kept, one row per floor count, so
+    you can see the street you asked for rather than infer it from a diversity
+    number.
     """
     import numpy as np
+    from mcp.server.mcpserver import Image
     from PIL import Image as PILImage
 
     from .facade_layout import alignment, diversity, saturation, sheet_floors, sheet_name
     from .texture import (
+        COMMON_PROMPT,
         FacadeOptions,
         facade_sheets,
         load_facade_pipeline,
         save_tile,
         styled_prompts,
+        styles_named,
     )
 
     control_dir = os.path.join(layouts_dir, "control")
@@ -303,7 +328,11 @@ def generate_facades(
     if not controls:
         raise ValueError(f"no usable control images in {control_dir}")
 
+    asked = [f"{p}, {COMMON_PROMPT}" for p in prompts] if prompts else None
+    palette = styles_named(styles) if styles else None
+
     options = FacadeOptions(count=count, family=family, vram_budget_gb=vram_budget_gb,
+                            variation=variation, seed=seed,
                             controlnet="" if controlnet == "none" else controlnet)
     os.makedirs(out_dir, exist_ok=True)
 
@@ -312,10 +341,19 @@ def generate_facades(
     loaded = time.time()
 
     written, dropped, scores, kept = 0, 0, [], []
+    rows: dict[int, list] = {}
     for index, (floors, path) in enumerate(controls):
         control = np.asarray(PILImage.open(path).convert("RGB"))
-        prompts = styled_prompts(count, seed=index * count)
-        for sheet in facade_sheets(prompts, control, options, pipeline=pipeline):
+        if asked:
+            # Cycled rather than repeated, so a small run still covers every
+            # material asked for instead of drawing the first one every time.
+            wanted = [asked[(index * count + k) % len(asked)] for k in range(count)]
+        elif palette:
+            wanted = styled_prompts(count, seed=seed + index * count, styles=palette)
+        else:
+            wanted = styled_prompts(count, seed=seed + index * count)
+        for sheet in facade_sheets(wanted, control, options, pipeline=pipeline,
+                                   negative_prompt=negative or ""):
             score = alignment(sheet, control, axis=0)
             scores.append(score)
             if score < keep_below:
@@ -323,12 +361,14 @@ def generate_facades(
                 continue
             save_tile(sheet, os.path.join(out_dir, sheet_name(floors, written)))
             kept.append(sheet)
+            rows.setdefault(floors, []).append(sheet)
             written += 1
 
-    return {
+    report = {
         "dir": out_dir,
         "sheets": written,
         "dropped": dropped,
+        "prompts": len(asked) if asked else len(palette or ()) or "the built-in style set",
         "load_seconds": round(loaded - started, 1),
         "paint_seconds": round(time.time() - loaded, 1),
         "mean_floor_alignment": round(float(np.mean(scores)), 2) if scores else 0.0,
@@ -338,6 +378,26 @@ def generate_facades(
         "note": ("alignment above 0.6 is drawn-to-spec, near 0 is a wall with windows "
                  "somewhere; diversity near 0.05 is one material, 0.4 is the whole set"),
     }
+    contact = _contact_sheet(rows)
+    return [report, Image(data=contact, format="png")] if contact else report
+
+
+def _contact_sheet(rows: dict[int, list], *, cell=(160, 240), across: int = 12) -> bytes | None:
+    """One row per floor count, so a whole run can be looked at in one image."""
+    import io
+
+    from PIL import Image as PILImage
+
+    if not rows:
+        return None
+    wide = min(across, max(len(v) for v in rows.values()))
+    sheet = PILImage.new("RGB", (wide * cell[0], len(rows) * cell[1]), "white")
+    for row, floors in enumerate(sorted(rows)):
+        for column, tile in enumerate(rows[floors][:wide]):
+            sheet.paste(PILImage.fromarray(tile).resize(cell), (column * cell[0], row * cell[1]))
+    buffer = io.BytesIO()
+    sheet.save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 @server.tool()
@@ -345,26 +405,51 @@ def make_tile(
     out_path: Annotated[str, Field(description="Where to write the tile PNG")],
     prompt: Annotated[str, Field(description="What the surface is made of")] =
         "seamless top-down photograph of urban asphalt with fine gravel",
+    negative: Annotated[str | None, Field(description="What to keep out of it")] = None,
     procedural: Annotated[bool, Field(description="Skip the model; filtered noise, no GPU")] = False,
     size: Annotated[int, Field(description="Pixels, square")] = 1024,
+    steps: Annotated[int, Field(description="Sampling steps")] = 24,
+    seed: Annotated[int, Field(description="Same seed and prompt give the same tile")] = 0,
     vram_budget_gb: Annotated[float, Field(description="Cap, for a shared card")] = 6.0,
-) -> dict[str, Any]:
+):
     """A tileable surface texture, for the ground or the carriageway.
 
     **With a model: GPU, about a minute.** With `procedural=True`: instant, no
-    GPU, and genuinely seamless since it is periodic by construction. Pass the
-    result to `export` as `ground_texture` or `road_texture`.
+    GPU, and genuinely seamless since it is periodic by construction.
+
+    Write the *material at the scale it is seen*, and say how far the tile
+    spans when you use it: `export` repeats the ground tile every 12 m and the
+    carriageway tile every 4, so "fine gravel aggregate" is right for a road
+    and "paving slabs" for a pavement. Getting that backwards is how asphalt
+    ends up with a grain a foot across and the road renders as cobblestone.
+
+    Answers with the tile itself as well as its seam score — a wrap that scores
+    well can still be the wrong material.
     """
+    from mcp.server.mcpserver import Image
+
     from .texture import TextureOptions, seam_error
     from .texture import make_tile as build_tile
 
-    options = TextureOptions(size=size, vram_budget_gb=vram_budget_gb, diffusion=not procedural)
-    tile = build_tile(prompt, options, path=out_path)
-    return {
+    options = TextureOptions(size=size, steps=steps, seed=seed,
+                             vram_budget_gb=vram_budget_gb, diffusion=not procedural)
+    tile = build_tile(prompt, options, path=out_path, negative_prompt=negative or "")
+    report = {
         "path": out_path,
         "seam_error": round(seam_error(tile), 2),
         "note": "1.0 means the wrap looks like the texture's own variation",
     }
+    return [report, Image(data=_as_png(tile, 512), format="png")]
+
+
+def _as_png(tile, size: int) -> bytes:
+    import io
+
+    from PIL import Image as PILImage
+
+    buffer = io.BytesIO()
+    PILImage.fromarray(tile).resize((size, size)).save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 # ---------------------------------------------------------------------------
