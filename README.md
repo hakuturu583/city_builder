@@ -276,10 +276,22 @@ that *touch* it rather than from the nearest surveyed vertex in plan view: a
 viaduct passes directly over a street, and the gap in the street is not seven
 metres up.
 
-| slivers under 1 m wide | count | area | largest |
+**Each level is patched against itself.** A single plan-view union cannot do
+it: a viaduct and the street beneath it leave a long strip between their
+footprints, which is not a gap in anything — it is the space beside the
+viaduct, and filling it paves over the street at deck height.
+
+What counts as a gap was measured per level rather than guessed:
+
+| | survey artefacts | then | which is |
 |---|---|---|---|
-| before | 300 | 221.3 m² | 16.0 m² |
-| after | 20 | 13.9 m² | 7.6 m² |
+| elevated | 5 holes up to 24 m² | 736 m² | a real opening between two carriageways — on a deck, filling it would pave over the sky |
+| at grade | 35 holes up to 99 m² | 219 m² and up | traffic islands and medians, which have ground under them and a kerb round them |
+
+`infill_max_area` sits at 150 m², in both gaps. Holes below it: 892 m² at
+grade and 69 m² on the deck, both to **zero**. Everything above it survives.
+The floor matters too — 2933 of the pinholes here are a few cm² each, and a
+patch area cut-off of 0.02 m² threw all of them away.
 
 ## Procedural buildings
 

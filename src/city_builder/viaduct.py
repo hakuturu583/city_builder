@@ -83,7 +83,19 @@ class ViaductOptions:
 
     infill: bool = True  # patch the slivers between lanelets
     infill_gap: float = 0.8  # widest sliver to treat as a survey gap rather than a hole
-    infill_max_area: float = 80.0  # bigger than this is a real opening, not a gap
+    # Measured per level, the holes the network encloses separate cleanly into
+    # survey artefacts and things that are meant to be there:
+    #
+    #   elevated  5 holes up to 24 m2, then one of 736 m2 — a real opening
+    #             between two carriageways, and on a deck that is a hole to the
+    #             street, so filling it would be paving over the sky
+    #   at grade  35 holes up to 99 m2, then 219 m2 and up — traffic islands
+    #             and medians, which have ground under them and a kerb round
+    #             them, and are not the pipeline's to invent
+    #
+    # 150 sits in both gaps.
+    infill_max_area: float = 150.0
+    infill_min_area: float = 0.001  # 2933 pinholes here are each a few cm2
 
     def __post_init__(self) -> None:
         for name in ("bridge_clearance", "deck_thickness", "parapet_height",
@@ -450,7 +462,8 @@ def infill_polygons(sections: Sequence[object], options: ViaductOptions):
     difference = unary_union(without_holes).difference(covered)
     patches = [
         patch for patch in getattr(difference, "geoms", [difference])
-        if patch.geom_type == "Polygon" and 0.02 < patch.area < options.infill_max_area
+        if patch.geom_type == "Polygon"
+        and options.infill_min_area < patch.area < options.infill_max_area
     ]
     return patches, covered
 

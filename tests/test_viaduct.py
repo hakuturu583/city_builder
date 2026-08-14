@@ -518,3 +518,18 @@ def test_a_carriageway_with_no_gaps_gets_no_patches():
     groups = {"Roads": [_lane(1, -6.0, -2.0), _lane(2, -2.0, 2.0)]}
     assert infill_roads(groups, ViaductOptions()) == (0, 0.0)
     assert "RoadInfill" not in groups
+
+
+def test_a_viaduct_and_the_street_under_it_are_patched_separately():
+    """A single plan-view union leaves a long strip between their footprints,
+    which is not a gap in anything — it is the space beside the viaduct."""
+    from city_builder.build import infill_roads
+
+    street = [_lane(1, -8.0, -4.0, z=0.0), _lane(2, -3.7, 0.0, z=0.0)]
+    deck = [_lane(3, 6.0, 10.0, z=8.0), _lane(4, 10.3, 14.0, z=8.0)]
+    groups = {"Roads": street + deck}
+    infill_roads(groups, ViaductOptions(infill_gap=0.8), elevated={3, 4})
+
+    ys = [v[1] for mesh in groups["RoadInfill"] for v in mesh.vertices]
+    assert ys, "each level's own survey gap should still be patched"
+    assert not [y for y in ys if 0.5 < y < 5.5], "the space between the levels was paved"

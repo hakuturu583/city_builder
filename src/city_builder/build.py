@@ -135,7 +135,8 @@ def build_city(
             print(f"[build] ground: {heightmap.nx}x{heightmap.ny} @ {cell:.1f} m, "
                   f"{measured:.1f}% of cells measured, {len(mesh.faces)} faces")
 
-    patched, patched_area = infill_roads(groups, viaduct_options or ViaductOptions())
+    patched, patched_area = infill_roads(groups, viaduct_options or ViaductOptions(),
+                                         elevated)
     if patched and verbose:
         print(f"[build] road infill: {patched} patch(es), {patched_area:.0f} m2 of gap "
               f"between lanelets closed")
@@ -277,8 +278,9 @@ def clip_curbs(groups: dict[str, list], probe: float = 0.6,
     return dropped
 
 
-def infill_roads(groups: dict[str, list], options) -> tuple[int, float]:
-    """Patch the gaps the lanelets leave between themselves, everywhere.
+def infill_roads(groups: dict[str, list], options, elevated: set[int] | None = None
+                 ) -> tuple[int, float]:
+    """Patch the gaps the lanelets leave between themselves, level by level.
 
     Lanelets are surveyed one at a time and do not tile exactly. Measured on
     this map, 306 gaps totalling 2922 m2 — 3 % of a 98 120 m2 carriageway, most
@@ -286,6 +288,11 @@ def infill_roads(groups: dict[str, list], options) -> tuple[int, float]:
     the street below; at grade the ground shows through, and since the ground
     is held 5 cm under the road a wheel crossing a sliver drops into it. Either
     way the drivable surface is not a surface.
+
+    Each level is patched against itself. A single plan-view union cannot do
+    this: a viaduct and the street beneath it leave a long strip between their
+    footprints, which is not a gap in anything — it is the space beside the
+    viaduct, and filling it paves over the street at deck height.
     """
     from .viaduct import infill_meshes, infill_polygons
 
@@ -294,11 +301,21 @@ def infill_roads(groups: dict[str, list], options) -> tuple[int, float]:
     if not carriageway:
         return 0, 0.0
 
-    patches, _covered = infill_polygons(carriageway, options)
-    meshes = infill_meshes(carriageway, patches)
+    elevated = elevated or set()
+    levels = ([shape for shape in carriageway if shape.id not in elevated],
+              [shape for shape in carriageway if shape.id in elevated])
+
+    meshes, area = [], 0.0
+    for level in levels:
+        if not level:
+            continue
+        patches, _covered = infill_polygons(level, options)
+        meshes.extend(infill_meshes(level, patches))
+        area += sum(patch.area for patch in patches)
+
     if meshes:
         groups["RoadInfill"] = meshes
-    return len(meshes), sum(patch.area for patch in patches)
+    return len(meshes), area
 
 
 def build_city_from_config(input_path: str, config, *, buildings: bool = False,
