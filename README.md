@@ -676,6 +676,21 @@ uv run city-builder-mcp          # stdio
   "args": ["run", "--directory", "/path/to/city_builder", "city-builder-mcp"]}}}
 ```
 
+Or from the container, which every push to `main` publishes:
+
+```json
+{"mcpServers": {"city-builder": {"command": "docker", "args": [
+  "run", "-i", "--rm", "-v", "/path/to/maps:/maps:ro", "-v", "/path/to/out:/work",
+  "--user", "1000:1000", "ghcr.io/hakuturu583/city_builder-mcp"]}}}
+```
+
+`-i` is not optional: the client speaks MCP on the process's stdin and stdout.
+Mount the maps and an output directory — scenes, exports and textures are
+written where you ask for them, and nothing else leaves the container. Build,
+survey, export and render all work in there (the render falls back to software
+GL, so it is slow but correct); the diffusion tools do not, because the image
+leaves out several gigabytes of CUDA that would need a GPU on the host anyway.
+
 The tools are not the CLI with a different coat on. Two things change when the
 caller is a language model rather than a person at a shell.
 
