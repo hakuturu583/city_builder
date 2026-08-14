@@ -274,15 +274,15 @@ def layouts_command(output_dir, floor_spec, variants, facade_width, bay_metres, 
     diffusion pass is conditioned on so its windows land on the same floors.
     """
     import os
+    import random
 
     from .facade_layout import (
-        FacadeLayout,
         bay_alignment,
         bays_for,
         control_image,
-        control_name,
         floor_alignment,
         procedural_facade,
+        sample_layout,
         sheet_name,
     )
     from .texture import save_tile, seam_error_axis
@@ -296,26 +296,30 @@ def layouts_command(output_dir, floor_spec, variants, facade_width, bay_metres, 
 
     written, seams, floor_scores, bay_scores, densities = 0, [], [], [], []
     for floors in counts:
-        layout = FacadeLayout(floors=floors, bays=bays)
-        width, height = layout.pixel_size(px_per_floor, px_per_bay)
-        if control:
-            # One drawing per floor count, not per variant: siblings differ in
-            # material, not in structure. That is the point of conditioning
-            # them on the same lines.
-            save_tile(control_image(layout, width, height),
-                      os.path.join(control_dir, control_name(floors)))
         for variant in range(variants):
+            # A drawing per variant, not per floor count. One canonical layout
+            # gives every building in the city the same window proportions and
+            # the same bay rhythm, and the conditioner then holds the model to
+            # it — structure is the half of a facade's variety no prompt supplies.
+            rng = random.Random(seed + 1000 * floors + variant)
+            layout = sample_layout(floors, rng, facade_width=facade_width,
+                                   bay_metres=bay_metres)
+            width, height = layout.pixel_size(px_per_floor, px_per_bay)
+            if control:
+                save_tile(control_image(layout, width, height),
+                          os.path.join(control_dir, sheet_name(floors, variant, "control")))
             sheet = procedural_facade(layout, width, height, seed=seed + 1000 * floors + variant)
             save_tile(sheet, os.path.join(output_dir, sheet_name(floors, variant)))
             written += 1
             seams.append(seam_error_axis(sheet, axis=1))
             floor_scores.append(floor_alignment(sheet, layout))
             bay_scores.append(bay_alignment(sheet, layout))
-        densities.append(100.0 * layout.texel_metres(floors * floor_height, height))
+            densities.append(100.0 * layout.texel_metres(floors * floor_height, height))
 
     click.echo(f"wrote {written} sheet(s) to {output_dir}"
                + (f" (+ control images in {control_dir})" if control else ""))
-    click.echo(f"floor counts {counts[0]}-{counts[-1]}, {bays} bays per {facade_width:g} m of wall")
+    click.echo(f"floor counts {counts[0]}-{counts[-1]}, "
+               f"about {bays} bays per {facade_width:g} m of wall, {variants} layout(s) each")
     click.echo(f"horizontal seam  {sum(seams)/len(seams):.2f} (wants ~1: a wall wraps)")
     click.echo(f"floor alignment  {min(floor_scores):.2f} (worst; 1 = windows exactly on the storeys)")
     click.echo(f"bay alignment    {min(bay_scores):.2f} (worst)")
@@ -326,8 +330,9 @@ def layouts_command(output_dir, floor_spec, variants, facade_width, bay_metres, 
 @click.option("--layouts", "layouts_dir", required=True,
               help="Directory from `city-builder layouts`; its control/ images are the input")
 @click.option("--output", "output_dir", required=True, help="Directory to write the sheets into")
-@click.option("--prompt", default="photograph of a building facade, glass windows in concrete, "
-                                  "flat elevation, uniform overcast daylight, no sky")
+@click.option("--prompt", default=None,
+              help="One prompt for every sheet; by default they are spread across "
+                   "`city-builder styles`, which is what gives a street more than one material")
 @click.option("--negative", "negative_prompt", default="")
 @click.option("--family", type=click.Choice(["sd15", "sdxl"]), default="sd15")
 @click.option("--controlnet", type=click.Choice(["canny", "mlsd", "none"]), default="canny",
@@ -360,8 +365,8 @@ def facades_command(layouts_dir, output_dir, prompt, negative_prompt, floor_spec
 
     import numpy as np
 
-    from .facade_layout import alignment, sheet_floors, sheet_name, wrap_seam
-    from .texture import FacadeOptions, facade_sheets, load_facade_pipeline, save_tile
+    from .facade_layout import alignment, diversity, saturation, sheet_floors, sheet_name, wrap_seam
+    from .texture import FacadeOptions, facade_sheets, load_facade_pipeline, save_tile, styled_prompts
 
     control_dir = os.path.join(layouts_dir, "control")
     if not os.path.isdir(control_dir):
@@ -387,10 +392,14 @@ def facades_command(layouts_dir, output_dir, prompt, negative_prompt, floor_spec
     click.echo(f"{options.family} + {controlnet}{' + lcm' if options.lcm else ''}: "
                f"loaded in {loaded - started:.0f}s")
 
-    written, dropped, scores = 0, 0, []
-    for floors, path in controls:
+    written, dropped, scores, kept = 0, 0, [], []
+    for index, (floors, path) in enumerate(controls):
         control = np.asarray(Image.open(path).convert("RGB"))
-        sheets = facade_sheets(prompt, control, options,
+        # A different material per sheet. The alignment score cannot see colour,
+        # so leaving the prompt fixed quietly produces a city of one material.
+        prompts = prompt or styled_prompts(options.count,
+                                           seed=options.seed + index * options.count)
+        sheets = facade_sheets(prompts, control, options,
                                negative_prompt=negative_prompt, pipeline=pipeline)
         for variant, sheet in enumerate(sheets):
             floor_score = alignment(sheet, control, axis=0)
@@ -400,7 +409,8 @@ def facades_command(layouts_dir, output_dir, prompt, negative_prompt, floor_spec
             if keep_below is not None and floor_score < keep_below:
                 dropped += 1
                 continue
-            save_tile(sheet, os.path.join(output_dir, sheet_name(floors, variant)))
+            save_tile(sheet, os.path.join(output_dir, sheet_name(floors, written)))
+            kept.append(sheet)
             written += 1
 
     elapsed = time.time() - loaded
@@ -412,3 +422,18 @@ def facades_command(layouts_dir, output_dir, prompt, negative_prompt, floor_spec
     mean = sum(s[1] for s in scores) / len(scores)
     click.echo(f"mean floor alignment {mean:.2f} "
                f"(a sheet drawn to spec scores >0.6; noise scores ~0)")
+    if kept:
+        sats = [saturation(sheet) for sheet in kept]
+        click.echo(f"diversity {diversity(kept):.3f} (one prompt gives ~0.05, the whole style set ~0.4)")
+        click.echo(f"saturation {min(sats):.2f}-{max(sats):.2f} "
+                   f"(concrete sits near 0.05, brick near 0.25)")
+
+
+@main.command("styles")
+def styles_command():
+    """The facade characters a `facades` run spreads its sheets across."""
+    from .texture import FACADE_STYLES
+
+    width = max(len(name) for name, _ in FACADE_STYLES)
+    for name, prompt in FACADE_STYLES:
+        click.echo(f"{name:<{width}}  {prompt}")

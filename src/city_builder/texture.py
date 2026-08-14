@@ -176,6 +176,44 @@ def make_tile(prompt: str, options: TextureOptions | None = None, *, path: str |
 # ---------------------------------------------------------------------------
 
 
+# One prompt makes one material. Ranking sheets by floor alignment alone picked
+# the most literal, least coloured output there was — measured, saturation 0.06,
+# a street of identical grey concrete — because the score cannot see colour. The
+# character of a facade has to be asked for, and asked for differently each time.
+FACADE_STYLES: tuple[tuple[str, str], ...] = (
+    ("concrete", ("photograph of a grey concrete office facade, punched square windows, "
+                  "weathered precast panels")),
+    ("blue glass", ("photograph of a blue-green glass curtain wall office tower, "
+                    "reflective glazing, dark mullions")),
+    ("tiled", ("photograph of a beige ceramic tiled Japanese mid-rise facade, "
+               "narrow aluminium window frames")),
+    ("brick", ("photograph of a red brown brick apartment building facade, "
+               "pale stone lintels")),
+    ("white panel", ("photograph of a white metal panel facade, crisp shadow gaps, "
+                     "anodised window frames")),
+    ("dark metal", ("photograph of a dark charcoal metal and glass facade, "
+                    "bronze tinted glazing")),
+    ("sandstone", "photograph of a warm sandstone clad office facade, deep reveals"),
+    ("green glass", ("photograph of a pale green tinted glass and steel facade, "
+                     "slender vertical fins")),
+)
+
+COMMON_PROMPT = "flat elevation, uniform overcast daylight, no sky, no perspective"
+
+
+def styled_prompts(count: int, *, seed: int = 0, styles=FACADE_STYLES) -> list[str]:
+    """``count`` prompts spread across the styles, deterministically.
+
+    Cycled rather than sampled so a small run still covers the range instead of
+    drawing the same character three times out of four.
+    """
+    import random
+
+    order = list(styles)
+    random.Random(seed).shuffle(order)
+    return [f"{order[i % len(order)][1]}, {COMMON_PROMPT}" for i in range(count)]
+
+
 @dataclass
 class FacadeOptions:
     """A family of facade textures: alike, but not the same, and on the storeys.
@@ -325,7 +363,7 @@ def load_facade_pipeline(options: FacadeOptions):
     return pipeline
 
 
-def facade_sheets(prompt: str, control=None, options: FacadeOptions | None = None, *,
+def facade_sheets(prompt, control=None, options: FacadeOptions | None = None, *,
                   negative_prompt: str = "", pipeline=None):
     """A family of facade sheets, conditioned on a control image.
 
@@ -336,6 +374,11 @@ def facade_sheets(prompt: str, control=None, options: FacadeOptions | None = Non
     meshes. What LCM costs is structure, and ``control`` is what buys it back:
     the line drawing from :mod:`city_builder.facade_layout`, which knows where
     this building's floors are.
+
+    ``prompt`` may be one string or one per sheet. Per sheet is the useful
+    case: the control image fixes the architecture, so the prompt is the only
+    thing left that decides what the building is *made of*, and a single prompt
+    gives a street built entirely of the same material.
 
     Pass ``pipeline`` to reuse a loaded one across several control images —
     loading is most of the wall clock once the sampler is down to six steps.
@@ -351,6 +394,10 @@ def facade_sheets(prompt: str, control=None, options: FacadeOptions | None = Non
     if options.vram_budget_gb > 0 and torch.cuda.is_available():
         total = torch.cuda.get_device_properties(0).total_memory / 1024**3
         torch.cuda.set_per_process_memory_fraction(min(1.0, options.vram_budget_gb / total), 0)
+
+    prompts = [prompt] * options.count if isinstance(prompt, str) else list(prompt)
+    if len(prompts) != options.count:
+        raise ValueError(f"{len(prompts)} prompt(s) for {options.count} sheet(s)")
 
     owned = pipeline is None
     pipeline = pipeline or load_facade_pipeline(options)
@@ -369,7 +416,7 @@ def facade_sheets(prompt: str, control=None, options: FacadeOptions | None = Non
     for start in range(0, options.count, options.batch):
         chunk = latents[start:start + options.batch]
         arguments = {
-            "prompt": [prompt] * len(chunk),
+            "prompt": prompts[start:start + len(chunk)],
             "negative_prompt": [negative_prompt or _NEGATIVE] * len(chunk),
             "width": width,
             "height": height,

@@ -291,6 +291,29 @@ cost an afternoon of hunting a padding bug that was not there. `wrap_seam`
 compares the wrap against the *other bay boundaries*, reading the bay count off
 the control image so it cannot drift from the layout.
 
+### Variety
+
+Structure and material vary independently, and both have to be asked for.
+
+**Structure** comes from the drawing: `layouts --variants N` samples a layout
+per variant rather than one per floor count — bay rhythm, window proportions,
+shopfront height, parapet. The window width does most of the work, since narrow
+openings in a wide pier read as a punched-window block and wide ones thin the
+piers to mullions and draw a ribbon window. One canonical drawing per floor
+count was right while the mechanism was being verified and wrong for a city:
+the conditioner holds the model to whatever it is given, so identical drawings
+mean identical architecture.
+
+**Material** comes from the prompt, and `facades` spreads its sheets across
+`city-builder styles` instead of repeating one. This matters more than it
+sounds: `floor_alignment` cannot see colour, so ranking configurations by it
+alone picked the most literal output there was — saturation 0.06, a city of
+grey concrete, which nobody noticed until it was rendered. `diversity` is the
+other half of the measurement. One prompt scores about 0.05; the style set
+scores about 0.4.
+
+    120 sheets, sd15 + mlsd, 78 s   diversity 0.406   saturation 0.02-0.83
+
 `procedural_facade` draws the sheets with no model at all. They are not
 photographic, they are *correct*, which is what lets the UV, the texel density,
 the material slots and the export be finished and tested on a machine with no

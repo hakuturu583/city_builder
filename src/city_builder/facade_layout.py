@@ -24,8 +24,11 @@ Two images come out of the same layout:
 Everything is expressed in UV, not in metres. The wall's V axis runs 0 at the
 pavement to 1 at the roofline whatever the building's height, so a sheet
 belongs to a *floor count* rather than to a height, and a sheet drawn for six
-floors is only correct on a six-floor building. :func:`floor_rhythm` is how we
-check that a generated sheet kept the rhythm it was given.
+floors is only correct on a six-floor building. :func:`floor_alignment` is how
+we check that a generated sheet kept the structure it was given, and
+:func:`diversity` is how we check that a set of them did not all come out the
+same — a score that only reads structure quietly selects for a city of
+identical grey concrete.
 """
 
 from __future__ import annotations
@@ -145,6 +148,34 @@ class FacadeLayout:
 
 def _round8(value: float) -> int:
     return max(8, round(value / 8.0) * 8)
+
+
+def sample_layout(floors: int, rng, *, facade_width: float = 12.0,
+                  bay_metres: float = 3.0) -> FacadeLayout:
+    """A layout for ``floors`` storeys, drawn at random within plausible bounds.
+
+    One canonical drawing per floor count was the right thing while the
+    mechanism was being verified, and the wrong thing for a city: it gives
+    every building the same window proportions, the same bay rhythm and the
+    same shopfront, and the conditioner then holds the model to it. Structure
+    is the half of a facade's variety that a prompt cannot supply.
+
+    The window width does most of the work. Narrow openings in a wide pier read
+    as a punched-window block; at the top of the range the piers thin out to
+    mullions and the same code draws a ribbon window.
+    """
+    bays = max(1, round(facade_width / rng.uniform(bay_metres * 0.8, bay_metres * 1.5)))
+    return FacadeLayout(
+        floors=floors,
+        bays=bays,
+        ground_floor_ratio=rng.uniform(1.0, 1.8),
+        window_width=rng.uniform(0.34, 0.88),
+        window_height=rng.uniform(0.40, 0.70),
+        window_base=rng.uniform(0.14, 0.32),
+        shopfront_width=rng.uniform(0.70, 0.92),
+        shopfront_height=rng.uniform(0.55, 0.78),
+        parapet=rng.uniform(0.01, 0.06),
+    )
 
 
 def bays_for(facade_width: float, bay_metres: float = 3.0) -> int:
@@ -441,6 +472,56 @@ def bay_alignment(sheet: np.ndarray, layout: FacadeLayout, *, tolerance: float =
 # ---------------------------------------------------------------------------
 # Sheets on disk
 # ---------------------------------------------------------------------------
+
+
+def descriptor(sheet: np.ndarray) -> np.ndarray:
+    """A short vector standing for "what this facade looks like".
+
+    Lightness, colour on two axes, saturation and how busy the surface is —
+    enough to tell a brick block from a glass tower, and nothing about where
+    the windows are, which :func:`alignment` already covers.
+    """
+    image = _grey(sheet) if sheet.ndim == 2 else sheet.astype(np.float32)
+    if image.ndim == 2:
+        image = np.stack([image] * 3, axis=-1)
+    r, g, b = (image[..., i].mean() for i in range(3))
+    high, low = image.max(axis=2), image.min(axis=2)
+    return np.array([
+        image.mean() / 255.0,
+        (r - b) / 255.0,
+        (g - (r + b) / 2) / 255.0,
+        float(np.mean((high - low) / (high + 1e-9))),
+        float(np.abs(np.diff(_grey(image), axis=0)).mean()) / 255.0,
+    ], dtype=np.float64)
+
+
+def diversity(sheets) -> float:
+    """Mean distance between sheets in :func:`descriptor` space.
+
+    The score that ranks a sheet cannot see colour, so ranking alone quietly
+    selects for whatever the model does most literally — measured, a whole city
+    of grey concrete at saturation 0.06, and nobody noticed until it was
+    rendered. This is the other half of the measurement. Sheets from one prompt
+    score about 0.05; sheets spread across the style set score about 0.4.
+    """
+    vectors = [descriptor(sheet) for sheet in sheets]
+    if len(vectors) < 2:
+        return 0.0
+    total, pairs = 0.0, 0
+    for i, a in enumerate(vectors):
+        for b in vectors[i + 1:]:
+            total += float(np.linalg.norm(a - b))
+            pairs += 1
+    return total / pairs
+
+
+def saturation(sheet: np.ndarray) -> float:
+    """How far from grey the sheet is. Concrete sits near 0.05, brick near 0.25."""
+    image = sheet.astype(np.float32)
+    if image.ndim == 2:
+        return 0.0
+    high, low = image.max(axis=2), image.min(axis=2)
+    return float(np.mean((high - low) / (high + 1e-9)))
 
 
 def sheet_name(floors: int, variant: int, prefix: str = "facade") -> str:

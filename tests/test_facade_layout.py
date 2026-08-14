@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from itertools import pairwise
 
 import numpy as np
@@ -13,8 +14,11 @@ from city_builder.facade_layout import (
     bays_for,
     bays_in,
     control_image,
+    diversity,
     floor_alignment,
     procedural_facade,
+    sample_layout,
+    saturation,
     sheet_floors,
     sheet_name,
     wrap_seam,
@@ -306,3 +310,66 @@ def test_a_real_seam_still_shows_up():
     sheet[:, : width // 2] = np.clip(sheet[:, : width // 2] + 60, 0, 255)
     control = control_image(layout, width, height)
     assert wrap_seam(sheet.astype(np.uint8), control) > 3.0
+
+
+# ---------------------------------------------------------------------------
+# Variety — the half the alignment score cannot see
+# ---------------------------------------------------------------------------
+
+
+def test_sampled_layouts_actually_differ():
+    """One canonical drawing per floor count gives a city of one building."""
+    rng = random.Random(0)
+    layouts = [sample_layout(6, rng) for _ in range(24)]
+    assert len({layout.bays for layout in layouts}) > 1
+    assert np.std([layout.window_width for layout in layouts]) > 0.05
+    assert np.std([layout.ground_floor_ratio for layout in layouts]) > 0.05
+
+
+def test_a_sampled_layout_is_still_a_valid_layout():
+    rng = random.Random(1)
+    for floors in (1, 3, 12):
+        layout = sample_layout(floors, rng)
+        assert layout.floor_lines()[-1] == 1.0
+        assert layout.windows()
+        width, height = layout.pixel_size(64, 64)
+        assert width % 8 == 0 and height % 8 == 0
+        sheet = procedural_facade(layout, width, height, seed=2)
+        assert floor_alignment(sheet, layout) > 0.4
+
+
+def test_sampling_is_deterministic():
+    assert sample_layout(6, random.Random(3)) == sample_layout(6, random.Random(3))
+
+
+def test_wide_windows_read_as_a_ribbon():
+    """The same drawing code has to cover punched openings and ribbon glazing."""
+    punched = FacadeLayout(floors=6, bays=4, window_width=0.34)
+    ribbon = FacadeLayout(floors=6, bays=4, window_width=0.88)
+    glazed = lambda l: sum((u1 - u0) for u0, u1, *_ in l.windows())
+    assert glazed(ribbon) > 2 * glazed(punched)
+
+
+def test_diversity_separates_a_set_from_its_clones():
+    layout = FacadeLayout(floors=6, bays=4)
+    width, height = layout.pixel_size(64, 64)
+    clones = [procedural_facade(layout, width, height, seed=1) for _ in range(4)]
+    assorted = [
+        procedural_facade(layout, width, height, seed=1, wall=w, glass=g)
+        for w, g in (((0.62, 0.60, 0.57), (0.16, 0.20, 0.26)),
+                     ((0.55, 0.28, 0.22), (0.30, 0.30, 0.28)),
+                     ((0.88, 0.88, 0.86), (0.10, 0.14, 0.20)),
+                     ((0.30, 0.42, 0.46), (0.42, 0.58, 0.60)))
+    ]
+    assert diversity(clones) == pytest.approx(0.0, abs=1e-9)
+    assert diversity(assorted) > 0.1
+
+
+def test_saturation_tells_grey_from_coloured():
+    layout = FacadeLayout(floors=6, bays=4)
+    width, height = layout.pixel_size(64, 64)
+    grey = procedural_facade(layout, width, height, seed=1, wall=(0.6, 0.6, 0.6),
+                             glass=(0.3, 0.3, 0.3))
+    brick = procedural_facade(layout, width, height, seed=1, wall=(0.55, 0.24, 0.18),
+                              glass=(0.2, 0.3, 0.4))
+    assert saturation(grey) < 0.1 < saturation(brick)
