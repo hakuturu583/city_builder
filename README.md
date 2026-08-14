@@ -616,6 +616,73 @@ config file is the worst outcome available, since the run succeeds, the setting
 does nothing, and the only evidence is in the geometry. Any flag passed
 explicitly beats the file.
 
+## As an MCP server
+
+The same pipeline, exposed for an agent to drive:
+
+```bash
+uv sync --extra mcp
+uv run city-builder-mcp          # stdio
+```
+
+```json
+{"mcpServers": {"city-builder": {"command": "uv",
+  "args": ["run", "--directory", "/path/to/city_builder", "city-builder-mcp"]}}}
+```
+
+The tools are not the CLI with a different coat on. Two things change when the
+caller is a language model rather than a person at a shell.
+
+**It cannot see.** A person runs a build, opens the `.blend` and knows in a
+second whether the road has holes in it. An agent gets a JSON blob. So every
+tool that changes something answers with measurements, `survey_scene` exists at
+all, and `render_view` hands back an actual image rather than a path to take on
+trust.
+
+**It cannot afford to rebuild.** A build is named and kept, and every later
+call takes the handle. Blender is a singleton — one process, one scene — so the
+handle holds the geometry (numpy and shapely) and anything wanting Blender
+rebuilds into it on demand. That is why exporting twice costs twice, and why
+each tool says in its own description what it costs: the agent is choosing
+between them without a wall clock in front of it.
+
+| | |
+|---|---|
+| `inspect_map` | what a map contains, before building it |
+| `describe_options` | every build option, its type and default |
+| `list_styles` | the facade characters sheets are spread across |
+| `build` | map → geometry, kept under a handle; answers with the survey |
+| `list_scenes` / `forget_scene` | what is held, and dropping it |
+| `survey_scene` | the scene in numbers — see below |
+| `make_layouts` | facade layouts and control images. Seconds, no GPU |
+| `generate_facades` | paint them with a diffusion model. **GPU, minutes** |
+| `make_tile` | a tileable ground or road texture |
+| `export` | `.blend` / `.glb` / `.fbx` |
+| `render_view` | aerial, plan or street still, returned as an image |
+| `render_drive` | a drive along the roads. **Minutes** |
+
+`survey_scene` is the session's worth of debugging distilled into numbers, and
+each of them was a bug before it was a metric:
+
+```json
+{"carriageway": {"levels": {
+    "at_grade": {"surface_m2": 84253.1, "seams": 0, "openings": 12,
+                 "largest_opening_m2": 2346.1},
+    "elevated": {"surface_m2": 16923.2, "seams": 0, "openings": 1,
+                 "largest_opening_m2": 735.7}}},
+ "elevation": {"elevated": 97, "clearance_m": {"min": 1.11, "median": 5.81},
+               "decks": 93, "parapets": 87, "piers": 168},
+ "route": {"lanelets": 60, "length_m": 3045.4, "z_range_m": [3.53, 12.68]}}
+```
+
+Holes are split by **width, not area**, because width is what makes one a
+defect: a forty-metre seam a handspan wide is eight square metres and a wheel
+drops into it, while a roundabout's central island is three hundred and is
+meant to be there. A hole that nowhere admits a one-metre circle is a *seam*
+and should be zero; the rest are *openings*. Levels are judged separately,
+since a viaduct and the street beneath it share a plan view, and a single union
+would call the ground beside the deck a hole through it.
+
 ## Requirements
 
 Python **3.11** — `bpy` publishes cp311 wheels up to 5.0.1 and cp313 from 5.1,
