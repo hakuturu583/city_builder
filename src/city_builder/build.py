@@ -487,6 +487,7 @@ def write_marking_pages(result: BuildResult, directory: str) -> list[str]:
 def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | None = None,
                 fbx: str | None = None,
                 ground_texture: str | None = None, tile_metres: float = 12.0,
+                road_tile_metres: float | None = None,
                 facade_dir: str | None = None, road_texture: str | None = None,
                 marking_options: MarkingOptions | None = None,
                 markings_dir: str | None = None, verbose: bool = True) -> None:
@@ -495,7 +496,13 @@ def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | Non
     ``ground_texture`` is a tile image to repeat across the ground. Only the
     ground: every lanelet-derived surface keeps the material it was built with,
     because the map already says what those look like.
+
+    The carriageway gets its own metric scale. Paving slabs and road aggregate
+    are not the same size: one tile spanning the twelve metres that suits a
+    pavement gives asphalt a grain a foot across, and the road comes out
+    cobbled.
     """
+    road_tile_metres = tile_metres if road_tile_metres is None else road_tile_metres
     scene.clear_scene()
     objects = scene.build(result.groups, verbose=verbose)
 
@@ -514,10 +521,11 @@ def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | Non
             if carrier is None:
                 continue
             if road_texture:
-                scene.uv_from_xy(carrier, tile_metres, name="AsphaltUV")
+                scene.uv_from_xy(carrier, road_tile_metres, name="AsphaltUV")
             scene.apply_marking_pages(carrier, pages, scene.build.face_counts[name],
                                       page_of_shape, options,
-                                      asphalt_image=road_texture, tile_metres=tile_metres)
+                                      asphalt_image=road_texture,
+                                      tile_metres=road_tile_metres)
         if verbose:
             print(f"[scene] paint: {len(pages)} page(s) over "
                   f"{', '.join(result.marking_page_of_shape)}")

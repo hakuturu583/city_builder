@@ -81,7 +81,9 @@ def main():
 @click.option("--seed", type=int, default=None, help="Building layout is deterministic for a given seed")
 @click.option("--ground-texture", default=None,
               help="Tile image to repeat across the ground (see `city-builder tile`)")
-@click.option("--tile-metres", type=float, default=12.0, help="How far one tile spans")
+@click.option("--tile-metres", type=float, default=12.0, help="How far one ground tile spans")
+@click.option("--road-tile-metres", type=float, default=4.0,
+              help="How far one carriageway tile spans; asphalt grain is finer than paving")
 @click.option("--facade-dir", default=None,
               help="Directory of facade sheets (see `city-builder layouts` / `facades`)")
 # viaduct — the rest of its knobs live in the config file
@@ -101,7 +103,8 @@ def main():
               help="Tile image for the carriageway, under the paint (see `city-builder tile`)")
 @click.option("--quiet", is_flag=True)
 def build_command(input_path, blend, glb, fbx, heightmap_path, manifest_path, ground_texture,
-                  tile_metres, facade_dir, config_path, viaduct_on, road_texture, quiet, **kwargs):
+                  tile_metres, road_tile_metres, facade_dir, config_path, viaduct_on,
+                  road_texture, quiet, **kwargs):
     """Build a scene from a Lanelet2 map.
 
     Options come from ``--config`` if given, and any flag passed explicitly
@@ -147,7 +150,8 @@ def build_command(input_path, blend, glb, fbx, heightmap_path, manifest_path, gr
         write_manifest(result, manifest_path)
     if blend or glb or fbx:
         build_scene(result, blend=blend, glb=glb, fbx=fbx, ground_texture=ground_texture,
-                    tile_metres=tile_metres, facade_dir=facade_dir,
+                    tile_metres=tile_metres, road_tile_metres=road_tile_metres,
+                    facade_dir=facade_dir,
                     road_texture=road_texture, marking_options=config.markings,
                     verbose=not quiet)
 
@@ -552,6 +556,9 @@ def config_command(output_path, check_path):
 @click.option("--facade-dir", default=None, help="Directory of facade sheets")
 @click.option("--road-texture", default=None, help="Tile image for the carriageway")
 @click.option("--ground-texture", default=None, help="Tile image for the terrain")
+@click.option("--tile-metres", type=float, default=12.0, help="How far one ground tile spans")
+@click.option("--road-tile-metres", type=float, default=4.0,
+              help="How far one carriageway tile spans; asphalt grain is finer than paving")
 @click.option("--buildings/--no-buildings", default=True)
 @click.option("--glb/--no-glb", default=True)
 @click.option("--fbx/--no-fbx", default=True)
@@ -566,8 +573,8 @@ def config_command(output_path, check_path):
 @click.option("--route-seed", type=int, default=0)
 @click.option("--quiet", is_flag=True)
 def make_command(input_path, out_dir, config_path, facade_dir, road_texture, ground_texture,
-                 buildings, glb, fbx, video, seconds, speed, fps, width, height, samples,
-                 engine, route_seed, quiet):
+                 tile_metres, road_tile_metres, buildings, glb, fbx, video, seconds, speed,
+                 fps, width, height, samples, engine, route_seed, quiet):
     """Everything, for one map or a directory of them.
 
     Scene, exports and the drive in one pass, so a map is never half-built:
@@ -604,7 +611,8 @@ def make_command(input_path, out_dir, config_path, facade_dir, road_texture, gro
                     fbx=os.path.join(out_dir, f"{name}.fbx") if fbx else None,
                     ground_texture=ground_texture, road_texture=road_texture,
                     facade_dir=facade_dir, marking_options=config.markings,
-                    tile_metres=12.0, verbose=not quiet)
+                    tile_metres=tile_metres, road_tile_metres=road_tile_metres,
+                    verbose=not quiet)
 
         clip = None
         if video:
