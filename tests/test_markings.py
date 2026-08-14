@@ -252,3 +252,41 @@ def test_supersampling_softens_the_stair_steps():
     assert set(np.unique(hard)) <= {0, 255}
     assert len(np.unique(soft)) > 2, "the edge should carry partial coverage"
     assert soft.max() > 200 and (soft > 0).sum() >= (hard > 0).sum()
+
+
+def test_no_lane_line_is_painted_inside_a_junction():
+    """A lane line stops at the intersection: inside it there is nothing to
+    separate, because every turning path crosses every other one."""
+    groups = {
+        "Junctions": [_lane(1, x0=0.0, x1=30.0)],
+        "LaneMarkings": [_stripe(2, 0.0, 30.0, -1.45, -1.30)],
+    }
+    pages, _ = M.bake(groups, MarkingOptions(page_pixels=1024))
+    assert pages and pages[0].max() == 0
+
+
+def test_a_stop_line_and_a_crossing_still_land_on_a_junction():
+    groups = {
+        "Junctions": [_lane(1, x0=0.0, x1=30.0)],
+        "StopLines": [_stripe(2, 1.0, 1.4, -1.5, 1.5)],
+    }
+    pages, _ = M.bake(groups, MarkingOptions(page_pixels=1024))
+    assert pages and pages[0].max() == 255
+
+
+def test_the_same_line_is_still_painted_on_the_road_it_belongs_to():
+    groups = {
+        "Roads": [_lane(1, x0=0.0, x1=30.0)],
+        "LaneMarkings": [_stripe(2, 0.0, 30.0, -1.45, -1.30)],
+    }
+    pages, _ = M.bake(groups, MarkingOptions(page_pixels=1024))
+    assert pages and pages[0].max() == 255
+
+
+def test_junction_lane_lines_can_be_asked_for():
+    groups = {
+        "Junctions": [_lane(1, x0=0.0, x1=30.0)],
+        "LaneMarkings": [_stripe(2, 0.0, 30.0, -1.45, -1.30)],
+    }
+    pages, _ = M.bake(groups, MarkingOptions(page_pixels=1024, lane_lines_in_junctions=True))
+    assert pages and pages[0].max() == 255

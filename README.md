@@ -71,6 +71,11 @@ uv run city-builder build --input map.osm --output scene.blend \
 uv run city-builder build ... --marking-geometry   # the old coplanar slabs
 ```
 
+A lane line stops at the intersection. Inside one there is nothing to separate
+— every turning path crosses every other one — so a junction lanelet's boundary
+carries no paint, while the stop line at its mouth and the crossing over it
+plainly do (`lane_lines_in_junctions` puts them back).
+
 The class registry's distinction survives the move. `preserve` stops being a
 property of a group of objects and becomes **the mask channel itself**: the
 carriageway's colour may be regenerated wherever the mask is zero, and must not

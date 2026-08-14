@@ -37,6 +37,9 @@ from .geometry import Polygon, Ribbon
 #: Groups whose geometry is paint on the carriageway rather than a surface.
 PAINTED = ("LaneMarkings", "StopLines", "CrosswalkStripes")
 
+#: Paint that belongs to a lane boundary, and so stops where the lanes merge.
+LANE_LINES = ("LaneMarkings",)
+
 #: Groups that carry the paint. Ribbons only: a lane's own along-and-across
 #: coordinates are what makes the resolution tractable, and a patch of infill
 #: or a clipped crossing has no such axis.
@@ -52,6 +55,12 @@ class MarkingOptions:
     page_pixels: int = 4096
     reach: float = 0.6  # how far outside a lane to collect paint (m)
     supersample: int = 2  # draw this much larger, then shrink, for smooth edges
+
+    # A lane line stops at the intersection. Inside it there is nothing to
+    # separate — a turning path crosses every other one — so the boundary of a
+    # junction lanelet carries no paint, while the stop line at its mouth and
+    # the crossing over it plainly do.
+    lane_lines_in_junctions: bool = False
     colour: tuple[float, float, float] = (0.92, 0.92, 0.90)
     roughness: float = 0.55  # paint is smoother than the asphalt around it
 
@@ -221,13 +230,18 @@ def rasterise(frame: LaneFrame, shapes: Sequence[object], size: tuple[int, int],
     return image.resize((width, height), Image.LANCZOS) if scale > 1 else image
 
 
-def paint_near(shapes: Sequence[object], reach: float):
-    """An index of painted shapes, to ask which ones touch a lane."""
+def paint_near(painted: Sequence[tuple[str, object]], reach: float):
+    """An index of painted shapes, to ask which ones touch a lane.
+
+    Keeps the group each shape came from, because what may be painted depends
+    on what the surface is: a junction takes a stop line and a crossing but not
+    a lane boundary.
+    """
     from shapely.geometry import Polygon as ShapelyPolygon
     from shapely.strtree import STRtree
 
     geometries, keep = [], []
-    for shape in shapes:
+    for group, shape in painted:
         outline = _outline(shape)
         if outline is None:
             continue
@@ -237,7 +251,7 @@ def paint_near(shapes: Sequence[object], reach: float):
         if polygon.is_empty or polygon.area <= 1e-9:
             continue
         geometries.append(polygon)
-        keep.append(shape)
+        keep.append((group, shape))
 
     if not geometries:
         return lambda _ribbon: []
@@ -345,7 +359,7 @@ def bake(groups: dict[str, list], options: MarkingOptions | None = None):
     the texture now.
     """
     options = options or MarkingOptions()
-    painted = [shape for name in PAINTED for shape in groups.get(name, ())]
+    painted = [(name, shape) for name in PAINTED for shape in groups.get(name, ())]
     carriers = [(name, shape) for name in CARRIES_PAINT for shape in groups.get(name, ())]
     if not options.texture or not painted or not carriers:
         return [], {}
@@ -358,11 +372,16 @@ def bake(groups: dict[str, list], options: MarkingOptions | None = None):
         sizes.append(lane_pixels(frame, options))
 
     placements = pack(sizes, options)
-    strips = [
-        rasterise(frame, near(ribbon), size, options.supersample)
-        if place is not None else None
-        for frame, size, place, (_n, ribbon) in zip(frames, sizes, placements, carriers)
-    ]
+    strips = []
+    for frame, size, place, (group, ribbon) in zip(frames, sizes, placements, carriers):
+        if place is None:
+            strips.append(None)
+            continue
+        paint = near(ribbon)
+        if group == "Junctions" and not options.lane_lines_in_junctions:
+            paint = [(g, shape) for g, shape in paint if g not in LANE_LINES]
+        strips.append(rasterise(frame, [shape for _g, shape in paint], size,
+                                options.supersample))
     pages = compose([s for s in strips if s is not None],
                     [p for p, s in zip(placements, strips) if s is not None], options)
 
