@@ -360,6 +360,45 @@ three or four ways over — `.bin`, full-precision `.safetensors`, and on the
 SD1.5 base two single-file checkpoints as well — so a bare `*.safetensors`
 costs several times what is needed to run them.
 
+## Driving through it
+
+The point of building this scene is to drive through it, so the useful view is
+not an aerial render — it is what a windscreen sees.
+
+```bash
+uv run city-builder drive --input map.osm --scene scene.blend \
+    --output drive.mp4 --seconds 30 --speed 11
+```
+
+The route comes from the map, not from the scene: lanelets are lanes, a
+lanelet's two boundaries average to its centreline, and one lanelet follows
+another when it starts on the pair of boundary points the other ends on.
+`lanelet.build_adjacency` gives the *undirected* version of that, which is what
+the ground classifier wants; driving needs the directed one, or a route can run
+backwards up a one-way street. The road graph has cycles, so the longest route
+is found by bounded random walks rather than exactly — on the Nishi-Shinjuku
+map that finds 3.0 km across 60 lanelets, including the climb over the viaduct.
+
+Two details decide whether it looks like driving or like a camera on a rail:
+
+* **Resample before animating.** A lanelet's vertices sit wherever the survey
+  put them, dense on a curve and sparse on a straight, so one vertex per frame
+  races the straights and crawls round the bends.
+* **Aim well ahead, not at the next sample.** Aiming at the next sample makes
+  the camera yaw with every wobble in the centreline; aiming 18 m down the road
+  is what a driver does and turns the same wobble into a steady approach.
+
+Rotations are keyed as quaternions, because the yaw wraps through ±180° on any
+route that turns around and Euler interpolation spins the camera the long way
+at that frame. Keyframe interpolation is set to linear before the first key is
+inserted — with a key on every frame, Bezier handles ease in and out of each
+one and the drive comes out stuttering.
+
+Output goes through a PNG sequence and the system ffmpeg: the `bpy` wheel on
+PyPI is built without FFmpeg, so Blender's own video writer is not there.
+EEVEE renders 720p at about 30 fps of footage per minute of wall clock;
+`--engine cycles` uses OptiX on the GPU for a better-looking, much slower pass.
+
 ## Placing other things on this ground
 
 `--heightmap out.json` writes the grid plus the scene anchor, so a building or

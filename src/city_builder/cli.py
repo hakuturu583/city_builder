@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import click
 
 from . import ground as ground_module
@@ -437,3 +439,68 @@ def styles_command():
     width = max(len(name) for name, _ in FACADE_STYLES)
     for name, prompt in FACADE_STYLES:
         click.echo(f"{name:<{width}}  {prompt}")
+
+
+@main.command("drive")
+@click.option("--input", "input_path", required=True, help="Lanelet2 HD map (.osm)")
+@click.option("--scene", "scene_path", required=True,
+              help="A .blend from `city-builder build` — the geometry to drive through")
+@click.option("--output", "output_path", required=True, help="Output video (.mp4)")
+@click.option("--seconds", type=float, default=30.0)
+@click.option("--speed", type=float, default=11.0, help="Metres per second (11 = 40 km/h)")
+@click.option("--fps", type=int, default=30)
+@click.option("--eye-height", type=float, default=1.4, help="Camera height above the road (m)")
+@click.option("--look-ahead", type=float, default=18.0,
+              help="How far down the road the camera aims; less makes it twitchy")
+@click.option("--lens", type=float, default=30.0, help="Focal length (mm, 36 mm sensor)")
+@click.option("--width", type=int, default=1280)
+@click.option("--height", type=int, default=720)
+@click.option("--samples", type=int, default=24)
+@click.option("--engine", type=click.Choice(["eevee", "cycles"]), default="eevee")
+@click.option("--route-seed", type=int, default=0, help="Which route the search settles on")
+@click.option("--quiet", is_flag=True)
+def drive_command(input_path, scene_path, output_path, seconds, speed, fps, eye_height,
+                  look_ahead, lens, width, height, samples, engine, route_seed, quiet):
+    """Drive a camera along the roads and render it to a video.
+
+    The route comes from the map rather than from the scene: lanelets are lanes,
+    a lanelet's two boundaries average to its centreline, and one follows
+    another when it starts on the pair of boundary points the other ends on.
+    """
+    from . import lanelet, route
+    from . import scene as scene_module
+    from .build import build_city
+
+    # The geometry is rebuilt, not read back out of the .blend, because the
+    # route needs the lanelet centrelines and the scene only kept the surfaces.
+    # Same defaults, so the same local frame and z datum: the path lands on the
+    # road it was measured from.
+    result = build_city(input_path, buildings=False, verbose=not quiet)
+    _ll2, _projection, lmap = lanelet.load_map(
+        input_path, projector="utm",
+        origin_lat=result.frame.ref_lat, origin_lon=result.frame.ref_lon)
+
+    path = route.drive_path(
+        result.groups, lanelet.lanelet_end_keys(lmap), seed=route_seed,
+        eye_height=eye_height, look_ahead=look_ahead, step=speed / fps)
+    if not path:
+        raise click.ClickException("no drivable route found in this map")
+
+    wanted = int(seconds * fps)
+    if len(path) < wanted and not quiet:
+        click.echo(f"[drive] the route runs out after {len(path) / fps:.0f} s "
+                   f"at {speed:g} m/s; rendering that")
+    path = path[:wanted]
+
+    import bpy
+
+    bpy.ops.wm.open_mainfile(filepath=os.path.abspath(scene_path))
+    if not any(o.type == "LIGHT" for o in bpy.data.objects):
+        scene_module.sunlit()
+    scene_module.animate_camera(path, lens=lens)
+
+    written = scene_module.render_animation(
+        output_path, frames=len(path), fps=fps, resolution=(width, height),
+        samples=samples, engine="CYCLES" if engine == "cycles" else "BLENDER_EEVEE",
+        verbose=not quiet)
+    click.echo(f"wrote {written}")

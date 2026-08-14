@@ -359,3 +359,142 @@ def verify_ground_clearance(*, samples: int = 6000, lift: float = 0.6, seed: int
         "ground_above_road_pct": round(above / max(1, hits) * 100, 2),
         "worst_m": round(worst, 4),
     }
+
+
+# ---------------------------------------------------------------------------
+# Driving through it
+# ---------------------------------------------------------------------------
+
+
+def sunlit(strength: float = 3.5, elevation: float = 48.0, azimuth: float = 35.0):
+    """A sun and a sky, for a scene built without either.
+
+    The build makes surfaces, not a photograph; a scene with no light renders
+    black, and one lit only by a grey world renders flat.
+    """
+    import math
+
+    import bpy
+
+    sun_data = bpy.data.lights.new("Sun", type="SUN")
+    sun_data.energy = strength
+    sun_data.angle = math.radians(2.0)  # a soft edge to the shadows
+    sun = bpy.data.objects.new("Sun", sun_data)
+    bpy.context.scene.collection.objects.link(sun)
+    sun.rotation_euler = (math.radians(elevation), 0.0, math.radians(azimuth))
+
+    world = bpy.data.worlds.new("Sky")
+    world.use_nodes = True
+    background = world.node_tree.nodes["Background"]
+    background.inputs[0].default_value = (0.42, 0.52, 0.68, 1.0)
+    background.inputs[1].default_value = 1.1
+    bpy.context.scene.world = world
+    return sun
+
+
+def animate_camera(path, *, lens: float = 30.0, name: str = "DriveCam"):
+    """Keyframe a camera along ``(position, target)`` pairs, one pair per frame.
+
+    Rotations are keyed as quaternions with each one flipped into the same
+    hemisphere as the last. Euler angles would be simpler and wrong: the yaw
+    wraps through ±180° somewhere on any route that turns around, and the
+    interpolation between the two keyframes either side of the wrap spins the
+    camera all the way back round.
+    """
+    import bpy
+    import mathutils
+
+    # Set before any key is inserted: with a keyframe on every frame, Bezier
+    # handles ease in and out of each one and the drive comes out stuttering.
+    # Setting it here rather than editing the curves afterwards also avoids the
+    # F-curve API, which moved when actions became slotted in Blender 4.4.
+    bpy.context.preferences.edit.keyframe_new_interpolation_type = "LINEAR"
+
+    data = bpy.data.cameras.new(name)
+    data.lens = lens
+    data.clip_end = 4000.0
+    camera = bpy.data.objects.new(name, data)
+    bpy.context.scene.collection.objects.link(camera)
+    camera.rotation_mode = "QUATERNION"
+    bpy.context.scene.camera = camera
+
+    previous = None
+    for frame, (position, target) in enumerate(path, start=1):
+        camera.location = position
+        direction = mathutils.Vector(target) - mathutils.Vector(position)
+        rotation = direction.to_track_quat("-Z", "Y")
+        if previous is not None and rotation.dot(previous) < 0.0:
+            rotation.negate()
+        previous = rotation.copy()
+
+        camera.rotation_quaternion = rotation
+        camera.keyframe_insert("location", frame=frame)
+        camera.keyframe_insert("rotation_quaternion", frame=frame)
+
+    bpy.context.scene.frame_start = 1
+    bpy.context.scene.frame_end = len(path)
+    return camera
+
+
+def render_animation(output_path: str, *, frames: int, fps: int = 30,
+                     resolution=(1280, 720), samples: int = 24,
+                     engine: str = "BLENDER_EEVEE", keep_frames: bool = False,
+                     verbose: bool = True) -> str:
+    """Render the current camera animation and encode it to H.264.
+
+    Through a PNG sequence and the system ffmpeg rather than Blender's own
+    video writer: the ``bpy`` wheel on PyPI is built without FFmpeg, so its
+    ``FFMPEG`` output format does not exist. Frames on disk are no loss anyway —
+    a render that dies at frame 700 can be encoded from what it got.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    import bpy
+
+    scene = bpy.context.scene
+    scene.render.engine = engine
+    if engine == "CYCLES":
+        scene.cycles.samples = samples
+        scene.cycles.device = "GPU"
+        preferences = bpy.context.preferences.addons["cycles"].preferences
+        preferences.compute_device_type = "OPTIX"
+        preferences.get_devices()
+        for device in preferences.devices:
+            device.use = device.type in ("OPTIX", "CUDA")
+    else:
+        scene.eevee.taa_render_samples = samples
+
+    scene.render.resolution_x, scene.render.resolution_y = resolution
+    scene.render.fps = fps
+    scene.frame_end = frames
+    scene.render.image_settings.file_format = "PNG"
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise RuntimeError("ffmpeg is not on PATH; cannot encode the video")
+
+    output_path = os.path.abspath(output_path)
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    directory = tempfile.mkdtemp(prefix="city_builder_frames_")
+    scene.render.filepath = os.path.join(directory, "frame_")
+
+    if verbose:
+        print(f"[drive] {frames} frames at {fps} fps ({frames / fps:.0f} s), "
+              f"{resolution[0]}x{resolution[1]}, {engine}")
+    try:
+        bpy.ops.render.render(animation=True)
+        subprocess.run(
+            [ffmpeg, "-y", "-loglevel", "error", "-framerate", str(fps),
+             "-i", os.path.join(directory, "frame_%04d.png"),
+             "-c:v", "libx264", "-preset", "slow", "-crf", "20",
+             "-pix_fmt", "yuv420p", output_path],
+            check=True,
+        )
+    finally:
+        if not keep_frames:
+            shutil.rmtree(directory, ignore_errors=True)
+        elif verbose:
+            print(f"[drive] frames kept in {directory}")
+    return output_path
