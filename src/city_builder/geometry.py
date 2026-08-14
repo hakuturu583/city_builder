@@ -27,6 +27,9 @@ class Ribbon:
     left: list[tuple[float, float, float]]
     right: list[tuple[float, float, float]]
     attributes: dict[str, str] = field(default_factory=dict)
+    # Set when the paint on this lane has been baked into an atlas page; one
+    # per vertex, interleaved left/right the way ribbon_to_mesh builds them.
+    uvs: list[tuple[float, float]] | None = None
 
     def shift_z(self, delta: float) -> None:
         self.left = [(x, y, z + delta) for x, y, z in self.left]
@@ -312,7 +315,7 @@ def ribbon_to_mesh(ribbon: Ribbon) -> tuple[Mesh, int]:
         upward = faces_up(quad_normals(left[i], right[i], right[i + 1], left[i + 1]))
         faces.append([a, b, c, d] if upward else [a, d, c, b])
 
-    return Mesh(vertices, faces), skipped
+    return Mesh(vertices, faces, ribbon.uvs), skipped
 
 
 def polygon_to_mesh(polygon: Polygon) -> tuple[Mesh, int]:

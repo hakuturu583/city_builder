@@ -86,9 +86,16 @@ def main():
 @click.option("--pier-spacing", type=float, default=None, help="Distance between columns (m)")
 @click.option("--viaduct/--no-viaduct", "viaduct_on", default=None,
               help="Build the structure under an elevated road at all")
+# markings
+@click.option("--marking-texture/--marking-geometry", "texture", default=None,
+              help="Bake the paint into the road texture, or keep it as coplanar slabs")
+@click.option("--marking-pixels", "across_pixels", type=int, default=None,
+              help="Texels across a lane; 64 puts three of them across a thin line")
+@click.option("--road-texture", default=None,
+              help="Tile image for the carriageway, under the paint (see `city-builder tile`)")
 @click.option("--quiet", is_flag=True)
 def build_command(input_path, blend, glb, heightmap_path, manifest_path, ground_texture,
-                  tile_metres, facade_dir, config_path, viaduct_on, quiet, **kwargs):
+                  tile_metres, facade_dir, config_path, viaduct_on, road_texture, quiet, **kwargs):
     """Build a scene from a Lanelet2 map.
 
     Options come from ``--config`` if given, and any flag passed explicitly
@@ -114,6 +121,7 @@ def build_command(input_path, blend, glb, heightmap_path, manifest_path, ground_
                       "vacancy", "min_height", "max_height", "floor_height", "facade_width",
                       "tall_bias", "max_buildings", "seed"),
         "viaduct": ("deck_thickness", "parapet_height", "pier_spacing"),
+        "markings": ("texture", "across_pixels"),
     }
     for section, keys in sections.items():
         config = merge_overrides(config, section, **{k: kwargs.pop(k) for k in keys})
@@ -130,7 +138,9 @@ def build_command(input_path, blend, glb, heightmap_path, manifest_path, ground_
         write_manifest(result, manifest_path)
     if blend or glb:
         build_scene(result, blend=blend, glb=glb, ground_texture=ground_texture,
-                    tile_metres=tile_metres, facade_dir=facade_dir, verbose=not quiet)
+                    tile_metres=tile_metres, facade_dir=facade_dir,
+                    road_texture=road_texture, marking_options=config.markings,
+                    verbose=not quiet)
 
 
 @main.command("inspect")

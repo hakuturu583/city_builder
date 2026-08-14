@@ -38,6 +38,47 @@ left and right boundary of every lane in 3D, so width, curvature and elevation
 are measured instead of inferred from highway tags, and intersections are real
 turning lanelets rather than a hull over the approaching roads.
 
+## Road markings
+
+Painted markings are not objects. Building them as coplanar slabs a couple of
+millimetres above the carriageway is what a mesh pipeline does when it has
+nowhere else to put them, and it costs: 2938 lane-line ribbons, 1327 zebra bars
+and 207 stop lines on this map, all fighting the road for the same depth, and
+all of them free to hang past the edge of a viaduct deck because nothing tells
+a stripe where the road stops.
+
+They are baked into the carriageway's own texture instead. The paint is clipped
+to the surface by construction, there is no second surface to fight, and 12 483
+faces go away.
+
+**Resolution is the whole problem.** The carriageway is about 60 000 m²; one
+image over the map at a resolution that keeps a 15 cm line crisp would be
+hundreds of megatexels. But a lanelet is a *ribbon*, so it has a natural
+parameterisation — along it and across it — and across it the useful resolution
+is set by the lane width rather than by the map. Each lane is rasterised
+`across_pixels` texels wide and however many long it needs, and the strips are
+packed into columns and pages.
+
+| `across_pixels` | cm/texel | total | pages | a 15 cm line |
+|---|---|---|---|---|
+| 32 | 9.5 | 13.5 Mtexel | 1 | 1.6 px |
+| **64** | **4.7** | **52.5 Mtexel** | **4** | **3.2 px** |
+| 128 | 2.4 | 189.2 Mtexel | 15 | 6.3 px |
+
+```bash
+uv run city-builder build --input map.osm --output scene.blend \
+    --marking-pixels 64 --road-texture asphalt.png
+uv run city-builder build ... --marking-geometry   # the old coplanar slabs
+```
+
+The class registry's distinction survives the move. `preserve` stops being a
+property of a group of objects and becomes **the mask channel itself**: the
+carriageway's colour may be regenerated wherever the mask is zero, and must not
+be touched where it is not. The manifest records it under `markings`, and the
+material mixes the generated asphalt with the paint colour using the mask as
+the factor — so a texturing pass can replace the asphalt image without ever
+being able to touch a lane line.
+
 ## Surface classes and the texturing policy
 
 Every object carries what it *is* and whether its colour may be regenerated —

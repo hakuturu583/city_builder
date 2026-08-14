@@ -126,7 +126,7 @@ def tag_object(obj, surface_class: SurfaceClass) -> None:
         datum.color = colour
 
 
-def uv_from_xy(obj, tile_metres: float) -> None:
+def uv_from_xy(obj, tile_metres: float, *, name: str = "UVMap") -> None:
     """Planar UVs at a metric scale, so a tile repeats every ``tile_metres``.
 
     A generated tile is only useful if its size on the ground is known, and a
@@ -134,7 +134,7 @@ def uv_from_xy(obj, tile_metres: float) -> None:
     form that survives a glTF export.
     """
     mesh = obj.data
-    layer = mesh.uv_layers.get("UVMap") or mesh.uv_layers.new(name="UVMap")
+    layer = mesh.uv_layers.get(name) or mesh.uv_layers.new(name=name)
     scale = 1.0 / max(tile_metres, 1e-6)
     for loop in mesh.loops:
         x, y, _ = mesh.vertices[loop.vertex_index].co
@@ -498,3 +498,73 @@ def render_animation(output_path: str, *, frames: int, fps: int = 30,
         elif verbose:
             print(f"[drive] frames kept in {directory}")
     return output_path
+
+
+# ---------------------------------------------------------------------------
+# Paint, as a texture rather than as geometry
+# ---------------------------------------------------------------------------
+
+
+def marking_material(name: str, page_path: str, options, *, asphalt=(0.055, 0.055, 0.058),
+                     asphalt_image: str | None = None, tile_metres: float = 12.0):
+    """Asphalt with the paint mixed over it, from a mask page.
+
+    One image, one mix. The mask is the whole point: it is also the record of
+    what a texturing pass may repaint, so it stays a channel rather than being
+    flattened into the colour.
+    """
+    import bpy
+
+    mat, nodes, links, bsdf = _material_nodes(name)
+
+    mask = nodes.new("ShaderNodeTexImage")
+    mask.location = (-700, 200)
+    mask.image = bpy.data.images.load(os.path.abspath(page_path))
+    mask.image.colorspace_settings.name = "Non-Color"  # it is a mask, not a colour
+    mask.extension = "CLIP"
+    mask.interpolation = "Closest" if options.across_pixels < 64 else "Linear"
+
+    base = nodes.new("ShaderNodeMixRGB") if "ShaderNodeMixRGB" in dir(bpy.types) else nodes.new("ShaderNodeMix")
+    base.location = (-250, 0)
+    if base.bl_idname == "ShaderNodeMix":
+        base.data_type = "RGBA"
+        factor, colour_a, colour_b, result = base.inputs[0], base.inputs[6], base.inputs[7], base.outputs[2]
+    else:
+        factor, colour_a, colour_b, result = base.inputs[0], base.inputs[1], base.inputs[2], base.outputs[0]
+
+    if asphalt_image:
+        surface = nodes.new("ShaderNodeTexImage")
+        surface.location = (-700, -200)
+        surface.image = bpy.data.images.load(os.path.abspath(asphalt_image))
+        surface.extension = "REPEAT"
+        coords = nodes.new("ShaderNodeUVMap")
+        coords.location = (-900, -200)
+        coords.uv_map = "AsphaltUV"
+        links.new(coords.outputs["UV"], surface.inputs["Vector"])
+        links.new(surface.outputs["Color"], colour_a)
+    else:
+        colour_a.default_value = (*asphalt, 1.0)
+
+    colour_b.default_value = (*options.colour, 1.0)
+    links.new(mask.outputs["Color"], factor)
+    links.new(result, bsdf.inputs["Base Color"])
+    bsdf.inputs["Roughness"].default_value = 0.85
+    return mat
+
+
+def apply_marking_pages(obj, page_paths: Sequence[str], face_counts: Sequence[int],
+                        pages_of_shape: Sequence[int], options, **material):
+    """Give a carriageway object one material per atlas page it uses."""
+    materials = [marking_material(f"CityPaint{i:02d}", path, options, **material)
+                 for i, path in enumerate(page_paths)]
+    obj.data.materials.clear()
+    for mat in materials:
+        obj.data.materials.append(mat)
+
+    face_materials = []
+    for shape_index, faces in enumerate(face_counts):
+        page = pages_of_shape[shape_index] if shape_index < len(pages_of_shape) else 0
+        face_materials.extend([min(page, len(materials) - 1)] * faces)
+    for polygon, index in zip(obj.data.polygons, face_materials):
+        polygon.material_index = index
+    return materials

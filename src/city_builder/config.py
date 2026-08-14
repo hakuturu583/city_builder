@@ -23,6 +23,7 @@ from typing import Any
 
 from . import ground as ground_module
 from .buildings import BuildingOptions
+from .markings import MarkingOptions
 from .surfaces import SurfaceOptions
 from .viaduct import ViaductOptions
 
@@ -48,6 +49,7 @@ class CityConfig:
     surfaces: SurfaceOptions = field(default_factory=SurfaceOptions)
     ground: GroundOptions = field(default_factory=GroundOptions)
     buildings: BuildingOptions = field(default_factory=BuildingOptions)
+    markings: MarkingOptions = field(default_factory=MarkingOptions)
     viaduct: ViaductOptions = field(default_factory=ViaductOptions)
 
     # -- reading -----------------------------------------------------------
@@ -97,6 +99,7 @@ _SECTIONS = {
     "surfaces": SurfaceOptions,
     "ground": GroundOptions,
     "buildings": BuildingOptions,
+    "markings": MarkingOptions,
     "viaduct": ViaductOptions,
 }
 

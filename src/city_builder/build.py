@@ -13,6 +13,7 @@ from . import ground as ground_module
 from . import viaduct as viaduct_module
 from .buildings import BuildingOptions
 from .frame import LocalFrame
+from .markings import MarkingOptions
 from .surfaces import SurfaceOptions, extract
 from .viaduct import ViaductOptions
 
@@ -25,6 +26,10 @@ class BuildResult:
     elevated: set[int]
     z_datum: float
     stats: dict[str, Any] = field(default_factory=dict)
+    # Paint baked off the carriageway: one mask page per image, and which page
+    # each shape of each carrying group landed on.
+    marking_pages: list[Any] = field(default_factory=list)
+    marking_page_of_shape: dict[str, list[int]] = field(default_factory=dict)
     # One record per generated building, in the order of ``groups["Buildings"]``.
     # Carries the floor count, which decides which facade sheet it may wear.
     plots: list[dict[str, Any]] = field(default_factory=list)
@@ -50,6 +55,7 @@ def build_city(
     buildings: bool = False,
     building_options: BuildingOptions | None = None,
     viaduct_options: ViaductOptions | None = None,
+    marking_options: MarkingOptions | None = None,
     verbose: bool = True,
 ) -> BuildResult:
     """Read a map and produce every surface, without touching Blender.
@@ -145,7 +151,22 @@ def build_city(
                 print(f"[build] floor counts: {floors[0]}-{floors[-1]} "
                       f"({len(floors)} distinct, one facade sheet family each)")
 
-    return BuildResult(frame, groups, heightmap, elevated, datum, stats, plots)
+    from . import markings as markings_module
+
+    pages, page_of_shape = markings_module.bake(groups, marking_options)
+    if pages:
+        # The crossing surface was kept as a semantic region sitting a few
+        # millimetres over the road. With the zebra in the road's own texture,
+        # that slab now hides the paint it was meant to sit beside.
+        groups.pop("Crosswalks", None)
+        stats["marking_pages"] = len(pages)
+        if verbose:
+            painted = sum(len(v) for v in page_of_shape.values())
+            print(f"[build] paint baked onto {painted} lane(s) in {len(pages)} "
+                  f"atlas page(s); the marking geometry is gone")
+
+    return BuildResult(frame, groups, heightmap, elevated, datum, stats=stats, plots=plots,
+                       marking_pages=pages, marking_page_of_shape=page_of_shape)
 
 
 def clip_crosswalks(groups: dict[str, list], lift_by: float) -> int:
@@ -205,7 +226,7 @@ def build_city_from_config(input_path: str, config, *, buildings: bool = False,
     return build_city(
         input_path, ref_lat=ref_lat, ref_lon=ref_lon, projector=projector,
         z_datum=z_datum, z_offset=z_offset,
-        surface_options=config.surfaces,
+        surface_options=config.surfaces, marking_options=config.markings,
         ground=g.enabled, cell=g.cell, smooth=g.smooth, z_gap=g.z_gap,
         min_overlap=g.min_overlap, clearance=g.clearance,
         ground_drop=g.drop, fill_island=g.fill_island,
@@ -239,6 +260,19 @@ def write_manifest(result: BuildResult, path: str) -> None:
     payload["preserve_groups"] = [
         name for name in result.groups if classes.get(name).preserved
     ]
+    if result.marking_pages:
+        # `preserve` stops being a property of a group of objects and becomes
+        # the mask channel: the carriageway's colour may be regenerated where
+        # the mask is zero and must not be touched where it is not.
+        payload["markings"] = {
+            "mode": "texture",
+            "policy": classes.PRESERVE,
+            "pages": len(result.marking_pages),
+            "carried_by": sorted(result.marking_page_of_shape),
+            "uv_layer": "UVMap",
+            "note": "road markings are baked into the carriageway texture; the mask "
+                    "is where the colour is authored and must survive a texturing pass",
+        }
 
     directory = os.path.dirname(os.path.abspath(path))
     if directory:
@@ -270,9 +304,23 @@ def write_heightmap(result: BuildResult, path: str) -> None:
     print(f"[build] wrote {path}")
 
 
+def write_marking_pages(result: BuildResult, directory: str) -> list[str]:
+    """Save the mask pages beside the scene, so Blender has files to load."""
+    from PIL import Image
+
+    os.makedirs(directory, exist_ok=True)
+    paths = []
+    for i, page in enumerate(result.marking_pages):
+        path = os.path.join(directory, f"markings_{i:02d}.png")
+        Image.fromarray(page, mode="L").save(path)
+        paths.append(path)
+    return paths
+
+
 def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | None = None,
                 ground_texture: str | None = None, tile_metres: float = 12.0,
-                facade_dir: str | None = None, verbose: bool = True) -> None:
+                facade_dir: str | None = None, road_texture: str | None = None,
+                marking_options: MarkingOptions | None = None, verbose: bool = True) -> None:
     """Build the result into Blender and export it.
 
     ``ground_texture`` is a tile image to repeat across the ground. Only the
@@ -281,6 +329,23 @@ def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | Non
     """
     scene.clear_scene()
     objects = scene.build(result.groups, verbose=verbose)
+
+    if result.marking_pages:
+        anchor = blend or glb or "scene"
+        pages = write_marking_pages(result, os.path.splitext(os.path.abspath(anchor))[0] + "_markings")
+        options = marking_options or MarkingOptions()
+        for name, page_of_shape in result.marking_page_of_shape.items():
+            carrier = objects.get(name)
+            if carrier is None:
+                continue
+            if road_texture:
+                scene.uv_from_xy(carrier, tile_metres, name="AsphaltUV")
+            scene.apply_marking_pages(carrier, pages, scene.build.face_counts[name],
+                                      page_of_shape, options,
+                                      asphalt_image=road_texture, tile_metres=tile_metres)
+        if verbose:
+            print(f"[scene] paint: {len(pages)} page(s) over "
+                  f"{', '.join(result.marking_page_of_shape)}")
 
     if facade_dir:
         sheets = sorted(
