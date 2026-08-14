@@ -692,12 +692,19 @@ Mount the maps and an output directory — scenes, exports and textures are
 written where you ask for them, and nothing else leaves the container. `--user`
 keeps the files yours rather than root's.
 
-Everything works in there, including the texture tools: the image carries the
-diffusion stack, which is most of its 6.9 GB. There is no CUDA base image
-underneath — the torch wheels bring their own runtime, so a slim Python and
-`--gpus all` is the whole of it. Without `--gpus`, the geometry, export, survey
-and render tools carry on regardless (the render falls back to software GL: slow
-but correct) and the diffusion tools say what is missing.
+Everything works in there, including the texture tools and the photoreal
+refinement: the image carries the diffusion stack and a pinned ComfyUI, which
+between them are most of its 8.1 GB. There is no CUDA base image underneath —
+the torch wheels bring their own runtime, so a slim Python and `--gpus all` is
+the whole of it. Without `--gpus`, the geometry, export, survey and render tools
+carry on regardless (the render falls back to software GL: slow but correct) and
+the GPU tools say what is missing.
+
+ComfyUI's dependencies are declared in this project's lock file rather than
+installed from its `requirements.txt`, so one resolution decides the versions
+and torch lands in the image once instead of twice. ComfyUI itself is a pinned
+checkout, because a workflow is a set of node names and input names and both
+move.
 
 The tools are not the CLI with a different coat on. Two things change when the
 caller is a language model rather than a person at a shell.
@@ -729,6 +736,7 @@ between them without a wall clock in front of it.
 | `export` | `.blend` / `.glb` / `.fbx` |
 | `render_view` | aerial, plan or street still, returned as an image |
 | `render_drive` | a drive along the roads. **Minutes** |
+| `refine_render` | that drive, made photoreal by a video model. **GPU, minutes** |
 
 `survey_scene` is the session's worth of debugging distilled into numbers, and
 each of them was a bug before it was a metric:
@@ -753,6 +761,42 @@ sky, no perspective), so an agent writes the material rather than the
 photograph. `list_styles` hands back the built-in set to copy or narrow with,
 and both tools answer with a picture — a contact sheet of the sheets kept, the
 tile itself — because a wrap that scores well can still be the wrong material.
+
+### Making a render photoreal
+
+The scene has its geometry right and its appearance approximate: procedural
+facades, a tiled road, a flat sky. A video model has the opposite problem — it
+knows what a street looks like and nothing about where this one's buildings
+are. `refine_render` puts the render in as the sampler's **starting latent** and
+returns only part of the noise, so the geometry is held by what is already
+there and the model supplies the surfaces.
+
+`denoise` is the whole dial. Measured on one 3090, 832×480, four steps, ~95 s
+for five frames:
+
+| | |
+|---|---|
+| **0.25** | the same street, photoreal — building masses, road width, vanishing point and crossing all stay put |
+| 0.35 | more convincing, and the buildings start becoming generic |
+| 0.45+ | a real Japanese street, but no longer *this* one |
+
+Keep it low when the frames are wanted as reference for a second pass at the
+textures, which is the loop this exists for: build, render, refine, re-texture.
+A reference whose windows sit on different floors than the building it
+describes is worse than no reference.
+
+Image-to-video is *not* this, and trying it first is the obvious mistake. H3's
+keyframe conditioning is re-injected at every sampling step and never denoised,
+so a Blender frame handed to `first_frame` comes back a Blender frame — measured,
+the output was indistinguishable from the input. The starting latent is the only
+place the render can enter and still be changed.
+
+One node was missing for that. An H3 latent is a nested pair, video
+`[B,24,T,H/16,W/16]` and audio `[B,32,2,T40]`, and a plain `VAEEncode` makes the
+video half alone; the model then reads `x[1]` for the audio stream and raises
+`IndexError`. `MiniMaxH3VideoToVideo`, in `src/city_builder/comfy_nodes`,
+encodes the clip and substitutes it into an H3 latent keeping that latent's
+audio half. Everything downstream is stock ComfyUI.
 
 Holes are split by **width, not area**, because width is what makes one a
 defect: a forty-metre seam a handspan wide is eight square metres and a wheel
@@ -796,11 +840,29 @@ touching a GPU, and `--download` fills it — worth running once, before wiring
 the server into anything, so the first real call is not a 3 GB wait.
 
 `/cache` is the whole of it, for anything the Hugging Face hub serves — the
-SD1.5 and SDXL stacks this uses today, and whatever gets added next. One volume,
-shared by all of them.
+SD1.5 and SDXL stacks, MiniMax H3, and whatever gets added next. One volume,
+shared by all of them. The container links whatever it finds there into the
+layout ComfyUI wants each time it starts; `/opt/ComfyUI/link_models.sh` is that
+step, and running it by hand prints what is missing.
+
+The refinement wants about 35 GB of it:
+
+| | |
+|---|---|
+| `Abiray/MiniMax-H3-Pruned-GGUF` | `MiniMax-H3-FL2VA-Pruned-Q5_K_M.gguf`, 14.1 GB — the packager's recommendation for a 24 GB card |
+| `Abiray/MiniMax-H3-GGUF` | `text_encoders/qwen3vl_32b_minimax_h3-Q4_K_M.gguf`, 14.6 GB |
+| `Abiray/MiniMax-H3-Turbo-Lora-Pruned-ComfyUI` | `minimax_h3_turbo_4step_ckpt600_ema_V4.safetensors`, 0.6 GB |
+| `Comfy-Org/MiniMax-H3` | `vae/minimax_h3_video_vae_fp16.safetensors` and the audio VAE, 5.8 GB |
+
+Two of those choices are not free. The Turbo LoRA has to be the **pruned** one:
+a LoRA cut for the full transformer does not key-match a pruned model. And the
+text encoder has to be the **ComfyUI-format** GGUF, not the llama.cpp GGUF of
+the same Qwen3-VL — the latter loads down a Mistral tokenizer path and dies on
+`json.loads(None)`. `nvfp4` is smaller still and useless here: fp4 is a
+Blackwell instruction, and this is Ampere.
 
 If you want none of that, the diffusion stack comes out with a build argument
-and takes the image from 6.9 GB to 1.8:
+and takes the image from 8.1 GB to 1.8:
 
 ```bash
 docker build --build-arg EXTRAS=mcp -t city-builder-mcp:slim .

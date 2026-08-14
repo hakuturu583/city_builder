@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The image is about 7 GB and the runner ships with roughly 14 GB free.
+      # The image is about 8 GB and the runner ships with roughly 14 GB free.
       # The dotnet, Android and Haskell toolchains are the biggest things
       # nothing in this build uses.
       - name: Make room on the runner
@@ -80,10 +80,14 @@ jobs:
         run: |
           docker run --rm --entrypoint python \
             ${{ env.REGISTRY }}/${{ env.IMAGE }}:sha-${{ github.sha }} -c '
-          import asyncio, diffusers, torch
+          import asyncio, os, diffusers, torch
           from city_builder.mcp_server import server
           tools = asyncio.run(server.list_tools())
           print(f"{len(tools)} tools: " + ", ".join(t.name for t in tools))
           print(f"torch {torch.__version__}, diffusers {diffusers.__version__}")
-          assert len(tools) >= 13, "the server came up short of its tools"
+          assert len(tools) >= 14, "the server came up short of its tools"
+          # ComfyUI is a checkout copied in, so a wrong path is silent until
+          # something asks it to refine a render.
+          assert os.path.exists("/opt/ComfyUI/main.py"), "no ComfyUI in the image"
+          assert os.path.islink("/opt/ComfyUI/custom_nodes/city_builder"), "node pack not linked"
           '

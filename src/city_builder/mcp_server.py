@@ -50,7 +50,11 @@ def _server():
             "over guessing from numbers alone.\n\n"
             "Facade textures are optional and come in two steps: make_layouts (fast, "
             "no GPU) draws the structure, generate_facades (GPU, minutes) paints it. "
-            "A scene exports perfectly well without them, in flat colours."
+            "A scene exports perfectly well without them, in flat colours.\n\n"
+            "refine_render takes a drive rendered from a scene and makes it photoreal "
+            "with a video model, keeping the geometry. Its frames are reference for a "
+            "second pass at the textures, which is the loop: build, render, refine, "
+            "re-texture."
         ),
     )
 
@@ -475,6 +479,94 @@ def _as_png(tile, size: int) -> bytes:
 
     buffer = io.BytesIO()
     PILImage.fromarray(tile).resize((size, size)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Photoreal refinement
+# ---------------------------------------------------------------------------
+
+
+@server.tool()
+def refine_render(
+    video: Annotated[str, Field(description="A rendered clip, e.g. what render_drive wrote")],
+    out_dir: Annotated[str, Field(description="Directory to write the refined frames into")],
+    prompt: Annotated[str | None,
+                      Field(description="What the street should look like; the default is "
+                                        "an overcast Japanese city street")] = None,
+    denoise: Annotated[float,
+                       Field(description="How far from the render to go. See the table in "
+                                         "the description — 0.25 keeps this street")] = 0.25,
+    length: Annotated[int, Field(description="Frames; must be 5, 22, 39 … (17k+5)")] = 5,
+    width: Annotated[int, Field(description="Pixels, multiple of 32")] = 832,
+    height: Annotated[int, Field(description="Pixels, multiple of 32")] = 480,
+    seed: Annotated[int, Field(description="Same seed and prompt give the same frames")] = 0,
+):
+    """Make a render photoreal with MiniMax H3. **Needs a GPU. A minute or two.**
+
+    The scene has its geometry right and its appearance approximate. This puts
+    the render in as the *starting latent* and returns only part of the noise,
+    so the geometry is held by what is already there and the model supplies the
+    surfaces. About 95 s for five frames at 832x480 on a 24 GB card.
+
+    `denoise` is the whole dial, and these are measurements, not guesses:
+
+    | 0.25 | the same street, photoreal — masses, road width, vanishing point |
+    | 0.35 | more convincing, and the buildings start becoming generic |
+    | 0.45+ | a real street, but no longer *this* one |
+
+    Keep it low when the frames are wanted as reference for `generate_facades`:
+    a reference whose windows sit on different floors than the building it
+    describes is worse than no reference at all.
+
+    Answers with the frames themselves, because whether the street survived is
+    not something the numbers can tell you.
+    """
+    _require_comfy()
+
+    from mcp.server.mcpserver import Image
+
+    from .refine import DEFAULT_PROMPT, RefineOptions, refine
+
+    options = RefineOptions(length=length, width=width, height=height,
+                            denoise=denoise, seed=seed)
+    report = refine(video, out_dir, prompt=prompt or DEFAULT_PROMPT, options=options)
+    strip = _film_strip(report["frames"])
+    return [report, Image(data=strip, format="png")] if strip else report
+
+
+def _require_comfy() -> None:
+    """Fail with the reason rather than with a missing directory."""
+    import os.path
+
+    from .refine import Comfy
+
+    root = Comfy().root
+    if not os.path.exists(os.path.join(root, "main.py")):
+        raise RuntimeError(
+            f"no ComfyUI at {root}. The published container ships one; from a source "
+            "install, clone ComfyUI and the ComfyUI-GGUF node, link "
+            "src/city_builder/comfy_nodes into its custom_nodes, and point COMFYUI_PATH "
+            "at it. The weights are a further ~35 GB; see the README.")
+
+
+def _film_strip(paths, *, height: int = 200, across: int = 5) -> bytes | None:
+    """The frames in a row, so a caller can see what came back."""
+    import io
+
+    from PIL import Image as PILImage
+
+    frames = [PILImage.open(p).convert("RGB") for p in paths[:across]]
+    if not frames:
+        return None
+    scaled = [f.resize((round(f.width * height / f.height), height)) for f in frames]
+    strip = PILImage.new("RGB", (sum(f.width for f in scaled), height), "white")
+    x = 0
+    for frame in scaled:
+        strip.paste(frame, (x, 0))
+        x += frame.width
+    buffer = io.BytesIO()
+    strip.save(buffer, format="PNG")
     return buffer.getvalue()
 
 
