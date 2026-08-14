@@ -80,6 +80,7 @@ def build_city(
 
     clipped = clip_crosswalks(groups, surface_options.crosswalk_lift
                               if surface_options else SurfaceOptions().crosswalk_lift)
+    buried = clip_curbs(groups)
 
     stats = {name: len(shapes) for name, shapes in groups.items()}
     if verbose:
@@ -87,6 +88,9 @@ def build_city(
         if clipped:
             print(f"[build] crossings clipped to the carriageway "
                   f"({clipped:+d} surface(s) after the cut)")
+        if buried:
+            print(f"[build] kerbs: {buried} vertex/vertices had carriageway on both "
+                  f"sides and were dropped")
         print(f"[build] z datum {datum:.2f} m → scene ground at {z_offset:.2f} m")
 
     elevated: set[int] = set()
@@ -213,6 +217,58 @@ def clip_crosswalks(groups: dict[str, list], lift_by: float) -> int:
 
     dropped = len(crossings) - len(kept)
     groups["Crosswalks"] = kept
+    return dropped
+
+
+def clip_curbs(groups: dict[str, list], probe: float = 0.6,
+               shortest: float = 1.5) -> int:
+    """Drop the parts of a kerb line that have carriageway on both sides.
+
+    A road_border is only a kerb where something stops at it. Measured on this
+    map, 689 of 8055 kerb vertices had lanelet surface on either side of them —
+    a lane divider, a give-way line, the seam between a carriageway and its
+    slip road — and standing those up puts a 15 cm wall down the middle of the
+    road for traffic to drive through.
+    """
+    import numpy as np
+    from shapely.geometry import Point as ShapelyPoint
+    from shapely.ops import unary_union
+    from shapely.prepared import prep
+
+    from .geometry import Ribbon
+    from .viaduct import _footprints, polyline_length, runs_of
+
+    curbs = groups.get("Curbs")
+    surfaces = [shape for name in ("Roads", "Junctions", "Crosswalks", "Walkways")
+                for shape in groups.get(name, ()) if hasattr(shape, "ring")]
+    if not curbs or not surfaces:
+        return 0
+
+    covered = prep(unary_union([p.buffer(probe / 2.0) for p in _footprints(surfaces, None)]))
+
+    kept, dropped = [], 0
+    for curb in curbs:
+        base, raised = list(curb.left), list(curb.right)
+        points = np.asarray(base, dtype=float)[:, :2]
+        if len(points) < 2:
+            continue
+        step = np.gradient(points, axis=0)
+        normal = np.stack([-step[:, 1], step[:, 0]], axis=1)
+        normal /= np.linalg.norm(normal, axis=1, keepdims=True) + 1e-12
+
+        edge = [
+            not (covered.contains(ShapelyPoint(*(p + n * probe)))
+                 and covered.contains(ShapelyPoint(*(p - n * probe))))
+            for p, n in zip(points, normal)
+        ]
+        for start, end in runs_of(edge):
+            if polyline_length(base[start:end + 1]) < shortest:
+                continue
+            kept.append(Ribbon(curb.id, base[start:end + 1], raised[start:end + 1],
+                               dict(curb.attributes)))
+        dropped += sum(1 for flag in edge if not flag)
+
+    groups["Curbs"] = kept
     return dropped
 
 

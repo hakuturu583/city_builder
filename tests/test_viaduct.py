@@ -372,3 +372,62 @@ def test_a_crossing_with_no_road_under_it_is_dropped():
               "Crosswalks": [_lane(2, 40.0, 50.0, z=10.0, x0=0.0, x1=10.0, n=3)]}
     clip_crosswalks(groups, 0.005)
     assert groups["Crosswalks"] == []
+
+
+# ---------------------------------------------------------------------------
+# The barrier is continuous, and a kerb needs something to stop at
+# ---------------------------------------------------------------------------
+
+
+def test_a_flicker_in_the_probe_does_not_break_the_barrier():
+    """Measured, 109 candidate runs carried 125 flips and 17 came out too short.
+
+    The probe catches a neighbouring deck for a cross-section or two at a
+    junction mouth. A barrier with holes punched in it by that is worse than
+    one that ignores them.
+    """
+    stations = [float(i) for i in range(0, 40, 2)]  # 2 m apart
+    flags = [True] * 20
+    flags[9] = flags[10] = False  # a 2 m blink
+    assert V.runs_of(flags) == [(0, 8), (11, 19)]
+    assert V.runs_of(V.close_gaps(flags, stations, 5.0)) == [(0, 19)]
+
+
+def test_a_real_opening_still_breaks_it():
+    stations = [float(i) for i in range(0, 40, 2)]
+    flags = [True] * 6 + [False] * 8 + [True] * 6  # 16 m of neighbour
+    assert len(V.runs_of(V.close_gaps(flags, stations, 5.0))) == 2
+
+
+def test_an_open_end_is_never_closed():
+    stations = [float(i) for i in range(0, 20, 2)]
+    flags = [False, False] + [True] * 8
+    assert V.close_gaps(flags, stations, 50.0)[0] is False
+
+
+def test_a_kerb_between_two_lanes_is_not_a_kerb():
+    """A road_border is only a kerb where something stops at it."""
+    from city_builder.build import clip_curbs
+    from city_builder.geometry import Ribbon
+
+    divider = [(x, 0.0, 0.0) for x in range(0, 31, 5)]
+    groups = {
+        "Roads": [_lane(1, -4.0, 0.0), _lane(2, 0.0, 4.0)],  # carriageway either side
+        "Curbs": [Ribbon(9, divider, [(x, y, z + 0.15) for x, y, z in divider])],
+    }
+    clip_curbs(groups)
+    assert groups["Curbs"] == []
+
+
+def test_the_kerb_at_the_edge_of_the_road_survives():
+    from city_builder.build import clip_curbs
+    from city_builder.geometry import Ribbon
+
+    edge = [(x, 4.0, 0.0) for x in range(0, 31, 5)]  # open ground on one side
+    groups = {
+        "Roads": [_lane(1, -4.0, 4.0)],
+        "Curbs": [Ribbon(9, edge, [(x, y, z + 0.15) for x, y, z in edge])],
+    }
+    clip_curbs(groups)
+    assert groups["Curbs"]
+    assert len(groups["Curbs"][0].left) == len(edge)

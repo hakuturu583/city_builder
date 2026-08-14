@@ -208,6 +208,20 @@ first and all of them build a wall down the middle of the carriageway:
 | skip boundaries that coincide geometrically | inside a junction, turning lanelets *overlap* rather than tile |
 | the outline of the union of all decks | picks up the outline of every shoulder strip inside the carriageway |
 
+A road_border is only a kerb where something stops at it. Measured, 689 of
+8055 kerb vertices had lanelet surface on *either* side of them — a lane
+divider, a give-way line, the seam between a carriageway and its slip road —
+and standing those up puts a 15 cm wall down the middle of the road. They are
+dropped, and the kerb is split into the stretches that still have open ground
+on one side.
+
+The barrier is also closed over short gaps. The neighbour probe flickers where
+a deck passes within reach of another one at a junction mouth: measured, 109
+candidate runs carried 125 flips between outer and inner, and 17 came out too
+short to build, which is a barrier with holes punched in it. An inner stretch
+shorter than `parapet_bridge_gap` no longer interrupts one; a real opening
+still does.
+
 Two more things a deck needs that the ground does not.
 
 **Infill.** Lanelets are surveyed one at a time and do not tile exactly, so a

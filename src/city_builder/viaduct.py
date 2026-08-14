@@ -65,6 +65,7 @@ class ViaductOptions:
     parapet_height: float = 1.1  # above the deck surface
     parapet_width: float = 0.4
     parapet_min_length: float = 6.0  # shorter than this is a block, not a barrier
+    parapet_bridge_gap: float = 5.0  # an inner stretch shorter than this does not break it
 
     pier_spacing: float = 28.0  # along the centreline
     pier_width: float = 1.8  # across the road
@@ -104,6 +105,25 @@ def centreline(ribbon) -> list[Point]:
 def clearance_profile(ribbon, heightmap) -> list[float]:
     """Height of the driving surface above the terrain, per cross-section."""
     return [z - heightmap.sample(x, y) for x, y, z in centreline(ribbon)]
+
+
+def close_gaps(flags: Sequence[bool], stations: Sequence[float], shortest: float) -> list[bool]:
+    """Fill False stretches shorter than ``shortest`` metres.
+
+    The neighbour probe flickers: a deck's edge passes within reach of another
+    deck for a couple of cross-sections at a junction mouth, or the survey gap
+    between two lanes happens to swallow the sample. Measured, 109 candidate
+    barrier runs carried 125 flips between them, and 17 came out too short to
+    build — which is a barrier with holes in it rather than a barrier.
+    """
+    closed = list(flags)
+    for start, end in runs_of([not f for f in closed]):
+        if start == 0 or end == len(closed) - 1:
+            continue  # an open end is where the deck really stops
+        if stations[end] - stations[start] < shortest:
+            for i in range(start, end + 1):
+                closed[i] = True
+    return closed
 
 
 def runs_of(flags: Sequence[bool]) -> list[tuple[int, int]]:
@@ -315,10 +335,14 @@ def parapet_walls(ribbon, left_outer: Sequence[bool], right_outer: Sequence[bool
     if not options.parapets or options.parapet_height <= 0:
         return []
 
+    stations = [0.0]
+    for a, b in pairwise(centreline(ribbon)):
+        stations.append(stations[-1] + math.dist(a[:2], b[:2]))
+
     walls = []
     for line, flags, sign in ((list(ribbon.left), left_outer, 1.0),
                               (list(ribbon.right), right_outer, -1.0)):
-        for start, end in runs_of(flags):
+        for start, end in runs_of(close_gaps(flags, stations, options.parapet_bridge_gap)):
             run = line[start:end + 1]
             if polyline_length(run) < options.parapet_min_length:
                 continue
