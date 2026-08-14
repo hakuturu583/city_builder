@@ -6,8 +6,14 @@ built in-process.
 
 ```bash
 uv sync
+uv run city-builder make --input lanelet2_map.osm --out-dir out/    # everything
 uv run city-builder build --input lanelet2_map.osm --output scene.blend --glb scene.glb
 ```
+
+`make` takes one map or a directory of them and writes the scene, a `.glb`, an
+`.fbx`, the manifest and a drive video for each, in one pass — so a map is
+never half-built and the video always comes from the scene that was just
+written rather than from whatever .blend was lying around under that name.
 
 ```python
 from city_builder import build_city, build_scene

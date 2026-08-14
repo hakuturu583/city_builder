@@ -247,13 +247,21 @@ def apply_facade_sheets(obj, image_paths: Sequence[str], face_counts: Sequence[i
     for no visual gain, while slots split into that many primitives only when
     a renderer needs them to.
     """
-    materials = [tiled_material(f"CityFacade{i:03d}", path, roughness=0.6)
-                 for i, path in enumerate(image_paths)]
+    # Which sheet each building wears is decided first, so only the sheets that
+    # some building actually wears become materials. A small map drawing on a
+    # large library would otherwise carry every unused image into the export —
+    # measured, 108 sheets made a 30 MB FBX of a scene using six of them.
+    choice = assign_sheets(image_paths, floors, count=len(face_counts), seed=seed)
+    used = sorted(set(choice))
+    slot_of = {sheet: slot for slot, sheet in enumerate(used)}
+
+    materials = [tiled_material(f"CityFacade{sheet:03d}", image_paths[sheet], roughness=0.6)
+                 for sheet in used]
     obj.data.materials.clear()
     for material in materials:
         obj.data.materials.append(material)
 
-    choice = assign_sheets(image_paths, floors, count=len(face_counts), seed=seed)
+    choice = [slot_of[sheet] for sheet in choice]
     face_materials = []
     for shape_index, faces in enumerate(face_counts):
         face_materials.extend([choice[shape_index]] * faces)
@@ -308,6 +316,35 @@ def export_glb(path: str) -> None:
         export_extras=True,  # carries cb_class / cb_paint through to glTF extras
         export_attributes=True,  # …and _cb_mask as the _CB_MASK custom attribute
         export_all_vertex_colors=False,  # keep it out of COLOR_0, see tag_object
+    )
+    print(f"[scene] wrote {path}")
+
+
+def export_fbx(path: str) -> None:
+    """Write the scene as FBX.
+
+    Custom properties ride along, which is how ``cb_class`` / ``cb_paint``
+    survive: FBX has no notion of them, but the exporter writes them as user
+    properties that Unreal and Unity both read back. The mask colour attribute
+    does not survive — FBX carries one vertex colour set and calling it
+    ``COLOR_0`` would tint the asset, which is the thing
+    :func:`tag_object` avoids. Use glTF where the mask matters.
+    """
+    import bpy
+
+    directory = os.path.dirname(os.path.abspath(path))
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    bpy.ops.export_scene.fbx(
+        filepath=os.path.abspath(path),
+        use_active_collection=False,
+        object_types={"MESH", "EMPTY"},
+        mesh_smooth_type="FACE",
+        use_custom_props=True,  # cb_class / cb_paint / cb_pass_index
+        path_mode="COPY",       # pack the texture pages beside it
+        embed_textures=True,
+        axis_forward="-Z",
+        axis_up="Y",            # what Unreal and Unity expect
     )
     print(f"[scene] wrote {path}")
 

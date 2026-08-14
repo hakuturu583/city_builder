@@ -337,6 +337,51 @@ def build_city_from_config(input_path: str, config, *, buildings: bool = False,
     )
 
 
+def render_drive(result: BuildResult, input_path: str, scene_path: str, output_path: str, *,
+                 seconds: float = 30.0, speed: float = 11.0, fps: int = 30,
+                 eye_height: float = 1.4, look_ahead: float = 18.0, lens: float = 30.0,
+                 resolution: tuple[int, int] = (1280, 720), samples: int = 32,
+                 engine: str = "eevee", route_seed: int = 0,
+                 verbose: bool = True) -> str | None:
+    """Drive a camera through a built scene and render it.
+
+    The route comes from the map rather than from the scene, because the scene
+    only kept the surfaces. Returns the video path, or None if the map has no
+    drivable route in it.
+    """
+    import bpy
+
+    from . import lanelet, route
+    from . import scene as scene_module
+
+    _ll2, _projection, lmap = lanelet.load_map(
+        input_path, projector="utm",
+        origin_lat=result.frame.ref_lat, origin_lon=result.frame.ref_lon)
+
+    path = route.drive_path(
+        result.groups, lanelet.lanelet_end_keys(lmap), seed=route_seed,
+        eye_height=eye_height, look_ahead=look_ahead, step=speed / fps)
+    if not path:
+        if verbose:
+            print("[drive] no drivable route in this map; skipping the video")
+        return None
+
+    wanted = int(seconds * fps)
+    if len(path) < wanted and verbose:
+        print(f"[drive] the route runs out after {len(path) / fps:.0f} s "
+              f"at {speed:g} m/s; rendering that")
+    path = path[:wanted]
+
+    bpy.ops.wm.open_mainfile(filepath=os.path.abspath(scene_path))
+    if not any(obj.type == "LIGHT" for obj in bpy.data.objects):
+        scene_module.sunlit()
+    scene_module.animate_camera(path, lens=lens)
+    return scene_module.render_animation(
+        output_path, frames=len(path), fps=fps, resolution=resolution,
+        samples=samples, engine="CYCLES" if engine == "cycles" else "BLENDER_EEVEE",
+        verbose=verbose)
+
+
 def write_manifest(result: BuildResult, path: str) -> None:
     """Describe every surface: what it is, and whether its colour may change.
 
@@ -420,6 +465,7 @@ def write_marking_pages(result: BuildResult, directory: str) -> list[str]:
 
 
 def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | None = None,
+                fbx: str | None = None,
                 ground_texture: str | None = None, tile_metres: float = 12.0,
                 facade_dir: str | None = None, road_texture: str | None = None,
                 marking_options: MarkingOptions | None = None, verbose: bool = True) -> None:
@@ -433,7 +479,7 @@ def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | Non
     objects = scene.build(result.groups, verbose=verbose)
 
     if result.marking_pages:
-        anchor = blend or glb or "scene"
+        anchor = blend or glb or fbx or "scene"
         pages = write_marking_pages(result, os.path.splitext(os.path.abspath(anchor))[0] + "_markings")
         options = marking_options or MarkingOptions()
         for name, page_of_shape in result.marking_page_of_shape.items():
@@ -474,3 +520,5 @@ def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | Non
         scene.save(blend)
     if glb:
         scene.export_glb(glb)
+    if fbx:
+        scene.export_fbx(fbx)

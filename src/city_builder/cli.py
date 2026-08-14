@@ -17,6 +17,7 @@ def main():
 @click.option("--input", "input_path", required=True, help="Lanelet2 HD map (.osm)")
 @click.option("--output", "blend", default=None, help="Output .blend")
 @click.option("--glb", default=None, help="Also export a .glb")
+@click.option("--fbx", default=None, help="Also export a .fbx (Y up, textures embedded)")
 @click.option("--heightmap", "heightmap_path", default=None, help="Also write the ground heightmap JSON")
 @click.option("--manifest", "manifest_path", default=None,
               help="Also write the surface manifest: class and paint policy per group")
@@ -94,7 +95,7 @@ def main():
 @click.option("--road-texture", default=None,
               help="Tile image for the carriageway, under the paint (see `city-builder tile`)")
 @click.option("--quiet", is_flag=True)
-def build_command(input_path, blend, glb, heightmap_path, manifest_path, ground_texture,
+def build_command(input_path, blend, glb, fbx, heightmap_path, manifest_path, ground_texture,
                   tile_metres, facade_dir, config_path, viaduct_on, road_texture, quiet, **kwargs):
     """Build a scene from a Lanelet2 map.
 
@@ -104,8 +105,9 @@ def build_command(input_path, blend, glb, heightmap_path, manifest_path, ground_
     from .build import build_city_from_config, build_scene, write_heightmap, write_manifest
     from .config import CityConfig, merge_overrides
 
-    if not any((blend, glb, heightmap_path, manifest_path)):
-        raise click.UsageError("nothing to write: pass --output, --glb, --heightmap or --manifest")
+    if not any((blend, glb, fbx, heightmap_path, manifest_path)):
+        raise click.UsageError(
+            "nothing to write: pass --output, --glb, --fbx, --heightmap or --manifest")
 
     try:
         config = CityConfig.from_yaml(config_path) if config_path else CityConfig()
@@ -136,8 +138,8 @@ def build_command(input_path, blend, glb, heightmap_path, manifest_path, ground_
         write_heightmap(result, heightmap_path)
     if manifest_path:
         write_manifest(result, manifest_path)
-    if blend or glb:
-        build_scene(result, blend=blend, glb=glb, ground_texture=ground_texture,
+    if blend or glb or fbx:
+        build_scene(result, blend=blend, glb=glb, fbx=fbx, ground_texture=ground_texture,
                     tile_metres=tile_metres, facade_dir=facade_dir,
                     road_texture=road_texture, marking_options=config.markings,
                     verbose=not quiet)
@@ -302,7 +304,6 @@ def layouts_command(output_dir, floor_spec, variants, facade_width, bay_metres, 
     finish and check the UV path; the control images beside them are what a
     diffusion pass is conditioned on so its windows land on the same floors.
     """
-    import os
     import random
 
     from .facade_layout import (
@@ -389,7 +390,6 @@ def facades_command(layouts_dir, output_dir, prompt, negative_prompt, floor_spec
     against the drawing it was given before it is written, so a run that lost
     the storeys says so instead of leaving it to a glance at a contact sheet.
     """
-    import os
     import time
 
     import numpy as np
@@ -486,51 +486,21 @@ def styles_command():
 @click.option("--engine", type=click.Choice(["eevee", "cycles"]), default="eevee")
 @click.option("--route-seed", type=int, default=0, help="Which route the search settles on")
 @click.option("--quiet", is_flag=True)
-def drive_command(input_path, scene_path, output_path, seconds, speed, fps, eye_height,
-                  look_ahead, lens, width, height, samples, engine, route_seed, quiet):
+def drive_command(input_path, scene_path, output_path, quiet, **kwargs):
     """Drive a camera along the roads and render it to a video.
 
-    The route comes from the map rather than from the scene: lanelets are lanes,
-    a lanelet's two boundaries average to its centreline, and one follows
-    another when it starts on the pair of boundary points the other ends on.
+    The route comes from the map rather than the scene: lanelets are lanes, a
+    lanelet's two boundaries average to its centreline, and one follows another
+    when it starts on the pair of boundary points the other ends on.
     """
-    from . import lanelet, route
-    from . import scene as scene_module
-    from .build import build_city
+    from .build import build_city, render_drive
 
-    # The geometry is rebuilt, not read back out of the .blend, because the
-    # route needs the lanelet centrelines and the scene only kept the surfaces.
-    # Same defaults, so the same local frame and z datum: the path lands on the
-    # road it was measured from.
+    width, height = kwargs.pop("width"), kwargs.pop("height")
     result = build_city(input_path, buildings=False, verbose=not quiet)
-    _ll2, _projection, lmap = lanelet.load_map(
-        input_path, projector="utm",
-        origin_lat=result.frame.ref_lat, origin_lon=result.frame.ref_lon)
-
-    path = route.drive_path(
-        result.groups, lanelet.lanelet_end_keys(lmap), seed=route_seed,
-        eye_height=eye_height, look_ahead=look_ahead, step=speed / fps)
-    if not path:
-        raise click.ClickException("no drivable route found in this map")
-
-    wanted = int(seconds * fps)
-    if len(path) < wanted and not quiet:
-        click.echo(f"[drive] the route runs out after {len(path) / fps:.0f} s "
-                   f"at {speed:g} m/s; rendering that")
-    path = path[:wanted]
-
-    import bpy
-
-    bpy.ops.wm.open_mainfile(filepath=os.path.abspath(scene_path))
-    if not any(o.type == "LIGHT" for o in bpy.data.objects):
-        scene_module.sunlit()
-    scene_module.animate_camera(path, lens=lens)
-
-    written = scene_module.render_animation(
-        output_path, frames=len(path), fps=fps, resolution=(width, height),
-        samples=samples, engine="CYCLES" if engine == "cycles" else "BLENDER_EEVEE",
-        verbose=not quiet)
-    click.echo(f"wrote {written}")
+    written = render_drive(result, input_path, scene_path, output_path,
+                           resolution=(width, height), verbose=not quiet, **kwargs)
+    if written:
+        click.echo(f"wrote {written}")
 
 
 @main.command("config")
@@ -565,3 +535,79 @@ def config_command(output_path, check_path):
     width = max(len(f"{s}.{k}") for s, k, _t, _d in describe())
     for section, key, kind, default in describe():
         click.echo(f"{f'{section}.{key}':<{width}}  {kind!s:<6}  {default}")
+
+
+@main.command("make")
+@click.option("--input", "input_path", required=True,
+              help="A Lanelet2 map, or a directory of them")
+@click.option("--out-dir", "out_dir", required=True, help="Where the outputs go")
+@click.option("--config", "config_path", default=None, help="YAML config")
+@click.option("--facade-dir", default=None, help="Directory of facade sheets")
+@click.option("--road-texture", default=None, help="Tile image for the carriageway")
+@click.option("--ground-texture", default=None, help="Tile image for the terrain")
+@click.option("--buildings/--no-buildings", default=True)
+@click.option("--glb/--no-glb", default=True)
+@click.option("--fbx/--no-fbx", default=True)
+@click.option("--video/--no-video", default=True, help="Also drive it and render the drive")
+@click.option("--seconds", type=float, default=20.0)
+@click.option("--speed", type=float, default=11.0, help="Metres per second")
+@click.option("--fps", type=int, default=30)
+@click.option("--width", type=int, default=1280)
+@click.option("--height", type=int, default=720)
+@click.option("--samples", type=int, default=32)
+@click.option("--engine", type=click.Choice(["eevee", "cycles"]), default="eevee")
+@click.option("--route-seed", type=int, default=0)
+@click.option("--quiet", is_flag=True)
+def make_command(input_path, out_dir, config_path, facade_dir, road_texture, ground_texture,
+                 buildings, glb, fbx, video, seconds, speed, fps, width, height, samples,
+                 engine, route_seed, quiet):
+    """Everything, for one map or a directory of them.
+
+    Scene, exports and the drive in one pass, so a map is never half-built:
+    the video comes from the scene that was just written, not from whatever
+    .blend happened to be lying around under that name.
+    """
+    from .build import build_city_from_config, build_scene, render_drive, write_manifest
+    from .config import CityConfig
+
+    maps = (
+        sorted(os.path.join(input_path, f) for f in os.listdir(input_path) if f.endswith(".osm"))
+        if os.path.isdir(input_path) else [input_path]
+    )
+    if not maps:
+        raise click.UsageError(f"no .osm files in {input_path}")
+
+    try:
+        config = CityConfig.from_yaml(config_path) if config_path else CityConfig()
+    except (ValueError, TypeError) as error:
+        raise click.UsageError(f"{config_path}: {error}") from error
+
+    os.makedirs(out_dir, exist_ok=True)
+    made = []
+    for source in maps:
+        name = os.path.splitext(os.path.basename(source))[0]
+        if not quiet:
+            click.echo(f"\n=== {name}")
+        blend = os.path.join(out_dir, f"{name}.blend")
+
+        result = build_city_from_config(source, config, buildings=buildings, verbose=not quiet)
+        write_manifest(result, os.path.join(out_dir, f"{name}.manifest.json"))
+        build_scene(result, blend=blend,
+                    glb=os.path.join(out_dir, f"{name}.glb") if glb else None,
+                    fbx=os.path.join(out_dir, f"{name}.fbx") if fbx else None,
+                    ground_texture=ground_texture, road_texture=road_texture,
+                    facade_dir=facade_dir, marking_options=config.markings,
+                    tile_metres=12.0, verbose=not quiet)
+
+        clip = None
+        if video:
+            clip = render_drive(result, source, blend,
+                                os.path.join(out_dir, f"{name}.mp4"),
+                                seconds=seconds, speed=speed, fps=fps,
+                                resolution=(width, height), samples=samples,
+                                engine=engine, route_seed=route_seed, verbose=not quiet)
+        made.append((name, clip))
+
+    click.echo(f"\nwrote {len(made)} scene(s) to {out_dir}")
+    for name, clip in made:
+        click.echo(f"  {name}" + ("" if clip else "   (no drivable route: no video)"))
