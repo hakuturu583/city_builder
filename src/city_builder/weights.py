@@ -60,6 +60,11 @@ UNET = ("unet/diffusion_pytorch_model.fp16.safetensors",
 CONTROLNET = ("diffusion_pytorch_model.fp16.safetensors",
               "diffusion_pytorch_model.safetensors")
 LORA = ("pytorch_lora_weights.safetensors",)
+# The IP-Adapter is two files that must arrive together: the adapter itself and
+# the CLIP image encoder it was trained against. Probing the encoder is the
+# stricter test — the adapter alone loads and then fails at the first image.
+ADAPTER = ("models/image_encoder/model.safetensors",
+           "models/image_encoder/pytorch_model.bin")
 
 STACKS: dict[str, tuple[Weight, ...]] = {
     "sd15": (
@@ -71,6 +76,12 @@ STACKS: dict[str, tuple[Weight, ...]] = {
             "latent-consistency/lcm-lora-sdv1-5", "lcm-lora", "sd15", LORA,
             patterns=("*.json", "*.safetensors"),  # no fp16 variant, and it is 135 MB
             note="25 sampling steps down to about 4",
+        ),
+        Weight(
+            "h94/IP-Adapter", "adapter", "sd15", ADAPTER,
+            patterns=("*.json", "models/ip-adapter_sd15.safetensors",
+                      "models/image_encoder/*"),
+            note="reference images: the material of a photograph, not its layout",
         ),
         Weight(
             "lllyasviel/control_v11p_sd15_canny", "controlnet", "sd15", CONTROLNET,

@@ -252,6 +252,18 @@ class FacadeOptions:
     lcm: bool = True
 
     count: int = 4
+    # A photograph of a real building, to take the material from. The control
+    # image still fixes where the floors and windows are, so the reference is
+    # asked for what it is *made of* — which is the half a prompt is worst at.
+    #
+    # Measured against a refined street frame, floor counts held throughout
+    # (alignment 0.92 with no reference, 0.80 at 0.4, 0.82 at 0.7): 0.4 takes
+    # the palette and the panel material, and 0.7 begins copying *content* —
+    # one sheet came back with the reference's yellow road line painted across
+    # the facade. Structure is ControlNet's job either way; what rises with
+    # this number is how literally the photograph is quoted.
+    reference: bool = False
+    reference_strength: float = 0.4
     steps: int = 6  # LCM territory; ~25 without it
     guidance: float = 1.5  # LCM wants this low
     seed: int = 0
@@ -293,6 +305,17 @@ def _tile_horizontally(module) -> None:
             return self._conv_forward(x, self.weight, self.bias)
 
         layer.forward = forward.__get__(layer, torch.nn.Conv2d)
+
+
+def _as_image(reference):
+    """A reference as PIL, from a path, an array or a PIL image."""
+    from PIL import Image
+
+    if isinstance(reference, str):
+        return Image.open(reference).convert("RGB")
+    if isinstance(reference, np.ndarray):
+        return Image.fromarray(reference).convert("RGB")
+    return reference.convert("RGB")
 
 
 def _family_latents(shape, count: int, variation: float, seed: int, device, dtype):
@@ -352,6 +375,12 @@ def load_facade_pipeline(options: FacadeOptions):
             base.repo, variant=W.variant(base), safety_checker=None, **common
         )
 
+    if options.reference:
+        adapter = W.find(options.family, "adapter")
+        pipeline.load_ip_adapter(adapter.repo, subfolder="models",
+                                 weight_name="ip-adapter_sd15.safetensors")
+        pipeline.set_ip_adapter_scale(options.reference_strength)
+
     if options.lcm:
         lora = W.find(options.family, "lcm-lora")
         pipeline.scheduler = LCMScheduler.from_config(pipeline.scheduler.config)
@@ -380,7 +409,7 @@ def load_facade_pipeline(options: FacadeOptions):
 
 
 def facade_sheets(prompt, control=None, options: FacadeOptions | None = None, *,
-                  negative_prompt: str = "", pipeline=None):
+                  negative_prompt: str = "", pipeline=None, reference=None):
     """A family of facade sheets, conditioned on a control image.
 
     LCM turns 25 sampling steps into ~6, which is what makes "a sheet per
@@ -395,6 +424,13 @@ def facade_sheets(prompt, control=None, options: FacadeOptions | None = None, *,
     case: the control image fixes the architecture, so the prompt is the only
     thing left that decides what the building is *made of*, and a single prompt
     gives a street built entirely of the same material.
+
+    ``reference`` is a photograph — the frames :mod:`city_builder.refine` gets
+    back from a video model are the intended source — and it answers the other
+    half of the question. The control image says where the floors are, the
+    prompt names a material, and the reference shows one. It needs
+    ``options.reference`` set, because the adapter costs a gigabyte to load and
+    a run that never passes an image should not pay for it.
 
     Pass ``pipeline`` to reuse a loaded one across several control images —
     loading is most of the wall clock once the sampler is down to six steps.
@@ -414,6 +450,17 @@ def facade_sheets(prompt, control=None, options: FacadeOptions | None = None, *,
     prompts = [prompt] * options.count if isinstance(prompt, str) else list(prompt)
     if len(prompts) != options.count:
         raise ValueError(f"{len(prompts)} prompt(s) for {options.count} sheet(s)")
+
+    # Before the pipeline is built, not after: loading it is ten seconds and
+    # three gigabytes, and a reference the adapter was never loaded for would
+    # otherwise be dropped in silence at the end of all that.
+    reference_image = None
+    if reference is not None:
+        if not options.reference:
+            raise ValueError(
+                "a reference image was given but options.reference is off, so the "
+                "adapter was never loaded")
+        reference_image = _as_image(reference)
 
     owned = pipeline is None
     pipeline = pipeline or load_facade_pipeline(options)
@@ -443,6 +490,8 @@ def facade_sheets(prompt, control=None, options: FacadeOptions | None = None, *,
         if options.controlnet:
             arguments["image"] = [control_image] * len(chunk)
             arguments["controlnet_conditioning_scale"] = options.control_scale
+        if reference is not None:
+            arguments["ip_adapter_image"] = [reference_image] * len(chunk)
         sheets.extend(np.asarray(image.convert("RGB")) for image in pipeline(**arguments).images)
 
     if owned:

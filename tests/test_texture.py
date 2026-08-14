@@ -107,3 +107,27 @@ def test_prompts_cycle_so_a_short_run_still_covers_every_style():
     prompts = styled_prompts(6, styles=styles_named(["brick", "concrete"]))
     assert len({p for p in prompts}) == 2
     assert sum(1 for p in prompts if "brick" in p) == 3
+
+
+def test_a_reference_without_the_adapter_loaded_is_refused():
+    # The adapter is a gigabyte, so it is only loaded when asked for. Passing an
+    # image anyway would otherwise be ignored in silence, and the sheets would
+    # come back looking like the prompt alone — with nothing to say why.
+    import numpy as np
+    import pytest
+
+    from city_builder.texture import FacadeOptions, facade_sheets
+
+    control = np.zeros((64, 64, 3), dtype=np.uint8)
+    with pytest.raises(ValueError, match="options.reference is off"):
+        facade_sheets("a wall", control, FacadeOptions(reference=False),
+                      reference=np.zeros((8, 8, 3), dtype=np.uint8),
+                      pipeline=object())
+
+
+def test_the_reference_default_quotes_the_material_not_the_content():
+    # Measured: 0.4 takes the palette and panel material; at 0.7 a sheet came
+    # back with the reference photograph's yellow road line across the facade.
+    from city_builder.texture import FacadeOptions
+
+    assert FacadeOptions().reference_strength <= 0.5

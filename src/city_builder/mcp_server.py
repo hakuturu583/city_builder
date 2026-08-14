@@ -295,6 +295,15 @@ def generate_facades(
                       Field(description="Names from list_styles, to narrow the built-in "
                                         "spread instead of writing prompts")] = None,
     negative: Annotated[str | None, Field(description="What to keep out of the sheets")] = None,
+    reference_images: Annotated[list[str] | None,
+                                Field(description="Photographs to take the material from — "
+                                                  "refine_render's frames are the intended "
+                                                  "source. One is used per control image, "
+                                                  "cycled")] = None,
+    reference_strength: Annotated[float,
+                                  Field(description="How literally to quote them; 0.4 takes "
+                                                    "the palette and material, 0.7 starts "
+                                                    "copying content")] = 0.4,
     count: Annotated[int, Field(description="Sheets per floor count")] = 4,
     variation: Annotated[float, Field(description="0 = identical siblings, 1 = strangers")] = 0.45,
     seed: Annotated[int, Field(description="Same seed and prompts give the same sheets")] = 0,
@@ -310,11 +319,13 @@ def generate_facades(
     Check `city-builder models` has the weights before calling, and that the
     card is free — this is the only tool here that competes for one.
 
-    **The prompt is the whole of the material.** The control image fixes the
-    architecture — where the floors and windows are — so the prompt is the only
-    thing left deciding what the building is *made of*. One prompt therefore
-    gives a street built entirely of one material; pass several and they are
-    spread across the sheets. Each is given a suffix that keeps the result
+    **The prompt is the whole of the material** — unless you pass photographs.
+    The control image fixes the architecture, where the floors and windows are,
+    so what is left is what the building is *made of*. One prompt gives a street
+    built entirely of one material; pass several and they are spread across the
+    sheets. `reference_images` answers the same question with a picture instead
+    of words, which is the second half of the loop: refine a render into
+    photoreal frames, then hand those frames back here. Each is given a suffix that keeps the result
     usable as a texture (flat elevation, overcast, no sky, no perspective),
     so write the material, not the photograph: "photograph of a red brick
     warehouse facade, steel window frames" rather than "a street at sunset".
@@ -360,6 +371,8 @@ def generate_facades(
 
     options = FacadeOptions(count=count, family=family, vram_budget_gb=vram_budget_gb,
                             variation=variation, seed=seed,
+                            reference=bool(reference_images),
+                            reference_strength=reference_strength,
                             controlnet="" if controlnet == "none" else controlnet)
     os.makedirs(out_dir, exist_ok=True)
 
@@ -379,8 +392,10 @@ def generate_facades(
             wanted = styled_prompts(count, seed=seed + index * count, styles=palette)
         else:
             wanted = styled_prompts(count, seed=seed + index * count)
+        reference = (reference_images[index % len(reference_images)]
+                     if reference_images else None)
         for sheet in facade_sheets(wanted, control, options, pipeline=pipeline,
-                                   negative_prompt=negative or ""):
+                                   negative_prompt=negative or "", reference=reference):
             score = alignment(sheet, control, axis=0)
             scores.append(score)
             if score < keep_below:

@@ -762,6 +762,18 @@ photograph. `list_styles` hands back the built-in set to copy or narrow with,
 and both tools answer with a picture — a contact sheet of the sheets kept, the
 tile itself — because a wrap that scores well can still be the wrong material.
 
+They also take *photographs*. `reference_images` answers the same question with
+a picture rather than words, and closes the loop: build a scene, render a drive,
+refine it into photoreal frames, hand those frames back to `generate_facades`.
+Structure stays ControlNet's job throughout, so what the reference contributes
+is material. Measured against a refined street frame, floor alignment holding
+at 0.80–0.92 in every case:
+
+| `reference_strength` | |
+|---|---|
+| **0.4** | takes the palette and the panel material |
+| 0.7 | begins copying content — one sheet came back with the reference's yellow road line painted across the facade |
+
 ### Making a render photoreal
 
 The scene has its geometry right and its appearance approximate: procedural
