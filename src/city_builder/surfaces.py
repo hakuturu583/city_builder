@@ -69,7 +69,16 @@ class SurfaceOptions:
     z_fight_bias: float = 0.0002
 
     crosswalks: bool = True
-    walkways: bool = True
+    # Off. A walkway lanelet marks where people may walk, and drawing it makes
+    # a slab that is not a road: it is lifted 3 cm clear of the carriageway so
+    # it does not z-fight, its boundaries are generous at a junction mouth so
+    # it laps onto the lane, and what a vehicle driving the scene then meets is
+    # a step across its path. The scene this package builds is one to drive
+    # through; a pedestrian surface that behaves like a kerb in the road is
+    # worse than no pedestrian surface. Turn it on for a scene meant to be
+    # looked at rather than driven — `clip_walkways` takes the lapped part off
+    # either way.
+    walkways: bool = False
     markings: bool = True
     stop_lines: bool = True
     crosswalk_stripes: bool = True

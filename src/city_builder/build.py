@@ -98,12 +98,15 @@ def build_city(
     clipped = clip_crosswalks(groups, surface_options.crosswalk_lift
                               if surface_options else SurfaceOptions().crosswalk_lift)
     buried = clip_curbs(groups)
+    paved_over = clip_walkways(groups)
 
     stats = {name: len(shapes) for name, shapes in groups.items()}
     stats["extended_ends"] = plan.stats.get("extended", 0)
     stats["dangling_ends"] = plan.stats.get("dangling_ends", 0)
     if verbose:
         print(f"[build] surfaces: {stats}")
+        if paved_over:
+            print(f"[build] walkways: {paved_over:.0f} m2 lapping the carriageway removed")
         if clipped:
             print(f"[build] crossings clipped to the carriageway "
                   f"({clipped:+d} surface(s) after the cut)")
@@ -244,6 +247,54 @@ def clip_crosswalks(groups: dict[str, list], lift_by: float) -> int:
     dropped = len(crossings) - len(kept)
     groups["Crosswalks"] = kept
     return dropped
+
+
+def clip_walkways(groups: dict[str, list]) -> float:
+    """Take the carriageway back out of every footway. Returns the area removed.
+
+    The mirror of :func:`clip_crosswalks`, and needed for the same reason from
+    the other side. A crossing belongs on the road, so it is cut *down* to it;
+    a walkway does not, so it is cut *away* from it. A walkway lanelet is
+    surveyed along the footway but its boundaries are generous at a junction
+    mouth, and the surface then laps onto the carriageway — measured on the
+    Kashiwanoha map, 9 of one walkway's 91 m2.
+
+    That is not a cosmetic overlap. Every pedestrian surface is lifted 3 cm
+    clear of the road so it does not z-fight with it, so the lapped part is a
+    3 cm lip lying across a lane: a vehicle driving the scene hits a step, and
+    a perception stack sees a kerb where the map says there is none.
+    """
+    from shapely.ops import unary_union
+
+    from .geometry import height_lookup, triangulate_polygon
+    from .viaduct import _footprints
+
+    walkways = groups.get("Walkways")
+    carriageway = list(groups.get("Roads", [])) + list(groups.get("Junctions", []))
+    if not walkways or not carriageway:
+        return 0.0
+
+    road = unary_union(_footprints(carriageway, None))
+    lift = height_lookup([p for r in walkways for p in list(r.left) + list(r.right)])
+
+    kept, removed = [], 0.0
+    for walkway in walkways:
+        footprint = _footprints([walkway], None)
+        if not footprint:
+            continue
+        off_road = footprint[0].difference(road)
+        removed += footprint[0].area - off_road.area
+        if off_road.is_empty:
+            continue
+        for part in getattr(off_road, "geoms", [off_road]):
+            if part.geom_type != "Polygon" or part.area < 0.5:
+                continue
+            mesh = triangulate_polygon(part, lift)
+            if mesh.faces:
+                kept.append(mesh)
+
+    groups["Walkways"] = kept
+    return removed
 
 
 def clip_curbs(groups: dict[str, list], probe: float = 0.6,
