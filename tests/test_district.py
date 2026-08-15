@@ -76,3 +76,93 @@ def test_the_aspect_is_the_plots_own_and_not_the_streets():
 
 def test_a_plot_with_no_footprint_is_left_at_the_callers_strength():
     assert D.licence({"area": 90.0}, 0.55) == pytest.approx(0.55)
+
+
+# ---------------------------------------------------------------------------
+# Asking again
+#
+# A generation that comes back as the wrong shape is a draw from a
+# distribution, not a verdict on the plot. These stub out the two GPU steps and
+# check the loop around them.
+# ---------------------------------------------------------------------------
+
+
+class _Scene:
+    name = "test"
+    map_path = "test.osm"
+
+    def __init__(self, plots):
+        self.result = type("R", (), {"plots": plots})()
+
+
+def _stub(monkeypatch, ious):
+    """Make the pipeline hand back ``ious`` in order, and record the seeds."""
+    from city_builder import portrait as portrait_module
+    from city_builder import reconstruct as reconstruct_module
+
+    seen = []
+
+    def portrait(scene, index, path, **kwargs):
+        return {"image": path}
+
+    def reconstruct(plot, out_dir, *, image, name, mesh_options, restyle_prompt,
+                    restyle_options):
+        seen.append({"name": name, "seed": mesh_options.seed})
+        got = ious[len(seen) - 1]
+        if isinstance(got, Exception):
+            raise got
+        return {"footprint_iou": got, "glb": f"{name}.glb", "took_seconds": 1.0}
+
+    monkeypatch.setattr(portrait_module, "render_portrait", portrait)
+    monkeypatch.setattr(reconstruct_module, "reconstruct", reconstruct)
+    return seen
+
+
+def test_a_building_that_fits_first_time_is_not_asked_for_again(monkeypatch, tmp_path):
+    seen = _stub(monkeypatch, [0.93])
+    summary = D.rebuild(_Scene([_plot()]), str(tmp_path), attempts=3, verbose=False)
+    assert len(seen) == 1
+    assert summary["used"] == 1 and summary["generations"] == 1
+
+
+def test_a_miss_is_drawn_again_and_the_second_draw_can_stand(monkeypatch, tmp_path):
+    seen = _stub(monkeypatch, [0.61, 0.88])
+    summary = D.rebuild(_Scene([_plot()]), str(tmp_path), attempts=3, verbose=False)
+    assert len(seen) == 2
+    assert summary["used"] == 1 and summary["retried"] == 1
+    assert summary["buildings"][0]["footprint_iou"] == 0.88
+
+
+def test_the_draws_differ_and_do_not_overwrite_each_other(monkeypatch, tmp_path):
+    seen = _stub(monkeypatch, [0.61, 0.62, 0.63])
+    D.rebuild(_Scene([_plot()]), str(tmp_path), attempts=3, verbose=False)
+    assert len({row["seed"] for row in seen}) == 3, "the same seed draws the same building"
+    assert len({row["name"] for row in seen}) == 3, "a worse try overwrote a better one"
+
+
+def test_the_best_of_the_tries_is_the_one_kept(monkeypatch, tmp_path):
+    _stub(monkeypatch, [0.61, 0.78, 0.55])
+    summary = D.rebuild(_Scene([_plot()]), str(tmp_path), attempts=3, verbose=False)
+    row = summary["buildings"][0]
+    assert row["footprint_iou"] == 0.78 and not row["used"]
+    assert row["glb"].endswith("_t1.glb"), "the ledger points at a mesh that lost"
+
+
+def test_an_exception_is_a_miss_and_not_the_end_of_the_building(monkeypatch, tmp_path):
+    _stub(monkeypatch, [RuntimeError("CUDA out of memory"), 0.91])
+    summary = D.rebuild(_Scene([_plot()]), str(tmp_path), attempts=3, verbose=False)
+    assert summary["used"] == 1
+    assert "error" not in summary["buildings"][0]
+
+
+def test_a_building_that_only_ever_fails_is_recorded_and_left_alone(monkeypatch, tmp_path):
+    _stub(monkeypatch, [RuntimeError("boom")] * 3)
+    summary = D.rebuild(_Scene([_plot()]), str(tmp_path), attempts=3, verbose=False)
+    row = summary["buildings"][0]
+    assert not row["used"] and "boom" in row["error"] and row["tries"] == 3
+
+
+def test_one_attempt_is_the_old_behaviour(monkeypatch, tmp_path):
+    seen = _stub(monkeypatch, [0.4, 0.9])
+    D.rebuild(_Scene([_plot()]), str(tmp_path), attempts=1, verbose=False)
+    assert len(seen) == 1

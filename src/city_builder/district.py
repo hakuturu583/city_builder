@@ -91,7 +91,7 @@ def rebuild(scene, out_dir: str, *, buildings: list[int] | None = None,
             roof_tile_metres: float = 0.45, style: str = DEFAULT_STYLE,
             brush_up: float = 0.55, resolution: str = "512", seed: int = 0,
             negative: str = DEFAULT_NEGATIVE,
-            keep_below: float = 0.80, resume: bool = True,
+            keep_below: float = 0.80, attempts: int = 3, resume: bool = True,
             marking_options=None, verbose: bool = True) -> dict[str, Any]:
     """Reconstruct a scene's buildings and write the models and the ledger.
 
@@ -103,6 +103,14 @@ def rebuild(scene, out_dir: str, *, buildings: list[int] | None = None,
     ``keep_below`` is the line under which a reconstruction is not used. It is
     not an error — the model returned a building, just not this one — so the
     plot keeps its procedural massing and the ledger says why.
+
+    ``attempts`` is how many times a building may be *asked for*. A generation
+    that comes back as the wrong shape is a draw from a distribution, not a
+    deterministic failure, and the cheapest thing to do about it is to draw
+    again: only the buildings that missed pay for it, and the best of the tries
+    is the one kept. It also covers the other kind of failure — an exception
+    out of the pipeline, which on a run this long is usually the card being
+    momentarily out of memory rather than anything about this building.
     """
     # Blender first: it brings its own numpy, and torch is content with that
     # while the reverse can leave one of them unable to load its own C module.
@@ -130,10 +138,6 @@ def rebuild(scene, out_dir: str, *, buildings: list[int] | None = None,
             print(f"[district] resuming: {len(done)} building(s) already modelled")
 
     options = portrait_module.PortraitOptions()
-    mesh_options = reconstruct_module.MeshOptions(seed=seed, pipeline_type=resolution,
-                                                  texture_size=1024,
-                                                  decimation_target=80_000,
-                                                  tex_guidance=3.0)
     started = time.time()
     rows: list[dict[str, Any]] = []
     for count, index in enumerate(buildings, start=1):
@@ -144,26 +148,49 @@ def rebuild(scene, out_dir: str, *, buildings: list[int] | None = None,
         strength = licence(plots[index], brush_up)
         row: dict[str, Any] = {"building": index, "area_m2": plots[index]["area"],
                                "roof": plots[index].get("roof"), "brush_up": strength}
-        try:
-            shot = portrait_module.render_portrait(
-                scene, index, os.path.join(out_dir, f"{name}.png"), options=options,
-                facade_dir=facade_dir, roof_texture=roof_texture,
-                roof_tile_metres=roof_tile_metres, marking_options=marking_options,
-                verbose=False)
-            report = reconstruct_module.reconstruct(
-                plots[index], out_dir, image=shot["image"], name=name,
-                mesh_options=mesh_options, restyle_prompt=style,
-                restyle_options=(reconstruct_module.RestyleOptions(strength=strength,
-                                                                  seed=seed + index,
-                                                                  negative=negative)
-                                 if strength > 0 else None))
-            row.update({k: v for k, v in report.items() if k != "source"})
-            row["used"] = report["footprint_iou"] >= keep_below
-        except Exception as error:  # noqa: BLE001 - one building must not stop a street
-            # A generative model has failure modes a caller cannot enumerate,
-            # and the answer to all of them is the same: leave the massing
-            # alone and carry on. What matters is that the ledger says so.
-            row.update({"used": False, "error": f"{type(error).__name__}: {error}"})
+
+        # The massing render is deterministic, so it is shot once and the tries
+        # differ in what the image model and the mesh sampler make of it.
+        best: dict[str, Any] | None = None
+        shot: dict[str, Any] | None = None
+        for attempt in range(max(1, attempts)):
+            draw = seed + index + attempt * 10_007  # coprime with anything here
+            try:
+                if shot is None:
+                    shot = portrait_module.render_portrait(
+                        scene, index, os.path.join(out_dir, f"{name}.png"), options=options,
+                        facade_dir=facade_dir, roof_texture=roof_texture,
+                        roof_tile_metres=roof_tile_metres,
+                        marking_options=marking_options, verbose=False)
+                report = reconstruct_module.reconstruct(
+                    plots[index], out_dir, image=shot["image"],
+                    # Each try writes its own mesh, and the row that wins
+                    # carries the paths of the one that won. Renaming the
+                    # winner over the loser instead would leave a ledger and a
+                    # directory that disagree if the run is interrupted.
+                    name=name if attempt == 0 else f"{name}_t{attempt}",
+                    mesh_options=reconstruct_module.MeshOptions(
+                        seed=draw, pipeline_type=resolution, texture_size=1024,
+                        decimation_target=80_000, tex_guidance=3.0),
+                    restyle_prompt=style,
+                    restyle_options=(reconstruct_module.RestyleOptions(strength=strength,
+                                                                      seed=draw,
+                                                                      negative=negative)
+                                     if strength > 0 else None))
+                got = {k: v for k, v in report.items() if k != "source"}
+            except Exception as error:  # noqa: BLE001 - one building must not stop a street
+                # A generative model has failure modes a caller cannot
+                # enumerate, and the answer to all of them is the same: try
+                # again, and if that is the last try leave the massing alone
+                # and carry on. What matters is that the ledger says so.
+                got = {"error": f"{type(error).__name__}: {error}"}
+            if best is None or got.get("footprint_iou", 0.0) > best.get("footprint_iou", 0.0):
+                best = got
+            if best.get("footprint_iou", 0.0) >= keep_below:
+                break
+        row.update(best or {})
+        row["tries"] = attempt + 1
+        row["used"] = row.get("footprint_iou", 0.0) >= keep_below
         rows.append(row)
 
         if verbose:
@@ -171,7 +198,8 @@ def rebuild(scene, out_dir: str, *, buildings: list[int] | None = None,
             fresh = sum(1 for r in rows if "took_seconds" in r)
             left = (len(buildings) - count) * (elapsed / max(fresh, 1))
             mark = "ok " if row.get("used") else "skip"
-            print(f"[district] {count}/{len(buildings)} {mark} {name} "
+            again = f" x{row['tries']}" if row["tries"] > 1 else ""
+            print(f"[district] {count}/{len(buildings)} {mark} {name}{again} "
                   f"iou={row.get('footprint_iou', float('nan')):.3f} "
                   f"~{left / 60:.0f} min left")
         _write(ledger_path, scene, rows, keep_below)
@@ -196,6 +224,9 @@ def _write(path: str, scene, rows: list[dict[str, Any]], keep_below: float) -> d
         "attempted": len(rows),
         "used": len(used),
         "kept_above": keep_below,
+        # What the retries cost and what they bought.
+        "generations": sum(r.get("tries", 1) for r in rows),
+        "retried": sum(1 for r in rows if r.get("tries", 1) > 1),
         "footprint_iou": {
             "mean": round(sum(ious) / len(ious), 4) if ious else None,
             "min": round(min(ious), 4) if ious else None,

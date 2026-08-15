@@ -533,6 +533,9 @@ def drive_command(input_path, scene_path, output_path, quiet, **kwargs):
               default="512")
 @click.option("--keep-below", type=float, default=0.80,
               help="Footprint IoU under which a reconstruction is not used")
+@click.option("--attempts", type=int, default=3,
+              help="How many times a building may be asked for. A generation that "
+                   "misses is a draw, not a verdict; only the ones that miss pay")
 @click.option("--seed", type=int, default=0)
 @click.option("--blend", default=None, help="Also write the placed scene as a .blend")
 @click.option("--glb", default=None, help="Also write the placed scene as a .glb")
@@ -540,7 +543,8 @@ def drive_command(input_path, scene_path, output_path, quiet, **kwargs):
 @click.option("--quiet", is_flag=True)
 def rebuild_command(input_path, out_dir, config_path, facade_dir, roof_texture,
                     roof_tile_metres, ground_texture, road_texture, min_area, limit,
-                    brush_up, resolution, keep_below, seed, blend, glb, no_resume, quiet):
+                    brush_up, resolution, keep_below, attempts, seed, blend, glb, no_resume,
+                    quiet):
     """Replace a map's procedural massing with reconstructed buildings.
 
     One 3D model per plot: the massing is photographed, an image model brushes
@@ -549,9 +553,11 @@ def rebuild_command(input_path, out_dir, config_path, facade_dir, roof_texture,
     About twenty-five seconds a building on one card, and it resumes — an hour
     of GPU is long enough that something will interrupt it.
 
-    A reconstruction that comes back as a different building is not used: below
-    `--keep-below` the plot keeps its procedural massing, which is a poor
-    building but the right shape. The ledger records every fit either way.
+    A reconstruction that comes back as a different building is asked for
+    again, up to `--attempts` times, and the best of the tries is kept. What
+    still misses is not used: below `--keep-below` the plot keeps its
+    procedural massing, which is a poor building but the right shape. The
+    ledger records every fit either way.
 
     **Needs a GPU, TRELLIS.2 and its CUDA extensions.** See the README.
     """
@@ -568,8 +574,9 @@ def rebuild_command(input_path, out_dir, config_path, facade_dir, roof_texture,
         scene, out_dir, min_area=min_area, limit=limit, facade_dir=facade_dir,
         roof_texture=roof_texture, roof_tile_metres=roof_tile_metres,
         brush_up=brush_up, resolution=resolution, seed=seed, keep_below=keep_below,
-        resume=not no_resume, marking_options=config.markings, verbose=not quiet)
-    click.echo(f"\n{summary['used']} of {summary['attempted']} buildings rebuilt; "
+        attempts=attempts, resume=not no_resume, marking_options=config.markings, verbose=not quiet)
+    click.echo(f"\n{summary['used']} of {summary['attempted']} buildings rebuilt "
+               f"in {summary['generations']} generation(s); "
                f"footprint IoU mean {summary['footprint_iou']['mean']}, "
                f"min {summary['footprint_iou']['min']}")
 
