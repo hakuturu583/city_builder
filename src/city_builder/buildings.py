@@ -341,26 +341,44 @@ ROOF_FORMS = ("flat", "gable", "hip", "mono")
 
 
 def pitched_roof(polygon, top_z: float, form: str, *, pitch: float = 0.45,
-         eave: float = 0.7) -> Mesh:
-    """A pitched roof over a footprint, as a mesh. ``flat`` returns nothing.
+                 eave: float = 0.5) -> Mesh:
+    """A pitched roof that follows the footprint it stands on. ``flat`` gives none.
 
-    Built on the footprint's *minimum rotated rectangle* rather than on the
-    outline itself. A roof over an arbitrary polygon is a straight-skeleton
-    problem and this is not one: real roofs are simple forms carried across a
-    plan, they overhang their walls anyway, and a hip that misses an inside
-    corner by half a metre is a hip.
+    The first version of this carried the roof on the footprint's *minimum
+    rotated rectangle*, which is a slab as wide as the building's bounding box
+    however the building is actually shaped. On an L-shaped or a wedge-shaped
+    plot — and a plot cut out of the space between real roads is usually one of
+    those — the roof stood well clear of the walls on two sides. It read as a
+    lid resting on the building rather than as its top.
+
+    So the roof is a *height field over the plan*. The plan is the footprint
+    grown by the eave, which is what an overhang is; the height comes from the
+    slope rising inward from each eave edge, and where two of those meet is a
+    ridge or a hip. Those meetings are straight lines, so the plan is cut along
+    them and each piece then lies in one plane exactly — no faceting on a
+    crease, and no roof outside the building it belongs to.
 
     A flat roof is what an extrusion gives, and for a long time it was all this
     package had. That reads as a street of tofu blocks, and it carries: a
     reconstruction model can only return the shapes it is shown, so a scene
     with no pitched roof in it produces buildings with no pitched roof either.
     """
+    from shapely.geometry import LineString
+    from shapely.geometry import Polygon as ShapelyPolygon
+    from shapely.ops import split as shapely_split
+
     if form not in ROOF_FORMS:
         raise ValueError(f"roof form must be one of {ROOF_FORMS}, not {form!r}")
     if form == "flat":
         return Mesh([], [])
 
-    corners = list(polygon.minimum_rotated_rectangle.exterior.coords)[:4]
+    plan = polygon.buffer(eave, join_style=2)  # mitred, so a corner stays a corner
+    plan = max(plan.geoms, key=lambda g: g.area) if hasattr(plan, "geoms") else plan
+    if plan.is_empty or plan.area <= 0:
+        return Mesh([], [])
+
+    rectangle = polygon.minimum_rotated_rectangle
+    corners = list(rectangle.exterior.coords)[:4]
     if len(corners) < 4:
         return Mesh([], [])
     edges = [(corners[i], corners[(i + 1) % 4]) for i in range(4)]
@@ -369,40 +387,77 @@ def pitched_roof(polygon, top_z: float, form: str, *, pitch: float = 0.45,
     if length < 1e-6:
         return Mesh([], [])
     ux, uy = (bx - ax) / length, (by - ay) / length  # along the ridge
-    vx, vy = -uy, ux  # across it
-    width = polygon.minimum_rotated_rectangle.area / length
-    cx, cy = polygon.minimum_rotated_rectangle.centroid.coords[0]
-
+    cx, cy = rectangle.centroid.coords[0]
+    width = rectangle.area / length
     half_l, half_w = length / 2.0 + eave, width / 2.0 + eave
+    slope = pitch  # rise per metre travelled in from the eave
 
-    def at(u: float, v: float, z: float) -> tuple[float, float, float]:
-        return (cx + ux * u + vx * v, cy + uy * u + vy * v, z)
+    def to_local(x: float, y: float) -> tuple[float, float]:
+        dx, dy = x - cx, y - cy
+        return dx * ux + dy * uy, -dx * uy + dy * ux
 
-    rise = pitch * half_w
-    a, b = at(-half_l, -half_w, top_z), at(half_l, -half_w, top_z)
-    c, d = at(half_l, half_w, top_z), at(-half_l, half_w, top_z)
+    def to_world(u: float, v: float) -> tuple[float, float]:
+        return cx + ux * u - uy * v, cy + uy * u + ux * v
 
+    local = ShapelyPolygon([to_local(x, y) for x, y in plan.exterior.coords[:-1]],
+                           [[to_local(x, y) for x, y in ring.coords[:-1]]
+                            for ring in plan.interiors])
+    if not local.is_valid:
+        local = local.buffer(0)
+
+    # Each eave edge lifts the roof as it is left behind. A gable has two, a
+    # hip has four, a mono-pitch has one that carries the whole width.
     if form == "mono":
-        # One slope, the whole width. The low eave is the street side.
-        high_c, high_d = at(half_l, half_w, top_z + 2 * rise), at(-half_l, half_w,
-                                                                 top_z + 2 * rise)
-        vertices = [a, b, high_c, high_d, c, d]
-        faces = [[0, 1, 2, 3], [1, 4, 2], [5, 0, 3]]
-        return Mesh(vertices, faces)
+        planes = [(0.0, slope, slope * half_w)]  # h = slope * (v + half_w)
+        creases: list[tuple[float, float, float]] = []
+    elif form == "gable":
+        planes = [(0.0, -slope, slope * half_w), (0.0, slope, slope * half_w)]
+        creases = [(0.0, 1.0, 0.0)]  # v = 0
+    else:  # hip
+        planes = [(0.0, -slope, slope * half_w), (0.0, slope, slope * half_w),
+                  (-slope, 0.0, slope * half_l), (slope, 0.0, slope * half_l)]
+        offset = half_l - half_w
+        creases = [(0.0, 1.0, 0.0),
+                   (1.0, -1.0, -offset), (1.0, 1.0, -offset),
+                   (1.0, 1.0, offset), (1.0, -1.0, offset)]
 
-    inset = half_w if form == "hip" else 0.0
-    if inset >= half_l:  # too short to hip: the ridge would be a point
-        inset = half_l * 0.5
-    r0, r1 = at(-half_l + inset, 0.0, top_z + rise), at(half_l - inset, 0.0, top_z + rise)
+    reach = (half_l + half_w) * 4.0
+    pieces = [local]
+    for a, b, c in creases:
+        # The line a*u + b*v = c, long enough to cross the whole plan.
+        norm = math.hypot(a, b)
+        px, py = a * c / norm**2, b * c / norm**2
+        dx, dy = -b / norm, a / norm
+        knife = LineString([(px - dx * reach, py - dy * reach),
+                            (px + dx * reach, py + dy * reach)])
+        cut = []
+        for piece in pieces:
+            try:
+                cut.extend(p for p in shapely_split(piece, knife).geoms if p.area > 1e-6)
+            except (GEOSException, ValueError):  # pragma: no cover - degenerate cut
+                cut.append(piece)
+        pieces = cut
 
-    vertices = [a, b, c, d, r0, r1]
-    faces = [
-        [0, 1, 5, 4],  # the slope on one side
-        [2, 3, 4, 5],  # and on the other
-        [0, 4, 3],  # the end: a gable wall, or a hip slope
-        [1, 2, 5],
-    ]
-    return Mesh(vertices, faces)
+    vertices: list[tuple[float, float, float]] = []
+    faces: list[list[int]] = []
+    for piece in pieces:
+        if piece.geom_type != "Polygon" or piece.area <= 1e-6:
+            continue
+        # Which plane is lowest here is which one roofs this piece; inside one
+        # crease-bounded piece that answer does not change.
+        spot = piece.representative_point()
+        a, b, c = min(planes, key=lambda p: p[0] * spot.x + p[1] * spot.y + p[2])
+        for triangle in _triangulate(piece):
+            ordered = triangle if signed_area_xy(triangle) > 0 else list(reversed(triangle))
+            face = []
+            for u, v in ordered:
+                x, y = to_world(u, v)
+                face.append(len(vertices))
+                vertices.append((x, y, top_z + max(0.0, a * u + b * v + c)))
+            if len(set(face)) == 3:
+                faces.append(face)
+
+    return Mesh(vertices, faces, [(v[0] / 3.0, v[1] / 3.0) for v in vertices])
 
 
 def base_height(polygon, heightmap: HeightMap) -> float:

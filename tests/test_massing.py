@@ -209,3 +209,52 @@ def test_a_pitched_roof_and_a_parapet_are_never_both_drawn():
         laid_out = M.plan(_plot(), seed=seed)
         if laid_out["roof"]["form"] != "flat":
             assert "parapet" not in laid_out["features"]
+
+
+def test_the_roof_covers_the_footprint_and_no_more():
+    """The defect this was rewritten for: a roof wider than the building.
+
+    Carried on the footprint's bounding rectangle, an L-shaped or wedge-shaped
+    plot got a roof standing clear of its walls on two sides — a lid resting on
+    the building rather than its top. Plots cut out of the space between real
+    roads are usually one of those.
+    """
+    from shapely.ops import unary_union
+
+    shapes = {
+        "L": ShapelyPolygon([(0, 0), (30, 0), (30, 10), (12, 10), (12, 18), (0, 18)]),
+        "wedge": ShapelyPolygon([(0, 0), (30, 0), (22, 14), (0, 10)]),
+        "triangle": ShapelyPolygon([(0, 0), (28, 0), (4, 16)]),
+        "courtyard": ShapelyPolygon([(0, 0), (30, 0), (30, 18), (0, 18)],
+                                    [[(10, 6), (20, 6), (20, 12), (10, 12)]]),
+    }
+    for name, plan_shape in shapes.items():
+        want = plan_shape.buffer(0.5, join_style=2).area
+        for form in ("gable", "hip", "mono"):
+            mesh = pitched_roof(plan_shape, 10.0, form, pitch=0.5, eave=0.5)
+            covered = unary_union([
+                ShapelyPolygon([(mesh.vertices[i][0], mesh.vertices[i][1]) for i in face])
+                .buffer(0) for face in mesh.faces])
+            assert covered.area == pytest.approx(want, rel=1e-3), \
+                f"{form} roof on {name} covers {covered.area:.0f} m2, wanted {want:.0f}"
+
+
+def test_the_eave_is_the_only_thing_outside_the_walls():
+    plan_shape = ShapelyPolygon([(0, 0), (30, 0), (30, 10), (12, 10), (12, 18), (0, 18)])
+    mesh = pitched_roof(plan_shape, 10.0, "hip", eave=0.0)
+    from shapely.ops import unary_union
+    covered = unary_union([
+        ShapelyPolygon([(mesh.vertices[i][0], mesh.vertices[i][1]) for i in face]).buffer(0)
+        for face in mesh.faces])
+    assert covered.area == pytest.approx(plan_shape.area, rel=1e-3)
+
+
+def test_a_gable_has_one_ridge_and_a_hip_has_a_shorter_one():
+    plan_shape = ShapelyPolygon([(0, 0), (30, 0), (30, 18), (0, 18)])
+    spans = {}
+    for form in ("gable", "hip"):
+        mesh = pitched_roof(plan_shape, 10.0, form)
+        top = max(v[2] for v in mesh.vertices)
+        ridge = [v for v in mesh.vertices if math.isclose(v[2], top, abs_tol=1e-6)]
+        spans[form] = max(math.dist(a[:2], b[:2]) for a in ridge for b in ridge)
+    assert spans["hip"] < spans["gable"]
