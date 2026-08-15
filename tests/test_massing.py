@@ -79,7 +79,8 @@ def test_each_feature_actually_appears():
 
 
 def test_a_probability_of_zero_means_never():
-    drawn = _features(_plot(), courtyard=0.0, wing=0.0, wall=0.0, parapet=0.0)
+    drawn = _features(_plot(), courtyard=0.0, wing=0.0, wall=0.0, parapet=0.0,
+                      roof_forms=("flat",))
     assert set(drawn) == {()}
 
 
@@ -138,3 +139,72 @@ def test_the_building_stands_where_the_plot_says():
         or max(tops) == pytest.approx(4.0 + 9.0, abs=1e-6)
     plan_x = [v[0] for mesh in built["Buildings"] for v in mesh.vertices]
     assert math.isclose(sum(plan_x) / len(plan_x), 90.0, abs_tol=6.0)
+
+
+# ---------------------------------------------------------------------------
+# Roofs
+# ---------------------------------------------------------------------------
+
+
+def _rect(long_side=30.0, short_side=18.0, angle=0.0):
+    box = ShapelyPolygon([(-long_side / 2, -short_side / 2), (long_side / 2, -short_side / 2),
+                          (long_side / 2, short_side / 2), (-long_side / 2, short_side / 2)])
+    return rotate(box, angle, origin=(0, 0))
+
+
+def test_a_flat_roof_is_the_absence_of_one():
+    assert M.roof(_rect(), 10.0, "flat").faces == []
+
+
+def test_a_form_nobody_builds_is_refused():
+    with pytest.raises(ValueError, match="roof form"):
+        M.roof(_rect(), 10.0, "onion")
+
+
+@pytest.mark.parametrize("form", ["gable", "hip", "mono"])
+@pytest.mark.parametrize("angle", [0.0, 37.0, 90.0])
+def test_the_ridge_is_the_pitch_above_the_eave(form, angle):
+    eave, pitch, top = 0.7, 0.5, 10.0
+    mesh = M.roof(_rect(30.0, 18.0, angle), top, form, pitch=pitch, eave=eave)
+    heights = [v[2] for v in mesh.vertices]
+    rise = pitch * (18.0 / 2 + eave)
+    assert min(heights) == pytest.approx(top)
+    # mono carries the whole span on one slope, so it rises twice as far.
+    assert max(heights) == pytest.approx(top + (2 * rise if form == "mono" else rise))
+
+
+@pytest.mark.parametrize("form", ["gable", "hip", "mono"])
+def test_the_roof_overhangs_the_walls_it_sits_on(form):
+    plan_shape = _rect(30.0, 18.0, angle=20.0)
+    mesh = M.roof(plan_shape, 10.0, form, eave=0.7)
+    cover = ShapelyPolygon([(x, y) for x, y, _z in mesh.vertices]).convex_hull
+    assert cover.contains(plan_shape), "a roof with no overhang is a lid"
+
+
+def test_a_hip_has_a_shorter_ridge_than_a_gable():
+    plan_shape = _rect(30.0, 18.0)
+    ridges = {}
+    for form in ("gable", "hip"):
+        mesh = M.roof(plan_shape, 10.0, form)
+        top = max(v[2] for v in mesh.vertices)
+        at_top = [v for v in mesh.vertices if math.isclose(v[2], top, abs_tol=1e-6)]
+        ridges[form] = math.dist(at_top[0][:2], at_top[-1][:2])
+    assert ridges["hip"] < ridges["gable"]
+
+
+def test_a_pitch_replaces_the_flat_cap_rather_than_covering_it():
+    """Two roofs in the same place is a surface the reconstruction has to choose."""
+    plot = _plot()
+    seed = next(s for s in range(60) if M.plan(plot, seed=s)["roof"]["form"] == "gable")
+    built = M.build(plot, seed=seed)
+    main_top = built["parts"][0][2]
+    flat_caps = [mesh for mesh in built["Roofs"]
+                 if all(math.isclose(v[2], main_top, abs_tol=1e-6) for v in mesh.vertices)]
+    assert not flat_caps, "the extruded cap is still under the pitch"
+
+
+def test_a_pitched_roof_and_a_parapet_are_never_both_drawn():
+    for seed in range(60):
+        laid_out = M.plan(_plot(), seed=seed)
+        if laid_out["roof"]["form"] != "flat":
+            assert "parapet" not in laid_out["features"]

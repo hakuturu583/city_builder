@@ -319,6 +319,11 @@ comfy = [
     { name = "tqdm" },
     { name = "yarl" },
 ]
+cuda = [
+    { name = "nvdiffrast" },
+    { name = "nvdiffrec-render" },
+    { name = "o-voxel" },
+]
 mcp = [
     { name = "mcp" },
 ]
@@ -382,6 +387,9 @@ requires-dist = [
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.2" },
     { name = "ninja", marker = "extra == 'reconstruct'" },
     { name = "numpy", specifier = ">=1.24,<2" },
+    { name = "nvdiffrast", marker = "extra == 'cuda'", git = "https://github.com/NVlabs/nvdiffrast.git?rev=v0.4.0" },
+    { name = "nvdiffrec-render", marker = "extra == 'cuda'", git = "https://github.com/JeffreyXiang/nvdiffrec.git?rev=renderutils" },
+    { name = "o-voxel", marker = "extra == 'cuda'", git = "https://github.com/microsoft/TRELLIS.2.git?subdirectory=o-voxel" },
     { name = "opencv-python-headless", marker = "extra == 'reconstruct'" },
     { name = "peft", marker = "extra == 'texture'", specifier = ">=0.11" },
     { name = "pillow", specifier = ">=10.0" },
@@ -415,7 +423,7 @@ requires-dist = [
     { name = "utils3d", marker = "extra == 'reconstruct'", git = "https://github.com/EasternJournalist/utils3d.git?rev=9a4eb15e4021b67b12c460c7057d642626897ec8" },
     { name = "yarl", marker = "extra == 'comfy'", specifier = ">=1.18.0" },
 ]
-provides-extras = ["texture", "mcp", "reconstruct", "comfy"]
+provides-extras = ["texture", "mcp", "reconstruct", "cuda", "comfy"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -694,6 +702,15 @@ nvtx = [
 ]
 
 [[package]]
+name = "cumesh"
+version = "0.0.1"
+source = { git = "https://github.com/JeffreyXiang/CuMesh.git#12289e1062f0603f2f0d0771b02e1395d247f26f" }
+dependencies = [
+    { name = "torch" },
+    { name = "tqdm" },
+]
+
+[[package]]
 name = "cython"
 version = "3.2.9"
 source = { registry = "https://pypi.org/simple" }
@@ -760,6 +777,17 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f6/57/3ba6e6cb097f85b855b00163d169f35365f44277df044dcf96d55b8f62a3/filelock-3.32.2.tar.gz", hash = "sha256:c33351e1f49cae33414acbc6d56784e6ecee82514ec90795da1161fc4836b5b8", size = 217172, upload-time = "2026-07-29T22:46:04.895Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c1/e8/72f8cef9fdfeffe06213fe8508039396ee48daa0e3259457ed766173bfd6/filelock-3.32.2-py3-none-any.whl", hash = "sha256:87dd94cf281e586d135fa51132b8e3d9a598b316e90377a288663c9321036c82", size = 98830, upload-time = "2026-07-29T22:46:03.52Z" },
+]
+
+[[package]]
+name = "flex-gemm"
+version = "1.0.0"
+source = { git = "https://github.com/JeffreyXiang/FlexGEMM.git#6dd94a859c26ee8246888502eada3dd8ad85532e" }
+dependencies = [
+    { name = "filelock" },
+    { name = "torch" },
+    { name = "triton", marker = "sys_platform != 'win32'" },
+    { name = "triton-windows", marker = "sys_platform == 'win32'" },
 ]
 
 [[package]]
@@ -1265,6 +1293,19 @@ wheels = [
 ]
 
 [[package]]
+name = "nvdiffrast"
+version = "0.4.0"
+source = { git = "https://github.com/NVlabs/nvdiffrast.git?rev=v0.4.0#253ac4fcea7de5f396371124af597e6cc957bfae" }
+dependencies = [
+    { name = "numpy" },
+]
+
+[[package]]
+name = "nvdiffrec-render"
+version = "0.0.0"
+source = { git = "https://github.com/JeffreyXiang/nvdiffrec.git?rev=renderutils#b296927cc7fd01c2ac1087c8065c4d7248f72da4" }
+
+[[package]]
 name = "nvidia-cublas"
 version = "13.1.1.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1414,6 +1455,22 @@ source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c2/f3/d86c845465a2723ad7e1e5c36dcd75ddb82898b3f53be47ebd429fb2fa5d/nvidia_nvtx-13.0.85-py3-none-manylinux1_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:4936d1d6780fbe68db454f5e72a42ff64d1fd6397df9f363ae786930fd5c1cd4", size = 148047, upload-time = "2025-09-04T08:29:01.761Z" },
     { url = "https://files.pythonhosted.org/packages/a8/64/3708a90d1ebe202ffdeb7185f878a3c84d15c2b2c31858da2ce0583e2def/nvidia_nvtx-13.0.85-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:cb7780edb6b14107373c835bf8b72e7a178bac7367e23da7acb108f973f157a6", size = 148878, upload-time = "2025-09-04T08:28:53.627Z" },
+]
+
+[[package]]
+name = "o-voxel"
+version = "0.0.1"
+source = { git = "https://github.com/microsoft/TRELLIS.2.git?subdirectory=o-voxel#75fbf0183001ed9876c8dbb35de6b68552ee08bd" }
+dependencies = [
+    { name = "cumesh" },
+    { name = "easydict" },
+    { name = "flex-gemm" },
+    { name = "numpy" },
+    { name = "plyfile" },
+    { name = "torch" },
+    { name = "tqdm" },
+    { name = "trimesh" },
+    { name = "zstandard" },
 ]
 
 [[package]]
@@ -2231,6 +2288,14 @@ source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/7b/f9/19d842d06a08559534fa1eaab6ca551b1bcf40f06620bddec1babaa2772d/triton-3.7.1-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:d4a0e1cd4c4a76370ed74a8432a53cea28716827d19e40ffc732233e35ceb3f6", size = 184664887, upload-time = "2026-06-17T20:03:42.913Z" },
     { url = "https://files.pythonhosted.org/packages/cd/5e/fce69606f7f240297f163e25539906732b199530d486ce67ae319877e821/triton-3.7.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:6744957e9fd610a29680ec2346057d0c86948ed3812468670719f391e94b44a5", size = 197701306, upload-time = "2026-06-17T19:53:13.673Z" },
+]
+
+[[package]]
+name = "triton-windows"
+version = "3.7.1.post27"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/26/f5/0f5eaf48abc0c9900f600dbdfa8139e678aa7d47dc1da51b0541979e96df/triton_windows-3.7.1.post27-cp311-cp311-win_amd64.whl", hash = "sha256:b739bd7d39f919280294d8af172a90aa2f17a4377bfbca2ea30a8afae61d5eaa", size = 49679173, upload-time = "2026-06-21T16:48:02.395Z" },
 ]
 
 [[package]]

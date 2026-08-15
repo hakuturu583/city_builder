@@ -67,12 +67,86 @@ class MassingOptions:
     parapet_height: float = 0.9
     parapet_thickness: float = 0.4
 
+    # How the top is finished. A parapet only makes sense on a flat roof, so
+    # the two are chosen together: draw a pitch and the parapet is skipped.
+    roof_forms: tuple[str, ...] = ("flat", "flat", "gable", "hip", "mono")
+    roof_pitch: tuple[float, float] = (0.35, 0.65)  # rise over half the span
+    roof_eave: float = 0.7
+
     def __post_init__(self) -> None:
         for name in ("courtyard", "wing", "wall", "parapet"):
             if not 0.0 <= getattr(self, name) <= 1.0:
                 raise ValueError(f"massing.{name} is a probability, in [0, 1]")
         if not 0.0 < self.courtyard_share < 0.5:
             raise ValueError("massing.courtyard_share must leave a building around it")
+
+
+ROOF_FORMS = ("flat", "gable", "hip", "mono")
+
+
+def roof(polygon, top_z: float, form: str, *, pitch: float = 0.45,
+         eave: float = 0.7) -> Mesh:
+    """A pitched roof over a footprint, as a mesh. ``flat`` returns nothing.
+
+    Built on the footprint's *minimum rotated rectangle* rather than on the
+    outline itself. A roof over an arbitrary polygon is a straight-skeleton
+    problem and this is not one: real roofs are simple forms carried across a
+    plan, they overhang their walls anyway, and a hip that misses an inside
+    corner by half a metre is a hip.
+
+    Which is also why a flat roof is what an extruded footprint gives and why
+    nothing before this had another one — a street with no pitched roof in it
+    is not a Japanese street, and the reconstruction can only return the shapes
+    it is shown.
+    """
+    if form not in ROOF_FORMS:
+        raise ValueError(f"roof form must be one of {ROOF_FORMS}, not {form!r}")
+    if form == "flat":
+        return Mesh([], [])
+
+    corners = list(polygon.minimum_rotated_rectangle.exterior.coords)[:4]
+    if len(corners) < 4:
+        return Mesh([], [])
+    edges = [(corners[i], corners[(i + 1) % 4]) for i in range(4)]
+    (ax, ay), (bx, by) = max(edges, key=lambda e: math.dist(e[0], e[1]))
+    length = math.dist((ax, ay), (bx, by))
+    if length < 1e-6:
+        return Mesh([], [])
+    ux, uy = (bx - ax) / length, (by - ay) / length  # along the ridge
+    vx, vy = -uy, ux  # across it
+    width = polygon.minimum_rotated_rectangle.area / length
+    cx, cy = polygon.minimum_rotated_rectangle.centroid.coords[0]
+
+    half_l, half_w = length / 2.0 + eave, width / 2.0 + eave
+
+    def at(u: float, v: float, z: float) -> tuple[float, float, float]:
+        return (cx + ux * u + vx * v, cy + uy * u + vy * v, z)
+
+    rise = pitch * half_w
+    a, b = at(-half_l, -half_w, top_z), at(half_l, -half_w, top_z)
+    c, d = at(half_l, half_w, top_z), at(-half_l, half_w, top_z)
+
+    if form == "mono":
+        # One slope, the whole width. The low eave is the street side.
+        high_c, high_d = at(half_l, half_w, top_z + 2 * rise), at(-half_l, half_w,
+                                                                 top_z + 2 * rise)
+        vertices = [a, b, high_c, high_d, c, d]
+        faces = [[0, 1, 2, 3], [1, 4, 2], [5, 0, 3]]
+        return Mesh(vertices, faces)
+
+    inset = half_w if form == "hip" else 0.0
+    if inset >= half_l:  # too short to hip: the ridge would be a point
+        inset = half_l * 0.5
+    r0, r1 = at(-half_l + inset, 0.0, top_z + rise), at(half_l - inset, 0.0, top_z + rise)
+
+    vertices = [a, b, c, d, r0, r1]
+    faces = [
+        [0, 1, 5, 4],  # the slope on one side
+        [2, 3, 4, 5],  # and on the other
+        [0, 4, 3],  # the end: a gable wall, or a hip slope
+        [1, 2, 5],
+    ]
+    return Mesh(vertices, faces)
 
 
 def _polygon(ring):
@@ -218,8 +292,14 @@ def plan(plot: dict[str, Any], options: MassingOptions | None = None,
 
     parts.insert(0, (footprint, base, base + height))
 
+    # How the top is finished, and then a parapet only if it is flat.
+    form = rng.choice(options.roof_forms)
+    pitch = rng.uniform(*options.roof_pitch)
+    if form != "flat":
+        features.append(form)
+
     # A parapet: a band standing on the roof edge of the main volume.
-    if rng.random() < options.parapet:
+    if form == "flat" and rng.random() < options.parapet:
         band = footprint.difference(footprint.buffer(-options.parapet_thickness))
         if not band.is_empty and band.area > 0.5:
             top = base + height
@@ -242,6 +322,7 @@ def plan(plot: dict[str, Any], options: MassingOptions | None = None,
                 features.append("wall")
 
     return {"parts": parts, "features": features,
+            "roof": {"form": form, "pitch": round(pitch, 3), "eave": options.roof_eave},
             "plot_area": round(outline.area, 2),
             "covered_area": round(sum(p[0].area for p in parts), 2)}
 
@@ -254,16 +335,28 @@ def build(plot: dict[str, Any], options: MassingOptions | None = None,
     laid_out = plan(plot, options, seed)
     walls: list[Mesh] = []
     roofs: list[Mesh] = []
-    for polygon, bottom, top in laid_out["parts"]:
+    pitched = laid_out["roof"]["form"] != "flat"
+    for index, (polygon, bottom, top) in enumerate(laid_out["parts"]):
         for piece in (polygon.geoms if hasattr(polygon, "geoms") else [polygon]):
             if piece.is_empty or piece.area <= 1e-6:
                 continue
-            wall, roof = extrude(piece, bottom, max(top - bottom, 0.1),
-                                 skirt=0.4, facade_width=facade_width)
+            wall, cap = extrude(piece, bottom, max(top - bottom, 0.1),
+                                skirt=0.4, facade_width=facade_width)
             if wall.faces:
                 walls.append(wall)
-            if roof.faces:
-                roofs.append(roof)
+            # The flat cap is dropped where a pitch goes over it: two roofs in
+            # the same place is a surface the reconstruction has to choose
+            # between, and it chooses the wrong one about half the time.
+            if cap.faces and not (pitched and index == 0):
+                roofs.append(cap)
+
+    if pitched:
+        main = laid_out["parts"][0][0]
+        top = laid_out["parts"][0][2]
+        pitch = roof(main, top, laid_out["roof"]["form"],
+                            pitch=laid_out["roof"]["pitch"], eave=laid_out["roof"]["eave"])
+        if pitch.faces:
+            roofs.append(pitch)
     return {"Buildings": walls, "Roofs": roofs, **laid_out}
 
 

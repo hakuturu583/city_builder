@@ -56,6 +56,21 @@ reconstruct = [
     # a mesh utility rather than an install error.
     "utils3d @ git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8",
 ]
+# TRELLIS.2's CUDA extensions. Separate from `reconstruct` because installing
+# these compiles them, which wants nvcc, Eigen and about half an hour — so the
+# image builds them in a stage of their own and a source install asks for them
+# deliberately:
+#
+#     CPATH=/usr/include/eigen3 TORCH_CUDA_ARCH_LIST=12.0 uv sync --extra cuda
+#
+# Declared here rather than installed by hand so that they survive `uv sync`,
+# which removes anything the lock file does not know about — and did, twice.
+# o-voxel names CuMesh and FlexGEMM itself, so those come with it.
+cuda = [
+    "o-voxel @ git+https://github.com/microsoft/TRELLIS.2.git#subdirectory=o-voxel",
+    "nvdiffrast @ git+https://github.com/NVlabs/nvdiffrast.git@v0.4.0",
+    "nvdiffrec-render @ git+https://github.com/JeffreyXiang/nvdiffrec.git@renderutils",
+]
 # Everything ComfyUI needs that `texture` does not already bring. ComfyUI is a
 # checkout rather than a package, so only its dependencies are declared here —
 # and they are declared here rather than installed from its requirements.txt so
@@ -112,6 +127,12 @@ packages = ["src/city_builder"]
 # package of that name on PyPI is a different project.
 [tool.hatch.metadata]
 allow-direct-references = true
+
+# The CUDA extensions import torch in their setup.py to find its headers, so
+# they cannot be built in an isolated environment that does not have it yet.
+[tool.uv]
+no-build-isolation-package = ["o-voxel", "cumesh", "flex-gemm", "nvdiffrast",
+                              "nvdiffrec-render"]
 
 [tool.ruff]
 line-length = 110
