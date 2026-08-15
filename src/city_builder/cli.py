@@ -526,7 +526,7 @@ def drive_command(input_path, scene_path, output_path, quiet, **kwargs):
 @click.option("--road-texture", default=None)
 @click.option("--min-area", type=float, default=0.0, help="Skip plots smaller than this (m2)")
 @click.option("--limit", type=int, default=0, help="Only the N biggest; 0 for all of them")
-@click.option("--brush-up", type=float, default=0.6,
+@click.option("--brush-up", type=float, default=0.55,
               help="How far an image model may re-imagine the massing before it is "
                    "modelled. 0 skips it; this is the photorealism dial")
 @click.option("--resolution", type=click.Choice(["512", "1024", "1024_cascade"]),

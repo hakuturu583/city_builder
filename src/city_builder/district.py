@@ -30,10 +30,20 @@ import time
 from typing import Any
 
 DEFAULT_STYLE = (
-    "colour photograph of a Japanese suburban house on an overcast afternoon, "
-    "weathered render and ceramic siding, aluminium window frames, a tiled roof "
-    "with ridge caps, downpipes, an air-conditioning unit, real materials with "
-    "dirt and staining"
+    "colour photograph of an ordinary Japanese suburban house, overcast afternoon, "
+    "grey kawara tiled roof with ridge caps, cream mortar and ceramic siding walls, "
+    "aluminium sliding windows, a downpipe, an air-conditioning unit, plain and modern"
+)
+
+# Half the work, and none of it obvious in advance. Asked for a Japanese house
+# at a brush-up of 0.6, the image model returned a half-timbered cottage —
+# the prompt named the country and the model's prior named the architecture,
+# and the prior won. These are the shapes it reaches for when it is not told
+# not to.
+DEFAULT_NEGATIVE = (
+    "half-timbered, tudor, european, alpine, cottage, chalet, brick, stone cottage, "
+    "thatch, ornate, medieval, render, cgi, line drawing, sketch, "
+    "street scene, adjacent buildings, cropped, people, cars, text, watermark"
 )
 
 
@@ -51,7 +61,8 @@ def rebuild(scene, out_dir: str, *, buildings: list[int] | None = None,
             min_area: float = 0.0, limit: int = 0,
             facade_dir: str | None = None, roof_texture: str | None = None,
             roof_tile_metres: float = 0.45, style: str = DEFAULT_STYLE,
-            brush_up: float = 0.6, resolution: str = "512", seed: int = 0,
+            brush_up: float = 0.55, resolution: str = "512", seed: int = 0,
+            negative: str = DEFAULT_NEGATIVE,
             keep_below: float = 0.80, resume: bool = True,
             marking_options=None, verbose: bool = True) -> dict[str, Any]:
     """Reconstruct a scene's buildings and write the models and the ledger.
@@ -114,7 +125,8 @@ def rebuild(scene, out_dir: str, *, buildings: list[int] | None = None,
                 plots[index], out_dir, image=shot["image"], name=name,
                 mesh_options=mesh_options, restyle_prompt=style,
                 restyle_options=(reconstruct_module.RestyleOptions(strength=brush_up,
-                                                                  seed=seed + index)
+                                                                  seed=seed + index,
+                                                                  negative=negative)
                                  if brush_up > 0 else None))
             row.update({k: v for k, v in report.items() if k != "source"})
             row["used"] = report["footprint_iou"] >= keep_below
