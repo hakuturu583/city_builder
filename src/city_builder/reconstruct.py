@@ -189,8 +189,9 @@ class MeshOptions:
     root: str = field(default_factory=lambda: os.environ.get("TRELLIS2_PATH", "/opt/TRELLIS.2"))
     # 512 is three seconds and 1536 is a minute. 1024 is the one worth having
     # for a building: the storey lines survive it and the file is still small
-    # enough to put a few hundred of them in a scene.
-    resolution: int = 1024
+    # enough to put a few hundred of them in a scene. The model's own names:
+    # '512', '1024', '1024_cascade', '1536_cascade'.
+    pipeline_type: str = "1024"
     seed: int = 0
     texture_size: int = 2048
     decimation_target: int = 200_000
@@ -224,7 +225,17 @@ def _pipeline(options: MeshOptions):
 
     from trellis2.pipelines import Trellis2ImageTo3DPipeline
 
-    pipeline = Trellis2ImageTo3DPipeline.from_pretrained(options.weights)
+    try:
+        pipeline = Trellis2ImageTo3DPipeline.from_pretrained(options.weights)
+    except OSError as error:
+        if "gated repo" not in str(error):
+            raise
+        raise RuntimeError(
+            "TRELLIS.2 conditions on DINOv3, which is a gated repository: the weights "
+            "download only for a Hugging Face account that has accepted Meta's terms at "
+            "https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m . Accept "
+            "them, then `hf auth login` or set HF_TOKEN. Nothing else in this module "
+            "needs an account.") from error
     pipeline.cuda()
     _PIPELINE = pipeline
     return pipeline
@@ -243,7 +254,7 @@ def to_mesh(image_path: str, out_path: str, options: MeshOptions | None = None) 
     started = time.time()
     with torch.no_grad():
         mesh = pipeline.run(PILImage.open(image_path).convert("RGB"),
-                            seed=options.seed)[0]
+                            seed=options.seed, pipeline_type=options.pipeline_type)[0]
     mesh.simplify(16777216)  # the nvdiffrast limit, not a quality choice
 
     import o_voxel
