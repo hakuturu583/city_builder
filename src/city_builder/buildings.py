@@ -534,6 +534,12 @@ def pitched_roof(polygon, top_z: float, form: str, *, pitch: float = 0.45,
     width = rectangle.area / length
     half_l, half_w = length / 2.0 + eave, width / 2.0 + eave
     slope = pitch  # rise per metre travelled in from the eave
+    # The roof plane has to pass through the *wall* top, not the eave's. Set
+    # the eave to the wall top instead and the roof stands `slope * eave` clear
+    # of the building all the way round — measured at a 0.9 m eave and a 0.8
+    # pitch, 0.72 m of daylight under the roof. The overhang hangs below the
+    # wall top, which is what an overhang does.
+    hang = slope * eave
 
     def to_local(x: float, y: float) -> tuple[float, float]:
         dx, dy = x - cx, y - cy
@@ -551,14 +557,14 @@ def pitched_roof(polygon, top_z: float, form: str, *, pitch: float = 0.45,
     # Each eave edge lifts the roof as it is left behind. A gable has two, a
     # hip has four, a mono-pitch has one that carries the whole width.
     if form == "mono":
-        planes = [(0.0, slope, slope * half_w)]  # h = slope * (v + half_w)
+        planes = [(0.0, slope, slope * half_w - hang)]
         creases: list[tuple[float, float, float]] = []
     elif form == "gable":
-        planes = [(0.0, -slope, slope * half_w), (0.0, slope, slope * half_w)]
+        planes = [(0.0, -slope, slope * half_w - hang), (0.0, slope, slope * half_w - hang)]
         creases = [(0.0, 1.0, 0.0)]  # v = 0
     else:  # hip
-        planes = [(0.0, -slope, slope * half_w), (0.0, slope, slope * half_w),
-                  (-slope, 0.0, slope * half_l), (slope, 0.0, slope * half_l)]
+        planes = [(0.0, -slope, slope * half_w - hang), (0.0, slope, slope * half_w - hang),
+                  (-slope, 0.0, slope * half_l - hang), (slope, 0.0, slope * half_l - hang)]
         offset = half_l - half_w
         creases = [(0.0, 1.0, 0.0),
                    (1.0, -1.0, -offset), (1.0, 1.0, -offset),
@@ -596,7 +602,8 @@ def pitched_roof(polygon, top_z: float, form: str, *, pitch: float = 0.45,
             for u, v in ordered:
                 x, y = to_world(u, v)
                 face.append(len(vertices))
-                vertices.append((x, y, top_z + max(0.0, a * u + b * v + c)))
+                # Not clamped at the wall top: the eave hangs below it.
+                vertices.append((x, y, top_z + a * u + b * v + c))
             if len(set(face)) == 3:
                 faces.append(face)
 

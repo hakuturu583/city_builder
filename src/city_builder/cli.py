@@ -514,6 +514,80 @@ def drive_command(input_path, scene_path, output_path, quiet, **kwargs):
         click.echo(f"wrote {written}")
 
 
+@main.command("rebuild")
+@click.option("--input", "input_path", required=True, help="Lanelet2 HD map (.osm)")
+@click.option("--out-dir", required=True, help="Where the models and the ledger go")
+@click.option("--config", "config_path", default=None, help="A city_builder config YAML")
+@click.option("--facade-dir", default=None,
+              help="Painted sheets; the massing is photographed wearing them")
+@click.option("--roof-texture", default=None, help="A roof tile — a 3/4 view is mostly roof")
+@click.option("--roof-tile-metres", type=float, default=0.45)
+@click.option("--ground-texture", default=None)
+@click.option("--road-texture", default=None)
+@click.option("--min-area", type=float, default=0.0, help="Skip plots smaller than this (m2)")
+@click.option("--limit", type=int, default=0, help="Only the N biggest; 0 for all of them")
+@click.option("--brush-up", type=float, default=0.6,
+              help="How far an image model may re-imagine the massing before it is "
+                   "modelled. 0 skips it; this is the photorealism dial")
+@click.option("--resolution", type=click.Choice(["512", "1024", "1024_cascade"]),
+              default="512")
+@click.option("--keep-below", type=float, default=0.80,
+              help="Footprint IoU under which a reconstruction is not used")
+@click.option("--seed", type=int, default=0)
+@click.option("--blend", default=None, help="Also write the placed scene as a .blend")
+@click.option("--glb", default=None, help="Also write the placed scene as a .glb")
+@click.option("--no-resume", is_flag=True, help="Model every building again")
+@click.option("--quiet", is_flag=True)
+def rebuild_command(input_path, out_dir, config_path, facade_dir, roof_texture,
+                    roof_tile_metres, ground_texture, road_texture, min_area, limit,
+                    brush_up, resolution, keep_below, seed, blend, glb, no_resume, quiet):
+    """Replace a map's procedural massing with reconstructed buildings.
+
+    One 3D model per plot: the massing is photographed, an image model brushes
+    the picture up, a reconstruction model turns it into a textured mesh, and
+    the plot's own footprint decides the yaw, the scale and where it stands.
+    About twenty-five seconds a building on one card, and it resumes — an hour
+    of GPU is long enough that something will interrupt it.
+
+    A reconstruction that comes back as a different building is not used: below
+    `--keep-below` the plot keeps its procedural massing, which is a poor
+    building but the right shape. The ledger records every fit either way.
+
+    **Needs a GPU, TRELLIS.2 and its CUDA extensions.** See the README.
+    """
+    from . import district, scenes
+    from .build import build_city_from_config
+    from .config import CityConfig
+
+    config = CityConfig.from_yaml(config_path) if config_path else CityConfig()
+    result = build_city_from_config(input_path, config, buildings=True, verbose=not quiet)
+    scene = scenes.Scene("rebuild", input_path, result, buildings=True,
+                         options=config.to_dict())
+
+    summary = district.rebuild(
+        scene, out_dir, min_area=min_area, limit=limit, facade_dir=facade_dir,
+        roof_texture=roof_texture, roof_tile_metres=roof_tile_metres,
+        brush_up=brush_up, resolution=resolution, seed=seed, keep_below=keep_below,
+        resume=not no_resume, marking_options=config.markings, verbose=not quiet)
+    click.echo(f"\n{summary['used']} of {summary['attempted']} buildings rebuilt; "
+               f"footprint IoU mean {summary['footprint_iou']['mean']}, "
+               f"min {summary['footprint_iou']['min']}")
+
+    if blend or glb:
+        district.place(scene, os.path.join(out_dir, "district.json"),
+                       facade_dir=facade_dir, roof_texture=roof_texture,
+                       roof_tile_metres=roof_tile_metres, ground_texture=ground_texture,
+                       road_texture=road_texture, marking_options=config.markings,
+                       verbose=not quiet)
+        from . import scene as scene_module
+        if blend:
+            scene_module.save(blend)
+            click.echo(f"wrote {blend}")
+        if glb:
+            scene_module.export_glb(glb)
+            click.echo(f"wrote {glb}")
+
+
 @main.command("config")
 @click.option("--output", "output_path", default=None, help="Write the defaults to this YAML file")
 @click.option("--check", "check_path", default=None, help="Load this config and report what it sets")

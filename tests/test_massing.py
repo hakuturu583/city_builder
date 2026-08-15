@@ -164,14 +164,16 @@ def test_a_form_nobody_builds_is_refused():
 
 @pytest.mark.parametrize("form", ["gable", "hip", "mono"])
 @pytest.mark.parametrize("angle", [0.0, 37.0, 90.0])
-def test_the_ridge_is_the_pitch_above_the_eave(form, angle):
+def test_the_pitch_is_measured_from_the_wall_and_not_from_the_eave(form, angle):
+    """The overhang is below the wall top, so the ridge is over the *span*."""
     eave, pitch, top = 0.7, 0.5, 10.0
     mesh = pitched_roof(_rect(30.0, 18.0, angle), top, form, pitch=pitch, eave=eave)
     heights = [v[2] for v in mesh.vertices]
-    rise = pitch * (18.0 / 2 + eave)
-    assert min(heights) == pytest.approx(top)
+    rise = pitch * (18.0 / 2)
+    assert min(heights) == pytest.approx(top - pitch * eave)
     # mono carries the whole span on one slope, so it rises twice as far.
-    assert max(heights) == pytest.approx(top + (2 * rise if form == "mono" else rise))
+    assert max(heights) == pytest.approx(top + (2 * rise if form == "mono" else rise)
+                                         + (pitch * eave if form == "mono" else 0.0))
 
 
 @pytest.mark.parametrize("form", ["gable", "hip", "mono"])
@@ -258,3 +260,52 @@ def test_a_gable_has_one_ridge_and_a_hip_has_a_shorter_one():
         ridge = [v for v in mesh.vertices if math.isclose(v[2], top, abs_tol=1e-6)]
         spans[form] = max(math.dist(a[:2], b[:2]) for a in ridge for b in ridge)
     assert spans["hip"] < spans["gable"]
+
+
+def test_the_roof_meets_the_wall_it_sits_on():
+    """Where "the roof is floating" came from.
+
+    The eave edge was put at the wall top, so the roof plane — which rises
+    inward from the eave — stood `pitch * eave` clear of the building all the
+    way round: at a 0.9 m eave and a 0.8 pitch, 0.72 m of daylight under it.
+    The plane has to pass through the *wall* top and the overhang hang below.
+    """
+
+    plan_shape = ShapelyPolygon([(0, 0), (30, 0), (30, 18), (0, 18)])
+    for form in ("gable", "hip", "mono"):
+        mesh = pitched_roof(plan_shape, 10.0, form, pitch=0.8, eave=0.9)
+        faces = [ShapelyPolygon([(mesh.vertices[i][0], mesh.vertices[i][1]) for i in face])
+                 for face in mesh.faces]
+        # Over the wall the roof has an eave on: the long sides for a gable or
+        # a mono-pitch, all four for a hip. A gable *end* is a wall the roof
+        # rises over, not an eave.
+        probes = ((15.0, 0.0), (15.0, 18.0))
+        if form == "hip":
+            probes += ((0.0, 9.0), (30.0, 9.0))
+        for probe in probes:
+            height = _height_at(mesh, faces, probe)
+            assert height is not None, f"{form}: no roof over the wall at {probe}"
+            # A mono-pitch meets one wall at the top and climbs over the other.
+            want = 10.0 if form != "mono" or probe[1] < 9.0 else 10.0 + 0.8 * 18.0
+            assert height == pytest.approx(want, abs=0.02), (
+                f"{form}: the roof is {height - want:+.2f} m off the wall at {probe}")
+        # And the eave really does hang below it.
+        assert min(v[2] for v in mesh.vertices) < 10.0
+
+
+def _height_at(mesh, faces, point):
+    """Barycentric interpolation of the roof over one plan position."""
+    from shapely.geometry import Point
+
+    spot = Point(point)
+    for face, shape in zip(mesh.faces, faces):
+        if not shape.buffer(1e-6).contains(spot):
+            continue
+        (x1, y1, z1), (x2, y2, z2), (x3, y3, z3) = (mesh.vertices[i] for i in face[:3])
+        det = (y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3)
+        if abs(det) < 1e-12:
+            continue
+        a = ((y2 - y3) * (point[0] - x3) + (x3 - x2) * (point[1] - y3)) / det
+        b = ((y3 - y1) * (point[0] - x3) + (x1 - x3) * (point[1] - y3)) / det
+        return a * z1 + b * z2 + (1 - a - b) * z3
+    return None
