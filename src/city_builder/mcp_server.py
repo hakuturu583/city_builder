@@ -778,10 +778,11 @@ def render_orbit(
     out_dir: Annotated[str, Field(description="Directory for the clip, the masks and the plan")],
     frames: Annotated[int, Field(description="Must be 5, 22, 39, 56 … (17k+5). 56 and 124 "
                                              "are the ones that quarter exactly")] = 56,
-    neighbours: Annotated[Literal["clear", "keep", "hide"],
-                          Field(description="clear: empty the disc the camera flies over. "
-                                            "keep: leave the block standing. "
-                                            "hide: this building alone")] = "clear",
+    neighbours: Annotated[Literal["hide", "clear", "keep"],
+                          Field(description="Which other buildings stand. hide: none. "
+                                            "clear: only those outside the camera's disc. "
+                                            "keep: all of them. The road and the ground "
+                                            "stay whatever this says")] = "hide",
     elevation: Annotated[float, Field(description="Degrees above the horizon")] = 12.0,
     facade_dir: Annotated[str | None, Field(description="Facade sheets to dress it with")] = None,
     width: Annotated[int, Field(description="Pixels, multiple of 32")] = 832,
@@ -798,12 +799,17 @@ def render_orbit(
     the count, so only 56 and 124 land a frame exactly on each of the four
     cardinal views a multiview reconstruction wants. 56 is the cheap one.
 
-    `neighbours` was decided by measurement, not taste. With the block left
-    standing, the camera flies at the framing distance — which is inside the
-    next block — and 29 of 56 frames saw no part of the subject at all. `clear`
-    empties the disc every sightline lies inside and leaves the rest of the
-    city standing: measured on the same scene, the subject was in all 56 frames
-    at the same size as if it stood alone, with 37 of 53 neighbours still there.
+    `neighbours` takes out the other *buildings* only — the road surface and
+    the ground always stay, because they are what tells the video model what
+    kind of place this is and the only thing in frame that says how big the
+    building is. The default takes out all of them: every other building in the
+    clip is one the reconstruction has to be told to ignore.
+
+    Leaving them standing is measurably worse than it sounds. The camera flies
+    at the framing distance, which on a procedural block is inside the next
+    block, and 24 of 56 frames saw no part of the subject at all. `clear` is
+    the middle: it empties only the disc every sightline lies inside, so the
+    view cannot be blocked while the far city still stands.
 
     Answers with the four quadrant views, because whether the building reads as
     a building is not something the numbers can tell you.

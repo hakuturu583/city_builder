@@ -207,24 +207,24 @@ class OrbitOptions:
     samples: int = 24
     fps: int = 24  # for looking at the clip; the model counts frames, not seconds
 
-    # What the subject stands among, and the one setting here that was decided
-    # by measurement rather than by argument.
+    # Which *buildings* stand besides the subject. The road and the ground are
+    # never touched by any of these: they are what tells the video model what
+    # kind of place this is, and they are also the only thing in frame that
+    # says how big the building is.
     #
-    # `keep` leaves the whole block standing and merely forbids editing it,
-    # which is what a video model wants — a lone building on empty ground is
-    # not a street, and the further the frame is from anything H3 has seen the
-    # worse the part inside the mask comes out too. Measured on a procedural
-    # block at 0.6 coverage, it is also unusable: the camera flies at the
-    # framing distance, which puts it *inside the next block*, and 29 of 56
-    # frames saw no part of the subject at all.
+    # `hide` — the default — leaves the subject alone on the street. Every
+    # other building in the clip is a building the reconstruction has to be
+    # told to ignore, and the mask is a per-pixel instruction that a model
+    # follows approximately; removing them is the version that cannot go wrong.
     #
-    # `clear` is that measurement's answer. The camera looks from a ring of
-    # radius `distance * cos(elevation)` at the middle of that ring, so every
-    # sightline it ever has lies inside that disc; empty the disc of everything
-    # but the subject and the view cannot be blocked, while the rest of the
-    # city still stands behind it. `hide` empties the map instead, and is here
-    # because a reconstruction of one building is what nominally wants it.
-    neighbours: str = "clear"
+    # `keep` leaves the whole block standing and merely forbids editing it.
+    # Measured on a procedural block at 0.6 coverage it is unusable anyway: the
+    # camera flies at the framing distance, which is inside the next block, and
+    # 24 of 56 frames saw no part of the subject at all. `clear` is the middle
+    # — the camera looks from a ring of radius `distance * cos(elevation)` at
+    # the middle of that ring, so every sightline lies inside that disc; empty
+    # the disc and the view cannot be blocked while the far city still stands.
+    neighbours: str = "hide"
 
     def __post_init__(self) -> None:
         if self.neighbours not in ("keep", "clear", "hide"):
@@ -495,8 +495,8 @@ def _render_orbit(scene, building: int, out_dir: str, *, options: OrbitOptions,
     if not any(obj.type == "LIGHT" for obj in bpy.data.objects):
         scene_module.sunlit()
 
-    # Who else is standing. `hide` takes everyone, `clear` takes whoever could
-    # come between the camera and the subject, `keep` takes nobody.
+    # Which other buildings come out. Only buildings: Ground and Roads are not
+    # in this loop, so the street the subject stands on survives every mode.
     plots = scene.result.plots
     if options.neighbours == "hide":
         removed = [i for i in range(len(plots)) if i != building]

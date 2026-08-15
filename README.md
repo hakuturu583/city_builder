@@ -845,28 +845,27 @@ framing it left the subject **13 % of the frame**, about a hundred pixels of
 building for a reconstruction to work from. The cylinder puts it at **27–32 %**
 of the same frame.
 
-**What the subject stands among**, and this one was decided by measurement:
+**What the subject stands among.** `neighbours` takes out other *buildings*;
+the carriageway and the ground stay whatever it says, because they are what
+tells the video model what kind of place this is and the only thing in frame
+that states how big the building is. The default takes out every other
+building: each one left in the clip is a building the reconstruction has to be
+told to ignore, and a mask is an instruction a model follows approximately.
 
-| `neighbours` | frames of 56 that saw the building | neighbours left standing |
+| `neighbours` | buildings standing | frames of 56 that saw the subject |
 |---|---|---|
-| `keep` | **24** | 53 |
-| `clear` | 56 | 40 |
-| `hide` | 56 | 0 |
+| `hide` (default) | the subject alone | 56 |
+| `clear` | 40 of 53 | 56 |
+| `keep` | all 53 | **24** |
 
-Leaving the block standing is what a video model wants — a lone building on
-empty ground is not a street, and the further the frame is from anything H3 has
-seen, the worse the part *inside* the mask comes out too. It is also unusable:
-the camera flies at the framing distance, which on a procedural block at 0.6
-coverage is inside the next block, and more than half the orbit saw no part of
-the subject at all.
-
-`clear` is that measurement's answer. The camera looks at the middle of a ring
-of radius `distance · cos(elevation)` from a point on it, so every sightline it
-ever has lies inside that disc; empty the disc of everything but the subject
-and the view *cannot* be blocked, whatever the elevation and whatever the
-frame. Measured on the same scene it gives exactly what `hide` gives — the
-subject in all 56 frames, at the same size — with three quarters of the city
-still standing behind it.
+`keep` is what a video model would prefer — a lone building on empty ground is
+not a street — and it is unusable: the camera flies at the framing distance,
+which on a procedural block at 0.6 coverage is inside the next block, so more
+than half the orbit saw no part of the subject at all. `clear` is the middle,
+and the reason it works is exact rather than tuned: the camera looks at the
+centre of a ring of radius `distance · cos(elevation)` from a point on it, so
+every sightline it ever has lies inside that disc. Empty the disc and the view
+*cannot* be blocked, whatever the elevation and whatever the frame.
 
 The mask is **rendered, not projected**. Projecting the footprint gets the
 silhouette wrong wherever anything stands in front of the building, and

@@ -204,7 +204,10 @@ def test_a_resolution_the_refinement_cannot_take_is_refused():
         orbit.OrbitOptions(width=830)
 
 
-def test_neighbours_has_three_values():
+def test_neighbours_has_three_values_and_defaults_to_the_subject_alone():
+    # Only buildings: the road and the ground are what tells the video model
+    # what kind of place this is, and no mode takes them out.
+    assert orbit.OrbitOptions().neighbours == "hide"
     for mode in ("keep", "clear", "hide"):
         assert orbit.OrbitOptions(neighbours=mode).neighbours == mode
     with pytest.raises(ValueError, match="keep"):
