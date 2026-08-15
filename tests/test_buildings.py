@@ -169,6 +169,26 @@ def test_generate_stands_every_building_on_the_ground():
         assert max(wall_z) == pytest.approx(12.0 + record["height"])
 
 
+def test_every_record_carries_the_plot_it_was_built_on():
+    """The footprint is the only statement of scale anything downstream has.
+
+    A mesh reconstructed from footage of this building comes back normalised
+    into a unit cube; this ring is what puts it back at the size it was.
+    """
+    hm = _flat_heightmap(12.0)
+    result = B.generate(hm, _cross_roads(), B.BuildingOptions(seed=5), bounds=(0, 0, 200, 200))
+
+    for walls, record in zip(result["Buildings"], result["plots"]):
+        ring = record["footprint"]
+        assert len(ring) >= 3
+        assert ring[0] != ring[-1], "the ring is not closed; the last point would be a duplicate"
+        assert ShapelyPolygon(ring).area == pytest.approx(record["area"], rel=1e-3)
+        # The same plan the walls were extruded from, to the millimetre it was
+        # rounded to.
+        plan = {(round(x, 3), round(y, 3)) for x, y, _ in walls.vertices}
+        assert {(x, y) for x, y in ring} <= plan
+
+
 def test_generate_returns_nothing_when_there_is_no_room():
     hm = _flat_heightmap()
     covered = box(-10, -10, 210, 210)
