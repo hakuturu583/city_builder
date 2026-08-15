@@ -294,10 +294,18 @@ def restyle(image_path: str, path: str, prompt: str = VARIED_STYLE,
     composited = flat[..., :3] * alpha + np.array(options.backdrop, dtype=np.float32) * (1 - alpha)
     start = PILImage.fromarray(composited.astype(np.uint8))
 
-    pipeline = AutoPipelineForImage2Image.from_pretrained(
-        options.model, torch_dtype=torch.float16, variant="fp16", use_safetensors=True)
-    pipeline.set_progress_bar_config(disable=True)
-    pipeline.enable_model_cpu_offload()
+    # Kept between calls. Loading it is ten seconds and a street is two hundred
+    # buildings, so reloading per building spends half an hour doing nothing.
+    # Keyed on the weights, so asking for a different model still gets one.
+    global _RESTYLE
+    if _RESTYLE is None or _RESTYLE[0] != options.model:
+        pipeline = AutoPipelineForImage2Image.from_pretrained(
+            options.model, torch_dtype=torch.float16, variant="fp16",
+            use_safetensors=True)
+        pipeline.set_progress_bar_config(disable=True)
+        pipeline.enable_model_cpu_offload()
+        _RESTYLE = (options.model, pipeline)
+    pipeline = _RESTYLE[1]
 
     image = pipeline(
         prompt=prompt, negative_prompt=options.negative, image=start,
@@ -306,7 +314,6 @@ def restyle(image_path: str, path: str, prompt: str = VARIED_STYLE,
         generator=torch.Generator(device="cpu").manual_seed(options.seed),
     ).images[0]
 
-    del pipeline
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
@@ -360,6 +367,7 @@ class MeshOptions:
 
 
 _PIPELINE: Any = None
+_RESTYLE: tuple[str, Any] | None = None
 
 
 def _pipeline(options: MeshOptions):
