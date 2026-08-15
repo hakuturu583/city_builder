@@ -75,6 +75,12 @@ class SurfaceOptions:
     crosswalk_stripes: bool = True
     curbs: bool = True
 
+    # Drawn across a crossing lanelet when the map carries no
+    # `pedestrian_marking` rings of its own. Japanese practice is a 45 cm bar
+    # with a gap about the same, which is what these default to.
+    zebra_bar_width: float = 0.45
+    zebra_bar_gap: float = 0.50
+
 
 def _bias(shapes, amount: float, jitter: float = 0.0) -> None:
     for shape in shapes:
@@ -178,7 +184,70 @@ def extract(
             if widened:
                 groups["LaneMarkings"].append(Ribbon(linestring.id, widened[0], widened[1], attrs))
 
+    if options.crosswalk_stripes and groups["Crosswalks"] and not groups["CrosswalkStripes"]:
+        # The map says where people cross and not what it looks like. Autoware
+        # maps often carry the crossing as a lanelet and no `pedestrian_marking`
+        # rings at all — measured on the Kashiwanoha map, four crossings and
+        # zero bars — and the baking pass then removes the crossing surface on
+        # the grounds that its paint is in the road texture, where there is
+        # none. The crossing disappears from a scene whose own map inspector
+        # reported it.
+        #
+        # So the bars are drawn across the crossing instead. It is the same
+        # claim the rest of this package makes about buildings: the map does
+        # not say, so what is generated is the plainest thing consistent with
+        # what it does say.
+        for crossing in groups["Crosswalks"]:
+            groups["CrosswalkStripes"].extend(zebra_bars(crossing, options))
+
     for name, shapes in groups.items():
         _bias(shapes, Z_BIAS[name], options.z_fight_bias if name in JITTERED else 0.0)
 
     return {name: shapes for name, shapes in groups.items() if shapes}
+
+
+def zebra_bars(crossing, options: SurfaceOptions | None = None) -> list:
+    """Bars across a crossing lanelet, for a map that has none of its own.
+
+    A crossing lanelet is a ribbon whose two boundaries run along the kerbs,
+    so the direction people walk is *across* it: the bars run from one boundary
+    to the other, spaced along its length. Which is why this can be built at
+    all — the lanelet already carries the orientation the paint needs.
+    """
+    import numpy as np
+
+    options = options or SurfaceOptions()
+    left = np.asarray(crossing.left, dtype=float)
+    right = np.asarray(crossing.right, dtype=float)
+    if len(left) < 2 or len(left) != len(right):
+        return []
+
+    middle = (left + right) / 2.0
+    run = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(middle[:, :2], axis=0),
+                                                          axis=1))])
+    length = float(run[-1])
+    if length < options.zebra_bar_width * 2:
+        return []
+
+    step = options.zebra_bar_width + options.zebra_bar_gap
+    # Centred, so the crossing has paint at both ends rather than a bar flush
+    # against one kerb and a gap at the other.
+    count = max(1, int((length + options.zebra_bar_gap) // step))
+    margin = (length - (count * step - options.zebra_bar_gap)) / 2.0
+
+    def edge(distance: float):
+        at = float(np.clip(distance, 0.0, length))
+        index = int(np.searchsorted(run, at, side="right") - 1)
+        index = min(max(index, 0), len(run) - 2)
+        span = run[index + 1] - run[index]
+        t = 0.0 if span <= 0 else (at - run[index]) / span
+        return (left[index] + (left[index + 1] - left[index]) * t,
+                right[index] + (right[index + 1] - right[index]) * t)
+
+    bars = []
+    for i in range(count):
+        start = margin + i * step
+        (l0, r0), (l1, r1) = edge(start), edge(start + options.zebra_bar_width)
+        ring = [tuple(l0), tuple(r0), tuple(r1), tuple(l1)]
+        bars.append(Polygon(crossing.id * 1000 + i, ring, dict(crossing.attributes)))
+    return bars
