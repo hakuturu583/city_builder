@@ -227,6 +227,10 @@ def make_layouts(
     floors: Annotated[str, Field(description="Floor counts, e.g. '2-8' or '4,6,9'")] = "2-8",
     variants: Annotated[int, Field(description="Structurally different layouts per floor count")] = 3,
     facade_width: Annotated[float, Field(description="Wall one sheet spans (m)")] = 12.0,
+    kind: Annotated[Literal["commercial", "house"],
+                    Field(description="What the ground floor is. commercial puts a shop "
+                                      "there; house puts the same window as every other "
+                                      "floor")] = "commercial",
 ) -> dict[str, Any]:
     """Draw facade layouts and their control images. Seconds, no GPU.
 
@@ -237,6 +241,12 @@ def make_layouts(
     The sheets this writes are plain stand-ins — correct, not photographic —
     and a scene can be exported with them as they are. `generate_facades` turns
     the control images into painted ones.
+
+    `kind` matters more than it sounds on a street of houses. The commercial
+    numbers were written for a mid-rise and are absurd applied to a two-storey
+    house: the shop takes nearly two thirds of the building's height and glazes
+    almost the whole of it, which is where "the windows are enormous" comes
+    from. `house` gives every floor the same opening and a narrower bay.
     """
     import random
 
@@ -268,7 +278,7 @@ def make_layouts(
     for count in sorted(set(counts)):
         for variant in range(variants):
             rng = random.Random(1000 * count + variant)
-            layout = sample_layout(count, rng, facade_width=facade_width)
+            layout = sample_layout(count, rng, facade_width=facade_width, kind=kind)
             width, height = layout.pixel_size()
             save_tile(control_image(layout, width, height),
                       os.path.join(control_dir, sheet_name(count, variant, "control")))
