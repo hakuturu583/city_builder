@@ -72,6 +72,16 @@ class BuildingOptions:
     plinth_height: float = 0.35
     plinth_proud: float = 0.12
 
+    # How much of the lot's street side is left unbuilt — the parking space, the
+    # bicycle, the strip of gravel. Taken off before the coverage inset, so the
+    # building goes to the back of its lot rather than sitting in the middle of
+    # it with an even gap all round.
+    frontage: float = 3.5
+    # How far a lot may be from the nearest road and still be built on. A real
+    # map's roads cover a fraction of the ground, and filling the rest of the
+    # bounding box puts houses where nothing can reach them.
+    max_road_distance: float = 45.0
+
     max_buildings: int = 0  # 0 = unlimited
     seed: int = 0
 
@@ -200,6 +210,57 @@ def inset_to_coverage(lot, coverage: float, minimum_margin: float):
     return lot.buffer(-high)
 
 
+def give_up_the_frontage(lot, road_union, depth: float):
+    """Take a strip off the street side of a lot, so the building stands back.
+
+    Insetting a lot to its coverage ratio shrinks it towards its own middle,
+    which leaves the same thin gap on all four sides — and a street of those
+    reads as one continuous wall with slots in it. A real lot is not used that
+    way: the building goes to the back and the front is a yard, a parking space
+    or a bicycle. So the frontage is taken off *before* the coverage inset, on
+    whichever side is nearest the road.
+
+    Which side that is has to be asked rather than assumed: a corner plot faces
+    two streets and a plot behind another faces none.
+    """
+    from shapely.geometry import LineString
+    from shapely.ops import nearest_points
+    from shapely.ops import split as shapely_split
+
+    if road_union is None or depth <= 0.0:
+        return lot
+    here, there = nearest_points(lot.centroid, road_union)
+    towards = np.array([there.x - here.x, there.y - here.y])
+    reach = float(np.linalg.norm(towards))
+    if reach < 1e-6:
+        return lot
+    towards /= reach
+
+    # The cut runs across that direction, `depth` back from the street-most
+    # point of the lot.
+    corners = np.asarray(lot.exterior.coords)[:, :2]
+    front = corners @ towards
+    # Never more than a third of the lot's own depth. A fixed frontage on a
+    # small lot leaves nothing to build on — measured, a 3.5 m strip took a
+    # street of 238 houses down to 165, because the remainder fell below the
+    # minimum after the coverage inset.
+    depth = min(depth, (front.max() - front.min()) / 3.0)
+    at = front.max() - depth
+    origin = np.array([here.x, here.y]) + towards * (at - here.x * towards[0]
+                                                     - here.y * towards[1])
+    across = np.array([-towards[1], towards[0]])
+    span = lot.length + reach
+    knife = LineString([tuple(origin - across * span), tuple(origin + across * span)])
+    try:
+        pieces = [p for p in shapely_split(lot, knife).geoms if p.area > 1.0]
+    except (GEOSException, ValueError):  # pragma: no cover - degenerate cut
+        return lot
+    if len(pieces) < 2:
+        return lot
+    # Keep the piece furthest from the road: that is the back of the lot.
+    return max(pieces, key=lambda p: -(np.asarray(p.centroid.coords)[0] @ towards))
+
+
 def footprints(
     road_union,
     bounds,
@@ -216,11 +277,34 @@ def footprints(
                 continue
             if options.vacancy and rng.random() < options.vacancy:
                 continue  # left as open ground
-            plot = inset_to_coverage(lot, options.coverage, options.lot_margin)
-            parts = list(plot.geoms) if hasattr(plot, "geoms") else [plot]
-            for part in parts:
-                if part.geom_type == "Polygon" and part.area >= options.min_lot_area * 0.5:
-                    plots.append(part)
+            # A building nobody can reach is a building that is not there. On a
+            # real map the roads cover a fraction of the ground, and filling
+            # the rest of the bounding box puts houses in the middle of fields.
+            if (road_union is not None and options.max_road_distance > 0
+                    and lot.distance(road_union) > options.max_road_distance):
+                continue
+            floor = options.min_lot_area * 0.5
+
+            def built(on, whole=lot, options=options):
+                # `coverage` is the share of *the lot* that is built, so a
+                # frontage already given up counts towards it: insetting the
+                # remainder by the same ratio again would charge for it twice.
+                share = min(1.0, whole.area * options.coverage / max(on.area, 1e-9))
+                shape = inset_to_coverage(on, share, options.lot_margin)
+                parts = shape.geoms if hasattr(shape, "geoms") else [shape]
+                return [p for p in parts
+                        if p.geom_type == "Polygon" and p.area >= options.min_lot_area * 0.5]
+
+            standing = give_up_the_frontage(lot, road_union,
+                                            options.frontage * rng.uniform(0.7, 1.3))
+            made = built(standing) if standing.area >= floor else []
+            if not made:
+                # A lot too small to afford both a frontage and a house builds
+                # to the street, which is what a narrow urban lot does. Tried
+                # rather than predicted: measured, refusing the frontage only
+                # after it fails keeps 236 of 238 houses instead of 167.
+                made = built(lot)
+            plots.extend(made)
 
     if options.max_buildings and len(plots) > options.max_buildings:
         plots.sort(key=lambda p: p.area, reverse=True)

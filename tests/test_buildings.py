@@ -335,3 +335,60 @@ def test_the_plinth_can_be_turned_off():
     with_base = B.generate(hm, _cross_roads(), B.BuildingOptions(seed=5),
                            bounds=(0, 0, 200, 200))
     assert len(result["Buildings"][0].faces) < len(with_base["Buildings"][0].faces)
+
+
+# --- how much of the lot is used ---------------------------------------------
+
+
+def test_a_building_stands_back_from_the_street_it_faces():
+    """Insetting to coverage leaves the same gap on all four sides.
+
+    A street of those reads as one continuous wall with slots in it. A real lot
+    puts the building at the back and the front is a yard or a parking space.
+    """
+    roads = _cross_roads()
+    options = {"seed": 5, "target_lot_area": 200.0, "min_lot_area": 70.0,
+               "max_road_distance": 0.0}
+    flush = B.footprints(roads, (0, 0, 200, 200), B.BuildingOptions(frontage=0.0, **options))
+    stood_back = B.footprints(roads, (0, 0, 200, 200), B.BuildingOptions(frontage=3.5, **options))
+
+    def frontline(plots):
+        near = [p.distance(roads) for p in plots if p.distance(roads) < 25]
+        return sorted(near)[len(near) // 2]
+
+    assert frontline(stood_back) > frontline(flush) + 2.0
+    # And without losing the street: a lot too small for both a frontage and a
+    # house builds to the street rather than not at all.
+    assert len(stood_back) == len(flush)
+
+
+def test_a_lot_nothing_can_reach_is_not_built_on():
+    roads = _cross_roads()
+    options = {"seed": 5, "target_lot_area": 200.0, "min_lot_area": 70.0,
+               "frontage": 0.0}
+    everywhere = B.footprints(roads, (0, 0, 200, 200),
+                              B.BuildingOptions(max_road_distance=0.0, **options))
+    reachable = B.footprints(roads, (0, 0, 200, 200),
+                             B.BuildingOptions(max_road_distance=30.0, **options))
+    assert len(reachable) < len(everywhere)
+    # The limit is on the *lot*; the building then sits inside it, and the
+    # coverage inset moves it a metre or two further from the street.
+    assert max(p.distance(roads) for p in reachable) <= 30.0 + 3.0
+
+
+def test_the_frontage_is_taken_off_the_side_the_road_is_on():
+    from shapely.geometry import box as shapely_box
+
+    lot = shapely_box(0, 0, 20, 20)
+    road = shapely_box(-10, -6, 30, -1)  # to the south
+    back = B.give_up_the_frontage(lot, road, 5.0)
+    assert back.area < lot.area
+    assert back.centroid.y > lot.centroid.y, "the building moved towards the road"
+
+
+def test_a_lot_with_no_road_keeps_all_of_itself():
+    from shapely.geometry import box as shapely_box
+
+    lot = shapely_box(0, 0, 20, 20)
+    assert B.give_up_the_frontage(lot, None, 5.0) is lot
+    assert B.give_up_the_frontage(lot, shapely_box(-10, -6, 30, -1), 0.0) is lot
