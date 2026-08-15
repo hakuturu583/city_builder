@@ -818,6 +818,69 @@ and should be zero; the rest are *openings*. Levels are judged separately,
 since a viaduct and the street beneath it share a plan view, and a single union
 would call the ground beside the deck a hole through it.
 
+### One building, all the way round
+
+`render_drive` looks at the street. `render_orbit` looks at **one building**,
+because what sits downstream of it is not a texturing pass but a
+reconstruction: a video model makes the procedural block photoreal, a mesh
+model turns that footage back into geometry, and the footprint puts the result
+back at the right size. It writes three things — `orbit.mp4`, a `mask/` PNG per
+frame, and `orbit.json` with the camera geometry and the footprint.
+
+Three decisions, none of them free.
+
+**The frame count.** H3 counts in 17k+5 and a closed turn divides 360° by the
+frame count, so only the counts that are *also* a multiple of four land a frame
+exactly on each cardinal azimuth — the four views a multiview reconstruction is
+conditioned on. That is 56, 124, 192 and nothing else under 200. Asking for
+"about ninety" and getting 90 would put the quadrants at frame 22.5;
+`snap_frames` picks 56.
+
+**The framing distance.** The subject is the *cylinder* that contains it, which
+is the right envelope precisely because the camera goes all the way round — a
+cylinder looks the same from every azimuth, so one distance holds for the whole
+orbit. The bounding sphere is a line of arithmetic shorter and much too far
+back: the sphere round a wide, low building is as wide as the building, and
+framing it left the subject **13 % of the frame**, about a hundred pixels of
+building for a reconstruction to work from. The cylinder puts it at **27–32 %**
+of the same frame.
+
+**What the subject stands among**, and this one was decided by measurement:
+
+| `neighbours` | frames of 56 that saw the building | neighbours left standing |
+|---|---|---|
+| `keep` | **24** | 53 |
+| `clear` | 56 | 40 |
+| `hide` | 56 | 0 |
+
+Leaving the block standing is what a video model wants — a lone building on
+empty ground is not a street, and the further the frame is from anything H3 has
+seen, the worse the part *inside* the mask comes out too. It is also unusable:
+the camera flies at the framing distance, which on a procedural block at 0.6
+coverage is inside the next block, and more than half the orbit saw no part of
+the subject at all.
+
+`clear` is that measurement's answer. The camera looks at the middle of a ring
+of radius `distance · cos(elevation)` from a point on it, so every sightline it
+ever has lies inside that disc; empty the disc of everything but the subject
+and the view *cannot* be blocked, whatever the elevation and whatever the
+frame. Measured on the same scene it gives exactly what `hide` gives — the
+subject in all 56 frames, at the same size — with three quarters of the city
+still standing behind it.
+
+The mask is **rendered, not projected**. Projecting the footprint gets the
+silhouette wrong wherever anything stands in front of the building, and
+something always does. A second EEVEE pass over the same camera keys, subject
+white and everything else black, is right by construction, occlusion included —
+emission materials, a black world and the Standard view transform, so white
+comes back at 1.0 and nobody downstream has to guess a threshold.
+
+That matters because of where the mask is used. An H3 latent is
+`[B,24,T,H/16,W/16]`: a mask for it has to be reduced 16-fold in space and
+folded in time by the same non-uniform grouping `_pixel_frames` uses — not by a
+stride. That reduction belongs to the sampler; what belongs here is a mask that
+is exact at pixel scale and frame-aligned with the clip it describes.
+
 ### Where the model weights live
 
 The weights are **downloaded, not shipped** — about 3 GB for the SD1.5 stack,

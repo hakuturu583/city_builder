@@ -54,7 +54,10 @@ def _server():
             "refine_render takes a drive rendered from a scene and makes it photoreal "
             "with a video model, keeping the geometry. Its frames are reference for a "
             "second pass at the textures, which is the loop: build, render, refine, "
-            "re-texture."
+            "re-texture.\n\n"
+            "To work on one building rather than the street: list_buildings says which "
+            "are worth the time, render_orbit circles one and masks it, and the clip it "
+            "writes is what refine_render takes."
         ),
     )
 
@@ -726,6 +729,112 @@ def render_drive(
         "bytes": os.path.getsize(written),
         "took_seconds": round(time.time() - started, 1),
     }
+
+
+@server.tool()
+def list_buildings(
+    scene: Annotated[str, Field(description="A handle from build")],
+    limit: Annotated[int, Field(description="How many to list, biggest first")] = 20,
+    min_area: Annotated[float, Field(description="Skip plots smaller than this, in m2")] = 0.0,
+) -> dict[str, Any]:
+    """Every building in a scene, biggest first, with what circling it would cost.
+
+    Which building to reconstruct is a choice, and this is what it is made
+    from. A map yields hundreds of plots and most of them are not worth a video
+    model's time — `area_m2` and `floors` are how to tell, and `orbit_distance_m`
+    is how far back the camera would have to stand.
+    """
+    from . import orbit as orbit_module
+
+    held = STORE.get(scene)
+    plots = held.result.plots
+    if not plots:
+        return {"scene": held.name, "buildings": 0,
+                "note": "this scene was built without buildings"}
+
+    rows = []
+    for index, plot in enumerate(plots):
+        if plot["area"] < min_area:
+            continue
+        row = {"building": index, "area_m2": plot["area"], "height_m": plot["height"],
+               "floors": plot["floors"], "centroid": plot["centroid"]}
+        if plot.get("footprint"):
+            shot = orbit_module.plan_orbit(plot)
+            row["orbit_distance_m"] = shot["distance_m"]
+        rows.append(row)
+    rows.sort(key=lambda row: row["area_m2"], reverse=True)
+    return {
+        "scene": held.name,
+        "buildings": len(plots),
+        "listed": len(rows[:limit]),
+        "plots": rows[:limit],
+    }
+
+
+@server.tool()
+def render_orbit(
+    scene: Annotated[str, Field(description="A handle from build")],
+    building: Annotated[int, Field(description="Which one; see list_buildings")],
+    out_dir: Annotated[str, Field(description="Directory for the clip, the masks and the plan")],
+    frames: Annotated[int, Field(description="Must be 5, 22, 39, 56 … (17k+5). 56 and 124 "
+                                             "are the ones that quarter exactly")] = 56,
+    neighbours: Annotated[Literal["clear", "keep", "hide"],
+                          Field(description="clear: empty the disc the camera flies over. "
+                                            "keep: leave the block standing. "
+                                            "hide: this building alone")] = "clear",
+    elevation: Annotated[float, Field(description="Degrees above the horizon")] = 12.0,
+    facade_dir: Annotated[str | None, Field(description="Facade sheets to dress it with")] = None,
+    width: Annotated[int, Field(description="Pixels, multiple of 32")] = 832,
+    height: Annotated[int, Field(description="Pixels, multiple of 32")] = 480,
+):
+    """Circle one building and mask it, for a reconstruction. **A minute or two.**
+
+    Writes `orbit.mp4` (the clip `refine_render` takes), `mask/` (a PNG per
+    frame, white where the building is) and `orbit.json` (the centre, the
+    camera distance, the quadrant frames and the footprint — everything needed
+    to put a reconstructed mesh back at the right size).
+
+    `frames` is not free: H3 counts in 17k+5 and a closed turn divides 360° by
+    the count, so only 56 and 124 land a frame exactly on each of the four
+    cardinal views a multiview reconstruction wants. 56 is the cheap one.
+
+    `neighbours` was decided by measurement, not taste. With the block left
+    standing, the camera flies at the framing distance — which is inside the
+    next block — and 29 of 56 frames saw no part of the subject at all. `clear`
+    empties the disc every sightline lies inside and leaves the rest of the
+    city standing: measured on the same scene, the subject was in all 56 frames
+    at the same size as if it stood alone, with 37 of 53 neighbours still there.
+
+    Answers with the four quadrant views, because whether the building reads as
+    a building is not something the numbers can tell you.
+    """
+    import subprocess
+
+    from mcp.server.mcpserver import Image
+
+    from .config import CityConfig
+    from .orbit import OrbitOptions
+    from .orbit import render_orbit as run
+
+    held = STORE.get(scene)
+    options = OrbitOptions(frames=frames, neighbours=neighbours, elevation_deg=elevation,
+                           width=width, height=height)
+    report = run(held, building, out_dir, options=options, facade_dir=facade_dir,
+                 marking_options=CityConfig.from_dict(held.options).markings, verbose=False)
+
+    picks = report.get("quadrant_frames")
+    if not picks:
+        return report
+    views = os.path.join(out_dir, "views")
+    os.makedirs(views, exist_ok=True)
+    select = "+".join(rf"eq(n\,{n})" for n in picks)
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", report["video"],
+                    "-vf", f"select='{select}'", "-vsync", "0",
+                    os.path.join(views, "view_%02d.png")], check=True)
+    paths = sorted(os.path.join(views, f) for f in os.listdir(views) if f.endswith(".png"))
+    report["views"] = paths
+    strip = _film_strip(paths, across=4)
+    return [report, Image(data=strip, format="png")] if strip else report
 
 
 def main() -> None:

@@ -371,6 +371,14 @@ def generate(
             "floors": max(1, round(height / options.floor_height)),
             "base_z": round(base, 3),
             "centroid": [round(plot.centroid.x, 3), round(plot.centroid.y, 3)],
+            # The plot itself, not just where it is. A generated mesh comes back
+            # from a reconstruction normalised into a unit cube with no memory
+            # of how big the thing was, and this ring is the only statement of
+            # scale this package holds — fitting one to the other is what puts
+            # the model back in the scene at the right size. The exterior only:
+            # a courtyard changes the area, not the extent being fitted.
+            "footprint": [[round(x, 3), round(y, 3)]
+                          for x, y in list(plot.exterior.coords)[:-1]],
         })
 
     return {"Buildings": walls, "Roofs": roofs, "plots": records}
