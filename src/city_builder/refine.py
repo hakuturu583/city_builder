@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -68,6 +69,13 @@ class RefineOptions:
     sampler: str = "res_multistep"
     scheduler: str = "simple"
 
+    # Masked refinement: how far outside the subject the model may work. One
+    # latent cell is 16 pixels, and the mask has already been area-averaged down
+    # to cells, so 1 keeps the subject's own silhouette edge inside the editable
+    # region rather than on its boundary.
+    mask_grow: int = 1
+    mask_threshold: float = 0.0  # 0 keeps the soft edge; above 0 makes it hard
+
     unet: str = "MiniMax-H3-FL2VA-Pruned-Q5_K_M.gguf"
     lora: str = "minimax_h3_turbo_4step_ckpt600_ema_V4.safetensors"
     clip: str = "qwen3vl_32b_minimax_h3-Q4_K_M.gguf"
@@ -84,9 +92,17 @@ class RefineOptions:
                 raise ValueError(f"refine.{name} must be a multiple of 32")
 
 
-def graph(video_path: str, prompt: str, options: RefineOptions) -> dict[str, Any]:
-    """The API-format workflow, as a dict of nodes."""
-    return {
+def graph(video_path: str, prompt: str, options: RefineOptions,
+          mask_path: str | None = None) -> dict[str, Any]:
+    """The API-format workflow, as a dict of nodes.
+
+    With ``mask_path``, sampling is confined to where that clip is white — the
+    building — and everything else comes back exactly as it was rendered. That
+    is worth more here than it sounds: the road, the ground and the horizon are
+    the only things in frame that state the scale and the place, and they are
+    the things a video model is most inclined to rewrite.
+    """
+    nodes = {
         "unet":  {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": options.unet}},
         "lora":  {"class_type": "LoraLoaderModelOnly",
                   "inputs": {"model": ["unet", 0], "lora_name": options.lora,
@@ -125,6 +141,26 @@ def graph(video_path: str, prompt: str, options: RefineOptions) -> dict[str, Any
         "save":  {"class_type": "SaveImage",
                   "inputs": {"images": ["dec", 0], "filename_prefix": "refined"}},
     }
+    if mask_path is None:
+        return nodes
+
+    nodes.update({
+        "mvid":  {"class_type": "LoadVideo", "inputs": {"file": mask_path}},
+        "mpart": {"class_type": "GetVideoComponents", "inputs": {"video": ["mvid", 0]}},
+        # To the pixel size the clip was fitted to, so the mask and the frames it
+        # describes are the same picture before anything is reduced.
+        "mfit":  {"class_type": "ImageScale",
+                  "inputs": {"image": ["mpart", 0], "upscale_method": "bilinear",
+                             "width": options.width, "height": options.height,
+                             "crop": "center"}},
+        "mconv": {"class_type": "ImageToMask", "inputs": {"image": ["mfit", 0], "channel": "red"}},
+        "mask":  {"class_type": "MiniMaxH3LatentMask",
+                  "inputs": {"latent": ["start", 0], "mask": ["mconv", 0],
+                             "grow": options.mask_grow,
+                             "threshold": options.mask_threshold}},
+    })
+    nodes["run"]["inputs"]["latent_image"] = ["mask", 0]
+    return nodes
 
 
 # ---------------------------------------------------------------------------
@@ -271,20 +307,52 @@ class Comfy:
 # ---------------------------------------------------------------------------
 
 
+def mask_clip(source: str, target: str) -> str:
+    """A directory of mask PNGs as one lossless clip, for ComfyUI's loader.
+
+    ComfyUI reads videos, and the mask is written as PNGs because a mask that
+    has been through H.264's chroma subsampling has grey where it had an edge.
+    ``-crf 0`` keeps luma exact, which is all a greyscale mask has.
+    """
+    import subprocess
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise RuntimeError("ffmpeg is not on PATH; cannot pack the mask frames into a clip")
+
+    frames = sorted(f for f in os.listdir(source) if f.endswith(".png"))
+    if not frames:
+        raise ValueError(f"no mask PNGs in {source}")
+    stem = os.path.commonprefix(frames)
+    pattern = os.path.join(source, f"{stem}%0{len(frames[0]) - len(stem) - 4}d.png")
+
+    subprocess.run(
+        [ffmpeg, "-y", "-loglevel", "error", "-framerate", "24", "-i", pattern,
+         "-c:v", "libx264", "-crf", "0", "-preset", "veryfast", "-pix_fmt", "yuv420p", target],
+        check=True)
+    return target
+
+
 def refine(video_path: str, out_dir: str, *, prompt: str = DEFAULT_PROMPT,
-           options: RefineOptions | None = None, comfy: Comfy | None = None) -> dict[str, Any]:
+           mask: str | None = None, options: RefineOptions | None = None,
+           comfy: Comfy | None = None) -> dict[str, Any]:
     """Refine a rendered clip and copy the frames out.
 
     ``video_path`` is any video ComfyUI can read; it is copied into ComfyUI's
     input directory, which is the only place its loader looks.
-    """
-    import shutil
 
+    ``mask`` is optional and is either a clip or a directory of per-frame PNGs —
+    what :func:`city_builder.orbit.render_orbit` writes. Where it is black the
+    render comes back untouched.
+    """
     options = options or RefineOptions()
     comfy = comfy or Comfy()
     comfy.start()
 
-    missing = {"MiniMaxH3VideoToVideo", "UnetLoaderGGUF", "MiniMaxH3ImageToVideo"} - comfy.nodes()
+    wanted = {"MiniMaxH3VideoToVideo", "UnetLoaderGGUF", "MiniMaxH3ImageToVideo"}
+    if mask:
+        wanted.add("MiniMaxH3LatentMask")
+    missing = wanted - comfy.nodes()
     if missing:
         raise RuntimeError(
             f"this ComfyUI is missing {', '.join(sorted(missing))}. The GGUF loader comes "
@@ -294,8 +362,17 @@ def refine(video_path: str, out_dir: str, *, prompt: str = DEFAULT_PROMPT,
     name = f"refine_{os.path.basename(video_path)}"
     shutil.copyfile(video_path, os.path.join(comfy.input_dir, name))
 
+    mask_name = None
+    if mask:
+        mask_name = f"mask_{os.path.splitext(os.path.basename(video_path))[0]}.mp4"
+        target = os.path.join(comfy.input_dir, mask_name)
+        if os.path.isdir(mask):
+            mask_clip(mask, target)
+        else:
+            shutil.copyfile(mask, target)
+
     started = time.time()
-    files = comfy.wait(comfy.submit(graph(name, prompt, options)))
+    files = comfy.wait(comfy.submit(graph(name, prompt, options, mask_name)))
 
     os.makedirs(out_dir, exist_ok=True)
     written = []
@@ -309,5 +386,6 @@ def refine(video_path: str, out_dir: str, *, prompt: str = DEFAULT_PROMPT,
         "frames": written,
         "took_seconds": round(time.time() - started, 1),
         "denoise": options.denoise,
+        "masked": bool(mask),
         "size": [options.width, options.height],
     }

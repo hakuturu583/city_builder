@@ -84,12 +84,53 @@ def test_the_render_is_fitted_to_the_canvas_being_sampled():
     assert workflow["fit"]["inputs"]["height"] == workflow["h3"]["inputs"]["height"] == 384
 
 
-def test_every_reference_points_at_a_node_that_exists():
-    workflow = graph("drive.mp4", DEFAULT_PROMPT, RefineOptions())
+@pytest.mark.parametrize("mask", [None, "mask.mp4"])
+def test_every_reference_points_at_a_node_that_exists(mask):
+    workflow = graph("drive.mp4", DEFAULT_PROMPT, RefineOptions(), mask)
     for name, node in workflow.items():
         for key, value in node["inputs"].items():
             if isinstance(value, list) and len(value) == 2 and isinstance(value[0], str):
                 assert value[0] in workflow, f"{name}.{key} points at missing {value[0]!r}"
+
+
+# ---------------------------------------------------------------------------
+# Masked refinement
+# ---------------------------------------------------------------------------
+
+
+def test_without_a_mask_the_graph_is_the_one_it_always_was():
+    workflow = graph("drive.mp4", DEFAULT_PROMPT, RefineOptions())
+    assert not any(node["class_type"] == "MiniMaxH3LatentMask" for node in workflow.values())
+
+
+def test_the_mask_goes_between_the_render_and_the_sampler():
+    """The masked latent has to *replace* the start latent, not sit beside it.
+
+    Wired in parallel the graph still runs, the mask is computed, and nothing
+    is held — which looks like a mask that did not work rather than one that
+    was never applied.
+    """
+    workflow = graph("orbit.mp4", DEFAULT_PROMPT, RefineOptions(), "mask.mp4")
+    assert workflow["run"]["inputs"]["latent_image"] == ["mask", 0]
+    assert workflow["mask"]["inputs"]["latent"] == ["start", 0]
+    assert workflow["mask"]["inputs"]["mask"] == ["mconv", 0]
+    assert workflow["mvid"]["inputs"]["file"] == "mask.mp4"
+
+
+def test_the_mask_is_fitted_to_the_same_canvas_as_the_render():
+    # A mask a different size from the frames it describes is off by a
+    # building's width at the edges once both are scaled to the latent.
+    options = RefineOptions(width=640, height=384)
+    workflow = graph("orbit.mp4", DEFAULT_PROMPT, options, "mask.mp4")
+    assert workflow["mfit"]["inputs"]["width"] == workflow["fit"]["inputs"]["width"] == 640
+    assert workflow["mfit"]["inputs"]["height"] == workflow["fit"]["inputs"]["height"] == 384
+
+
+def test_the_mask_options_reach_the_node():
+    options = RefineOptions(mask_grow=3, mask_threshold=0.5)
+    workflow = graph("orbit.mp4", DEFAULT_PROMPT, options, "mask.mp4")
+    assert workflow["mask"]["inputs"]["grow"] == 3
+    assert workflow["mask"]["inputs"]["threshold"] == pytest.approx(0.5)
 
 
 def test_the_options_reach_the_nodes_that_use_them():
