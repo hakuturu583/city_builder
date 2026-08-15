@@ -54,7 +54,12 @@ def _server():
             "refine_render takes a drive rendered from a scene and makes it photoreal "
             "with a video model, keeping the geometry. Its frames are reference for a "
             "second pass at the textures, which is the loop: build, render, refine, "
-            "re-texture."
+            "re-texture.\n\n"
+            "To replace the procedural massing with real geometry, one building at a "
+            "time: list_buildings says which are worth it, reconstruct_building turns "
+            "one into a PBR-textured mesh standing on its own footprint. Read the "
+            "footprint_iou it answers with — that is how you find the one that came "
+            "back as a different building."
         ),
     )
 
@@ -726,6 +731,110 @@ def render_drive(
         "bytes": os.path.getsize(written),
         "took_seconds": round(time.time() - started, 1),
     }
+
+
+# ---------------------------------------------------------------------------
+# A model per building
+# ---------------------------------------------------------------------------
+
+
+@server.tool()
+def list_buildings(
+    scene: Annotated[str, Field(description="A handle from build")],
+    limit: Annotated[int, Field(description="How many to list, biggest first")] = 20,
+    min_area: Annotated[float, Field(description="Skip plots smaller than this, in m2")] = 0.0,
+) -> dict[str, Any]:
+    """Every building in a scene, biggest first, with the shape of its plot.
+
+    Which building to reconstruct is a choice, and this is what it is made
+    from. A map yields hundreds of plots and most are not worth the time —
+    `area_m2`, `floors` and the plan `long_m` by `short_m` are how to tell.
+    """
+    from .reconstruct import plan_dimensions
+
+    held = STORE.get(scene)
+    plots = held.result.plots
+    if not plots:
+        return {"scene": held.name, "buildings": 0,
+                "note": "this scene was built without buildings"}
+
+    rows = []
+    for index, plot in enumerate(plots):
+        if plot["area"] < min_area:
+            continue
+        row = {"building": index, "area_m2": plot["area"], "height_m": plot["height"],
+               "floors": plot["floors"], "centroid": plot["centroid"]}
+        if plot.get("footprint"):
+            long_side, short_side = plan_dimensions(plot["footprint"])
+            row["long_m"] = round(long_side, 1)
+            row["short_m"] = round(short_side, 1)
+        rows.append(row)
+    rows.sort(key=lambda row: row["area_m2"], reverse=True)
+    return {"scene": held.name, "buildings": len(plots),
+            "listed": len(rows[:limit]), "plots": rows[:limit]}
+
+
+@server.tool()
+def reconstruct_building(
+    scene: Annotated[str, Field(description="A handle from build")],
+    building: Annotated[int, Field(description="Which one; see list_buildings")],
+    out_dir: Annotated[str, Field(description="Directory for the picture, the model and the fit")],
+    facade_dir: Annotated[str | None,
+                          Field(description="Painted sheets from generate_facades. Bring "
+                                            "them: they are the only thing in the picture "
+                                            "that says what the building is made of")] = None,
+    elevation: Annotated[float,
+                         Field(description="Degrees above the horizon the massing is shot "
+                                           "from. 35 is the measured default; at 12 the roof "
+                                           "is a sliver and the depth is guessed")] = 35.0,
+    resolution: Annotated[Literal["512", "1024", "1024_cascade"],
+                          Field(description="TRELLIS.2 detail. 512 is ~30 s; 1024 wants "
+                                            "more than 32 GB of VRAM at the meshing step")] = "512",
+    seed: Annotated[int, Field(description="Same seed gives the same building")] = 0,
+):
+    """A textured 3D model of one building, standing on its own plot. **~40 s, GPU.**
+
+    Three steps, and the division of labour is the point: the *shape* comes
+    from the map and only the *surfaces* come from a model. The plot's massing
+    is rendered on a transparent film, TRELLIS.2 turns that picture into a
+    PBR-textured mesh, and the footprint decides the yaw, one uniform scale and
+    where it stands.
+
+    Asking an image model for the picture instead does not work, and the
+    difference is not subtle: over seven promptings — metres, ratios, "a long
+    rectangular slab" — the building came back with a plan aspect of 1.00 every
+    time against the 1.63 the plot wanted, and the fit stalled at an IoU of
+    0.68. From the render it is 0.97 on average over four plots.
+
+    `footprint_iou` is the number to read. It is 1.0 when the model's plan
+    covers the plot exactly, and it is how you find the building that came back
+    as something else.
+
+    Writes `<name>.png` (what was modelled), `<name>.glb` (the model with its
+    PBR textures, in its own unit cube) and `<name>.obj` (the same mesh in scene
+    metres, standing on the plot).
+    """
+    from mcp.server.mcpserver import Image
+
+    from .config import CityConfig
+    from .portrait import PortraitOptions, render_portrait
+    from .reconstruct import MeshOptions, reconstruct
+
+    held = STORE.get(scene)
+    name = f"building{building:04d}"
+    os.makedirs(out_dir, exist_ok=True)
+
+    shot = render_portrait(held, building, os.path.join(out_dir, f"{name}.png"),
+                           options=PortraitOptions(elevation_deg=elevation),
+                           facade_dir=facade_dir,
+                           marking_options=CityConfig.from_dict(held.options).markings,
+                           verbose=False)
+    report = reconstruct(held.result.plots[building], out_dir, image=shot["image"],
+                         name=name, mesh_options=MeshOptions(seed=seed,
+                                                             pipeline_type=resolution))
+    with open(shot["image"], "rb") as handle:
+        data = handle.read()
+    return [{**shot, **report}, Image(data=data, format="png")]
 
 
 def main() -> None:
