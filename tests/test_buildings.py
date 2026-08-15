@@ -166,7 +166,14 @@ def test_generate_stands_every_building_on_the_ground():
     for walls, record in zip(result["Buildings"], result["plots"]):
         wall_z = [v[2] for v in walls.vertices]
         assert min(wall_z) == pytest.approx(12.0 - 1.0)  # ground minus the skirt
-        assert max(wall_z) == pytest.approx(12.0 + record["height"])
+        top = 12.0 + record["height"]
+        if record["roof"] in ("gable", "mono"):
+            # A gable end and a mono-pitch's high side are wall, and they climb
+            # with the roof: the extrusion's top is the *eaves*, not the top.
+            assert max(wall_z) > top
+        else:
+            # Flat, or a hip over a plot it can close by itself.
+            assert max(wall_z) == pytest.approx(top)
 
 
 def test_every_record_carries_the_plot_it_was_built_on():

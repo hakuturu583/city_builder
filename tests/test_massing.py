@@ -309,3 +309,48 @@ def _height_at(mesh, faces, point):
         b = ((y3 - y1) * (point[0] - x3) + (x1 - x3) * (point[1] - y3)) / det
         return a * z1 + b * z2 + (1 - a - b) * z3
     return None
+
+
+def test_a_gable_is_closed_by_a_wall_and_a_hip_closes_itself():
+    """Where "you can see under the roof" came from.
+
+    A hip slopes down to an eave on every side, so the roof meets the wall all
+    the way round. A gable's two ends rise to the ridge and a mono-pitch's high
+    side is the whole climb, and without a wall there the building is open
+    under its own roof.
+    """
+    from city_builder.buildings import roof_walls
+
+    plan_shape = ShapelyPolygon([(0, 0), (30, 0), (30, 18), (0, 18)])
+    closing = {form: roof_walls(plan_shape, 10.0, form, pitch=0.8, eave=0.9)
+               for form in ("gable", "hip", "mono")}
+    assert not closing["hip"].faces, "a hip over a rectangle needs no closing wall"
+    for form in ("gable", "mono"):
+        mesh = closing[form]
+        assert mesh.faces, f"{form} was left open"
+        assert min(v[2] for v in mesh.vertices) == pytest.approx(10.0)
+        assert max(v[2] for v in mesh.vertices) > 10.0
+
+
+def test_the_closing_wall_reaches_the_ridge_and_not_the_corners():
+    """Sampling only the ends of an edge misses the whole triangle.
+
+    A rectangle's gable end has the eave at both corners and the ridge in the
+    middle, so both ends read as "the roof already meets the wall here" — and
+    the gable came back with no faces at all.
+    """
+    from city_builder.buildings import pitched_roof, roof_walls
+
+    plan_shape = ShapelyPolygon([(0, 0), (30, 0), (30, 18), (0, 18)])
+    roof = pitched_roof(plan_shape, 10.0, "gable", pitch=0.8, eave=0.9)
+    wall = roof_walls(plan_shape, 10.0, "gable", pitch=0.8, eave=0.9)
+    assert max(v[2] for v in wall.vertices) == pytest.approx(
+        max(v[2] for v in roof.vertices), abs=0.01)
+
+
+def test_an_l_shaped_hip_still_needs_closing():
+    """It closes over a rectangle and not over an inside corner."""
+    from city_builder.buildings import roof_walls
+
+    ell = ShapelyPolygon([(0, 0), (30, 0), (30, 10), (12, 10), (12, 18), (0, 18)])
+    assert roof_walls(ell, 10.0, "hip", pitch=0.8, eave=0.9).faces

@@ -262,7 +262,7 @@ def plan(plot: dict[str, Any], options: MassingOptions | None = None,
 def build(plot: dict[str, Any], options: MassingOptions | None = None,
           seed: int = 0, *, facade_width: float = 12.0) -> dict[str, Any]:
     """The varied massing as walls and roofs, ready to go into a scene."""
-    from .buildings import extrude, pitched_roof
+    from .buildings import extrude, pitched_roof, roof_walls
 
     laid_out = plan(plot, options, seed)
     walls: list[Mesh] = []
@@ -290,6 +290,11 @@ def build(plot: dict[str, Any], options: MassingOptions | None = None,
                              eave=laid_out["roof"]["eave"])
         if pitch.faces:
             roofs.append(pitch)
+            closing = roof_walls(main, top, laid_out["roof"]["form"],
+                                 pitch=laid_out["roof"]["pitch"],
+                                 eave=laid_out["roof"]["eave"])
+            if closing.faces:
+                walls.append(closing)
     return {"Buildings": walls, "Roofs": roofs, **laid_out}
 
 
