@@ -141,8 +141,50 @@ class ImageOptions:
     vram_budget_gb: float = 0.0  # 0 = no cap; this runs alone
 
 
+def cut_out(image, *, tolerance: int = 42) -> Any:
+    """The backdrop of a plain-background picture, turned into transparency.
+
+    Two things this does not do, both learned the hard way.
+
+    It does not key on *white*. Asked for a plain background, the image model
+    returns a mid-grey studio sweep about as often as a white one — measured,
+    (154, 153, 159) — and a white key leaves the whole frame opaque, which
+    reads downstream as "the building fills the shot" rather than as a failure.
+    The backdrop colour is taken from the border instead.
+
+    It does not threshold, it floods. A pale concrete wall is within any
+    tolerance that catches the backdrop, so a threshold punches holes through
+    the middle of the building. What counts as backdrop is the region *of that
+    colour and connected to the border*, which a wall in the middle is not.
+
+    All of this exists so the reconstruction never reaches for a
+    background-removal model: TRELLIS.2 skips its own — which is gated — when
+    the image it is handed already has an alpha channel.
+    """
+    import numpy as np
+    from scipy import ndimage
+
+    rgb = np.asarray(image.convert("RGB"), dtype=np.int16)
+    border = np.concatenate([rgb[:4].reshape(-1, 3), rgb[-4:].reshape(-1, 3),
+                             rgb[:, :4].reshape(-1, 3), rgb[:, -4:].reshape(-1, 3)])
+    backdrop = np.median(border, axis=0)
+
+    plain = np.abs(rgb - backdrop).max(axis=2) <= tolerance
+    labels, count = ndimage.label(plain)
+    alpha = np.full(rgb.shape[:2], 255, dtype=np.uint8)
+    if count:
+        edge = set(labels[0, :]) | set(labels[-1, :]) | set(labels[:, 0]) | set(labels[:, -1])
+        edge.discard(0)
+        if edge:
+            alpha = np.where(np.isin(labels, list(edge)), 0, 255).astype(np.uint8)
+
+    from PIL import Image as PILImage
+
+    return PILImage.fromarray(np.dstack([rgb.astype(np.uint8), alpha]), mode="RGBA")
+
+
 def elevation(prompt: str, path: str, options: ImageOptions | None = None) -> str:
-    """One picture of one building, on white. Written to ``path``.
+    """One picture of one building, cut out of its background. Written to ``path``.
 
     Torch is imported inside, so the geometry half of this package stays usable
     on a machine with none of the model stack installed.
@@ -172,7 +214,7 @@ def elevation(prompt: str, path: str, options: ImageOptions | None = None) -> st
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
-    image.convert("RGB").save(path)
+    cut_out(image).save(path)
     return path
 
 
@@ -214,6 +256,8 @@ def _pipeline(options: MeshOptions):
     os.environ.setdefault("ATTN_BACKEND", options.attn_backend)
     os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    if options.attn_backend == "sdpa":
+        _install_varlen_sdpa()
     if options.root not in sys.path:
         if not os.path.isdir(os.path.join(options.root, "trellis2")):
             raise RuntimeError(
@@ -224,21 +268,153 @@ def _pipeline(options: MeshOptions):
         sys.path.insert(0, options.root)
 
     from trellis2.pipelines import Trellis2ImageTo3DPipeline
+    from trellis2.pipelines import trellis2_image_to_3d as module
 
+    # The background remover is built eagerly and never used: `preprocess_image`
+    # only reaches for it when the image it is given has no alpha, and
+    # :func:`elevation` always writes alpha. It is also a *gated* repository
+    # whose access is granted by request rather than by accepting terms, so
+    # building it would make this pipeline wait on somebody's approval for a
+    # model it does not run. Everything downstream already handles None.
+    original = module.rembg
+    module.rembg = _NoBackgroundRemover()
     try:
         pipeline = Trellis2ImageTo3DPipeline.from_pretrained(options.weights)
     except OSError as error:
         if "gated repo" not in str(error):
             raise
         raise RuntimeError(
-            "TRELLIS.2 conditions on DINOv3, which is a gated repository: the weights "
-            "download only for a Hugging Face account that has accepted Meta's terms at "
-            "https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m . Accept "
-            "them, then `hf auth login` or set HF_TOKEN. Nothing else in this module "
-            "needs an account.") from error
+            f"TRELLIS.2 wants a gated Hugging Face repository. {error}\n"
+            "Accept its terms on an account, then `hf auth login` or set HF_TOKEN. "
+            "The conditioning encoder is DINOv3, at "
+            "https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m .") from error
+    finally:
+        module.rembg = original
+
+    _teach_it_where_the_layers_are(pipeline.image_cond_model)
     pipeline.cuda()
     _PIPELINE = pipeline
     return pipeline
+
+
+class _NoBackgroundRemover:
+    """Stands in for the ``rembg`` module so its model is never constructed."""
+
+    def __getattr__(self, _name: str):
+        return lambda **_kwargs: None
+
+
+def _install_varlen_sdpa() -> None:
+    """Answer TRELLIS.2's ``import flash_attn`` with torch's own attention.
+
+    Its *sparse* attention accepts three backends and sdpa is not among them —
+    ``ATTN_BACKEND=sdpa`` is honoured by the dense path and silently ignored
+    here, leaving flash_attn. On this card neither of the real options is
+    available: FlashAttention has no wheel for a CUDA 13 torch, and the
+    xformers wheel that matches this torch has no CUDA in it and its cutlass
+    kernels stop at compute capability 9.0 anyway, against 12.0 on a 5090.
+
+    So rather than patch their dispatch, the three functions it calls are
+    provided. Variable-length attention over packed sequences is a loop of
+    ordinary attention over the slices — flash-attn's contribution is doing it
+    without materialising the block-diagonal mask, not the maths — and the
+    sequence count here is the batch size, which is one building.
+
+    Installed in ``sys.modules`` rather than on disk: it is a stand-in for one
+    process, and anything that genuinely wants FlashAttention should not find
+    this instead.
+    """
+    import importlib.machinery
+    import types
+
+    import torch
+    import torch.nn.functional as F
+
+    if "flash_attn" in sys.modules:
+        return
+
+    def _attend(q, k, v, cu_q, cu_kv):
+        out = torch.empty(q.shape[0], q.shape[1], v.shape[2], dtype=q.dtype, device=q.device)
+        for i in range(len(cu_q) - 1):
+            qs, qe = int(cu_q[i]), int(cu_q[i + 1])
+            ks, ke = int(cu_kv[i]), int(cu_kv[i + 1])
+            if qe <= qs:
+                continue
+            # [L, H, C] -> [1, H, L, C], which is the layout sdpa wants.
+            piece = F.scaled_dot_product_attention(
+                q[qs:qe].transpose(0, 1).unsqueeze(0),
+                k[ks:ke].transpose(0, 1).unsqueeze(0),
+                v[ks:ke].transpose(0, 1).unsqueeze(0))
+            out[qs:qe] = piece.squeeze(0).transpose(0, 1)
+        return out
+
+    module = types.ModuleType("flash_attn")
+    module.__doc__ = "city_builder: torch attention behind flash-attn's varlen names"
+    # A module put into sys.modules by hand has no spec, and importlib raises
+    # rather than shrug when something later asks a real question about it.
+    module.__spec__ = importlib.machinery.ModuleSpec("flash_attn", None)
+
+    def flash_attn_varlen_qkvpacked_func(qkv, cu_seqlens, max_seqlen, *_args, **_kwargs):
+        q, k, v = qkv.unbind(dim=1)
+        return _attend(q, k, v, cu_seqlens, cu_seqlens)
+
+    def flash_attn_varlen_kvpacked_func(q, kv, cu_seqlens_q, cu_seqlens_kv,
+                                        max_seqlen_q, max_seqlen_kv, *_args, **_kwargs):
+        k, v = kv.unbind(dim=1)
+        return _attend(q, k, v, cu_seqlens_q, cu_seqlens_kv)
+
+    def flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv,
+                               max_seqlen_q, max_seqlen_kv, *_args, **_kwargs):
+        return _attend(q, k, v, cu_seqlens_q, cu_seqlens_kv)
+
+    module.flash_attn_varlen_qkvpacked_func = flash_attn_varlen_qkvpacked_func
+    module.flash_attn_varlen_kvpacked_func = flash_attn_varlen_kvpacked_func
+    module.flash_attn_varlen_func = flash_attn_varlen_func
+    sys.modules["flash_attn"] = module
+
+
+def _teach_it_where_the_layers_are(extractor) -> None:
+    """Reach DINOv3's transformer blocks wherever this transformers puts them.
+
+    TRELLIS.2 runs the encoder by hand rather than calling it, so it depends on
+    where the blocks live: ``DINOv3ViTModel.layer`` in transformers 4, and
+    ``DINOv3ViTModel.model.layer`` in 5, where an encoder object was put in
+    between. Pinning transformers back would fix it and break diffusers, so the
+    lookup is done here instead — and done by *searching* rather than by
+    version, because the next move of that attribute should not need a release.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    model = extractor.model
+    blocks = getattr(model, "layer", None)
+    if blocks is None:
+        for child in model.modules():
+            candidate = getattr(child, "layer", None)
+            if isinstance(candidate, torch.nn.ModuleList) and len(candidate):
+                blocks = candidate
+                break
+    if blocks is None:
+        raise RuntimeError(
+            "cannot find DINOv3's transformer blocks in "
+            f"{type(model).__name__}; transformers {_transformers_version()} has moved them "
+            "again, and TRELLIS.2 runs the encoder block by block rather than calling it")
+
+    def extract_features(image):
+        image = image.to(model.embeddings.patch_embeddings.weight.dtype)
+        hidden = model.embeddings(image, bool_masked_pos=None)
+        position = model.rope_embeddings(image)
+        for block in blocks:
+            hidden = block(hidden, position_embeddings=position)
+        return F.layer_norm(hidden, hidden.shape[-1:])
+
+    extractor.extract_features = extract_features
+
+
+def _transformers_version() -> str:
+    import transformers
+
+    return transformers.__version__
 
 
 def to_mesh(image_path: str, out_path: str, options: MeshOptions | None = None) -> dict[str, Any]:
@@ -253,7 +429,9 @@ def to_mesh(image_path: str, out_path: str, options: MeshOptions | None = None) 
 
     started = time.time()
     with torch.no_grad():
-        mesh = pipeline.run(PILImage.open(image_path).convert("RGB"),
+        # RGBA, not RGB: the alpha is what keeps the pipeline's own background
+        # remover — a gated model this never downloads — out of the run.
+        mesh = pipeline.run(PILImage.open(image_path).convert("RGBA"),
                             seed=options.seed, pipeline_type=options.pipeline_type)[0]
     mesh.simplify(16777216)  # the nvdiffrast limit, not a quality choice
 
@@ -307,14 +485,18 @@ def read_glb(path: str) -> tuple[np.ndarray, np.ndarray]:
         view = meta["bufferViews"][acc["bufferView"]]
         start = view.get("byteOffset", 0) + acc.get("byteOffset", 0)
         per = _COUNT[acc["type"]]
-        fmt = _COMPONENT[acc["componentType"]]
-        width = struct.calcsize(fmt)
-        stride = view.get("byteStride") or per * width
-        out = np.empty((acc["count"], per), dtype=np.dtype(fmt))
-        for i in range(acc["count"]):
-            offset = start + i * stride
-            out[i] = struct.unpack_from(f"<{per}{fmt}", buffer, offset)
-        return out
+        dtype = np.dtype("<" + _COMPONENT[acc["componentType"]])
+        stride = view.get("byteStride") or per * dtype.itemsize
+
+        if stride == per * dtype.itemsize:  # tightly packed: one read
+            return np.frombuffer(buffer, dtype=dtype, count=acc["count"] * per,
+                                 offset=start).reshape(acc["count"], per)
+        # Interleaved: take the whole span as bytes and slice the columns out.
+        # A per-element loop is correct and, on a mesh with half a million
+        # vertices, takes longer than everything else in this module together.
+        raw = np.frombuffer(buffer, dtype=np.uint8, count=acc["count"] * stride, offset=start)
+        raw = raw.reshape(acc["count"], stride)[:, : per * dtype.itemsize]
+        return np.ascontiguousarray(raw).view(dtype).reshape(acc["count"], per)
 
     vertices, faces, base = [], [], 0
     for mesh in meta.get("meshes", []):
@@ -400,12 +582,20 @@ def fit_to_footprint(vertices: np.ndarray, footprint: Sequence[Sequence[float]],
     plan = vertices[:, :2] - vertices[:, :2].mean(axis=0)
     target = np.array([plot.centroid.x, plot.centroid.y])
 
+    # The hull once, not once per angle. Rotating a point set and taking its
+    # hull gives the same polygon as rotating the hull, and the sweep below asks
+    # for it several hundred times over a mesh with half a million vertices.
+    outline = np.asarray(_hull(plan).exterior.coords)[:-1]
+
     def score(radians: float) -> tuple[float, float]:
-        hull = _hull(_rotate(plan, radians))
+        from shapely.geometry import Polygon as ShapelyPolygon
+
+        turned = _rotate(outline, radians)
+        hull = ShapelyPolygon(turned)
         if hull.area <= 0:
             return 0.0, 1.0
         scale = math.sqrt(plot.area / hull.area)
-        placed = _hull(_rotate(plan, radians) * scale)
+        placed = ShapelyPolygon(turned * scale)
         placed = _translate(placed, target[0] - placed.centroid.x,
                             target[1] - placed.centroid.y)
         union = placed.union(plot).area
