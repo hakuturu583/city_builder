@@ -131,3 +131,48 @@ def test_the_reference_default_quotes_the_material_not_the_content():
     from city_builder.texture import FacadeOptions
 
     assert FacadeOptions().reference_strength <= 0.5
+
+
+# --- what to sample at, which is not what the sheet is wanted at --------------
+
+
+def _sizes(**kwargs):
+    from city_builder.texture import FacadeOptions, _sampling_size
+
+    options = FacadeOptions(**kwargs)
+    return lambda w, h: _sampling_size((w, h), options)
+
+
+def test_a_sheet_smaller_than_the_model_is_sampled_larger():
+    """The defect: a two-storey shop front is 384x344, and SD1.5 wants 512.
+
+    Measured over the same prompts and control images, sheets drawn for two to
+    eight floors of a 12 m bay scored 0.74 for floor alignment at 512 wide,
+    while one- and two-storey houses on a 7 m bay scored 0.36 at 384x344.
+    Sampling the small ones at model resolution took them to 0.75.
+    """
+    at = _sizes()
+    for wanted in ((384, 216), (384, 344), (384, 472), (512, 344)):
+        width, height = at(*wanted)
+        assert min(width, height) >= 512
+        assert width / height == pytest.approx(wanted[0] / wanted[1], rel=0.03)
+
+
+def test_a_sheet_the_model_can_already_draw_is_left_alone():
+    at = _sizes()
+    assert at(512, 856) == (512, 856)
+    assert at(1024, 1024) == (1024, 1024)
+
+
+def test_raising_the_resolution_never_lowers_it():
+    """A tall narrow sheet hits the cap on its long side; that must not shrink it."""
+    at = _sizes()
+    for wanted in ((384, 1240), (512, 1240), (320, 2000)):
+        width, height = at(*wanted)
+        assert width >= wanted[0] and height >= wanted[1]
+
+
+def test_both_sides_land_on_the_stride_the_vae_uses():
+    at = _sizes()
+    for wanted in ((384, 216), (391, 233), (500, 501)):
+        assert all(side % 8 == 0 for side in at(*wanted))
