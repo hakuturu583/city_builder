@@ -67,6 +67,11 @@ class BuildingOptions:
     roof_pitch: tuple[float, float] = (0.35, 0.65)  # rise over half the span
     roof_eave: float = 0.7  # how far the roof oversails the walls
 
+    # The base course. Small, and the thing that stops a building reading as a
+    # card standing on a board when the camera is at eye level.
+    plinth_height: float = 0.35
+    plinth_proud: float = 0.12
+
     max_buildings: int = 0  # 0 = unlimited
     seed: int = 0
 
@@ -253,6 +258,60 @@ def _triangulate(polygon) -> list[list[tuple[float, float]]]:
         for tri in triangulate(polygon)
         if inside.contains(tri.representative_point())
     ]
+
+
+def plinth(polygon, base_z: float, *, height: float = 0.35, proud: float = 0.12,
+           skirt: float = 1.0) -> Mesh:
+    """The base course a building stands on, a little proud of its walls.
+
+    Without one the wall meets the ground as a line, and close to, the building
+    reads as a card model standing on a board — which is exactly what it is.
+    Every house in the street this generates has a concrete base about a third
+    of a metre high and a hand's width wider than the wall above it, and the
+    step is what tells the eye the building has a thickness.
+
+    Merged into the wall mesh rather than added beside it: a scene has one
+    Buildings object however many buildings are in it, and everything that
+    picks one out — the facade sheet it wears, the portrait that photographs
+    it — works from one face range per building.
+    """
+    outer = polygon.buffer(proud, join_style=2)
+    outer = max(outer.geoms, key=lambda g: g.area) if hasattr(outer, "geoms") else outer
+    if outer.is_empty:
+        return Mesh([], [])
+
+    rings = [list(outer.exterior.coords)[:-1]]
+    if signed_area_xy(rings[0]) < 0:
+        rings[0] = list(reversed(rings[0]))
+    for interior in outer.interiors:
+        ring = list(interior.coords)[:-1]
+        if len(ring) >= 3:
+            rings.append(ring if signed_area_xy(ring) < 0 else list(reversed(ring)))
+
+    vertices: list[tuple[float, float, float]] = []
+    faces: list[list[int]] = []
+    uvs: list[tuple[float, float]] = []
+    top, bottom = base_z + height, base_z - skirt
+    for ring in rings:
+        for i, (x, y) in enumerate(ring):
+            nx, ny = ring[(i + 1) % len(ring)]
+            at = len(vertices)
+            vertices.extend([(x, y, bottom), (nx, ny, bottom), (nx, ny, top), (x, y, top)])
+            faces.append([at, at + 1, at + 2, at + 3])
+            # The very bottom of the sheet, which is where a facade layout puts
+            # its ground line. A band, not a stretch: the plinth is not a storey.
+            uvs.extend([(0.0, 0.0), (1.0, 0.0), (1.0, 0.03), (0.0, 0.03)])
+
+    cap = []
+    for triangle in _triangulate(outer):
+        ordered = triangle if signed_area_xy(triangle) > 0 else list(reversed(triangle))
+        at = len(vertices)
+        for x, y in ordered:
+            vertices.append((x, y, top))
+            uvs.append((0.0, 0.03))
+        cap.append([at, at + 1, at + 2])
+    faces.extend(cap)
+    return Mesh(vertices, faces, uvs)
 
 
 def extrude(polygon, base_z: float, height: float, *, skirt: float = 1.0,
@@ -506,6 +565,13 @@ def generate(
         height = pick_height(plot.area, options, rng)
         wall_mesh, roof_mesh = extrude(plot, base, height, skirt=options.skirt,
                                       facade_width=options.facade_width)
+        if options.plinth_height > 0:
+            from .geometry import merge_meshes
+
+            standing = plinth(plot, base, height=options.plinth_height,
+                              proud=options.plinth_proud, skirt=options.skirt)
+            if standing.faces:
+                wall_mesh = merge_meshes([wall_mesh, standing])
         form = rng.choice(options.roof_forms)
         pitch = rng.uniform(*options.roof_pitch)
         if form != "flat":

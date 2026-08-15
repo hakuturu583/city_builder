@@ -300,3 +300,38 @@ def test_every_building_records_the_floor_count_its_sheet_needs():
     for plot in built["plots"]:
         assert plot["floors"] == pytest.approx(plot["height"] / 3.5, abs=0.01)
         assert plot["floors"] >= 1
+
+
+# --- the base course ---------------------------------------------------------
+
+
+def test_the_plinth_stands_proud_of_the_wall_it_carries():
+    """Without one, a wall meets the ground as a line and reads as card."""
+    plot = box(0, 0, 10, 6)
+    base = B.plinth(plot, 2.0, height=0.35, proud=0.12, skirt=1.0)
+    xs = [v[0] for v in base.vertices]
+    zs = [v[2] for v in base.vertices]
+    assert min(xs) == pytest.approx(-0.12) and max(xs) == pytest.approx(10.12)
+    assert min(zs) == pytest.approx(1.0)  # down to the skirt, like the walls
+    assert max(zs) == pytest.approx(2.35)
+
+
+def test_the_plinth_wears_the_bottom_of_the_sheet_and_not_a_storey():
+    base = B.plinth(box(0, 0, 10, 6), 0.0)
+    assert base.uvs and max(v for _u, v in base.uvs) <= 0.05
+
+
+def test_a_building_is_still_one_wall_mesh_after_the_plinth_joins_it():
+    """A scene has one Buildings object, and a building is a range of faces in it."""
+    hm = _flat_heightmap()
+    result = B.generate(hm, _cross_roads(), B.BuildingOptions(seed=5), bounds=(0, 0, 200, 200))
+    assert len(result["Buildings"]) == len(result["Roofs"]) == len(result["plots"])
+
+
+def test_the_plinth_can_be_turned_off():
+    hm = _flat_heightmap()
+    options = B.BuildingOptions(seed=5, plinth_height=0.0)
+    result = B.generate(hm, _cross_roads(), options, bounds=(0, 0, 200, 200))
+    with_base = B.generate(hm, _cross_roads(), B.BuildingOptions(seed=5),
+                           bounds=(0, 0, 200, 200))
+    assert len(result["Buildings"][0].faces) < len(with_base["Buildings"][0].faces)
