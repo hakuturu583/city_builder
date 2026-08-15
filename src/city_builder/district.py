@@ -190,6 +190,7 @@ def place(scene, ledger: str | dict[str, Any], *, facade_dir: str | None = None,
     import bpy
     import numpy as np
 
+    from . import reconstruct as reconstruct_module
     from . import scene as scene_module
     from .build import build_scene
     from .portrait import face_range
@@ -241,9 +242,14 @@ def place(scene, ledger: str | dict[str, Any], *, facade_dir: str | None = None,
             continue
 
         # The whole import shares one transform, so the centroid and the base
-        # are measured over all of its parts together.
+        # are measured over all of its parts together — and the base is the
+        # height the building is full width at rather than its lowest vertex,
+        # the same rule the fit was made under. Recomputed here rather than
+        # read from the ledger so a ledger written before that rule existed
+        # still places its buildings on the ground.
         everything = np.concatenate(parts)
-        centroid, floor = everything[:, :2].mean(axis=0), everything[:, 2].min()
+        centroid = everything[:, :2].mean(axis=0)
+        floor = reconstruct_module.seat_z(everything)
         yaw = math.radians(row["yaw_deg"])
         turn = np.array([[math.cos(yaw), math.sin(yaw)], [-math.sin(yaw), math.cos(yaw)]])
         for obj, coords in zip(added, parts):

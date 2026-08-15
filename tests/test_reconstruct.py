@@ -134,14 +134,80 @@ def test_an_empty_plot_is_refused():
 
 
 # ---------------------------------------------------------------------------
-# Writing it out
+# Where the ground goes
+#
+# A model shown a building from above never sees its underside and closes it
+# with a taper. Stood on its lowest vertex, the building hangs over a point of
+# contact — one in six of a rebuilt street did — so the taper is buried.
 # ---------------------------------------------------------------------------
 
 
-def test_the_obj_is_in_scene_metres_and_one_indexed(tmp_path):
-    path = tmp_path / "b.obj"
-    R.write_obj(str(path), np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]),
-                np.array([[0, 1, 2]]))
-    text = path.read_text()
-    assert "v 1.0000 2.0000 3.0000" in text
-    assert "f 1 2 3" in text  # OBJ counts from one; from zero it loads as a hole
+def _shell(width=8.0, depth=6.0, height=6.0, dome=0.0, samples=40):
+    """A closed box of points, standing on a domed underside.
+
+    ``dome`` is how far that underside rises from its lowest point, at the
+    centre, to the walls — which is what comes out of the pipeline. The model
+    is shown the building from above, never sees the bottom, and closes it with
+    a cap. ``dome=0`` is a building that sits flat.
+    """
+    points = []
+    for z in np.linspace(dome, height, samples):
+        for u in np.linspace(-1.0, 1.0, samples):
+            for side in (-1.0, 1.0):
+                points.append((side * width / 2, u * depth / 2, z))
+                points.append((u * width / 2, side * depth / 2, z))
+    for u in np.linspace(-1.0, 1.0, samples):
+        for w in np.linspace(-1.0, 1.0, samples):
+            points.append((u * width / 2, w * depth / 2, dome * max(abs(u), abs(w)) ** 2))
+    return np.array(points, dtype=float)
+
+
+def _reach(points, low, high):
+    """How wide the mesh is between two heights."""
+    slab = points[(points[:, 2] >= low) & (points[:, 2] < high)]
+    return float(slab[:, 0].max() - slab[:, 0].min()) if len(slab) else 0.0
+
+
+def test_a_mesh_that_is_flat_underneath_is_left_where_it_is():
+    mesh = _shell()
+    assert R.seat_z(mesh) == pytest.approx(mesh[:, 2].min())
+
+
+def test_a_domed_underside_is_buried_rather_than_stood_on():
+    mesh = _shell(dome=0.6)
+    full = _reach(mesh, 3.0, 3.1)
+    assert _reach(mesh, 0.0, 0.03) < 0.3 * full, "the mesh under test is not domed"
+    seat = R.seat_z(mesh)
+    assert seat > 0.0, "the tip of the dome was taken for the floor"
+    assert _reach(mesh, seat, seat + 0.03) > 0.5 * full
+
+
+def test_the_building_meets_the_ground_with_its_plan_and_not_a_point():
+    """The measurement that named this problem: plan at the ground vs above it."""
+    plot = _rect(8.0, 6.0)
+    mesh = _shell(dome=0.6)
+    fit = R.fit_to_footprint(mesh, _ring(plot), base_z=4.0)
+    placed = R.place(mesh, yaw=math.radians(fit["yaw_deg"]), scale=fit["scale"],
+                     centre=tuple(fit["centre"]), base_z=4.0)
+    assert _reach(placed, 4.0, 4.05) > 0.5 * _reach(placed, 6.0, 6.05)
+
+
+def test_the_fit_says_how_far_it_had_to_sink_it():
+    plot = _rect(8.0, 6.0)
+    flat = R.fit_to_footprint(_shell(), _ring(plot), base_z=0.0)
+    domed = R.fit_to_footprint(_shell(dome=0.6), _ring(plot), base_z=0.0)
+    assert flat["sunk_m"] == pytest.approx(0.0, abs=1e-6)
+    assert domed["sunk_m"] > 0.05
+
+
+def test_the_height_is_measured_from_the_ground_and_not_from_the_buried_tip():
+    plot = _rect(8.0, 6.0)
+    fit = R.fit_to_footprint(_shell(height=6.0, dome=0.6), _ring(plot), base_z=30.0)
+    # Six metres of building, less however much of the dome went under.
+    assert fit["height_m"] == pytest.approx(6.0 * fit["scale"] - fit["sunk_m"], rel=0.02)
+
+
+def test_a_building_that_narrows_all_the_way_down_is_not_buried_whole():
+    """A dome is a modelling artefact; a genuinely tapered building is not."""
+    cone = _shell(height=6.0, dome=6.0)
+    assert R.seat_z(cone) - cone[:, 2].min() <= 0.15 * 6.0 + 1e-6

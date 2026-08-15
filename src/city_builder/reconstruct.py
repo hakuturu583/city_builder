@@ -767,14 +767,16 @@ def fit_to_footprint(vertices: np.ndarray, footprint: Sequence[Sequence[float]],
     _iou, scale = score(best_yaw)
     placed = place(vertices, yaw=best_yaw, scale=scale,
                    centre=(target[0], target[1]), base_z=base_z)
-    height = float(placed[:, 2].max() - placed[:, 2].min())
     return {
         "yaw_deg": round(math.degrees(best_yaw) % 360.0, 3),
         "scale": round(float(scale), 6),
         "centre": [round(float(target[0]), 3), round(float(target[1]), 3)],
         "base_z": round(float(base_z), 3),
         "footprint_iou": round(float(best_iou), 4),
-        "height_m": round(height, 3),
+        # Above the ground, which is what there is to compare with a storey
+        # count. What is below it is the underside the model invented.
+        "height_m": round(float(placed[:, 2].max() - base_z), 3),
+        "sunk_m": round(float(base_z - placed[:, 2].min()), 3),
     }
 
 
@@ -784,11 +786,73 @@ def _translate(geometry, dx: float, dy: float):
     return translate(geometry, dx, dy)
 
 
+def seat_z(vertices: np.ndarray, *, coverage: float = 0.30,
+           grid: float = 0.02, limit: float = 0.15) -> float:
+    """The height in a mesh that belongs on the ground, not its lowest vertex.
+
+    A generative model is shown a building from above and never sees what it
+    stands on, so it closes the underside with a taper: the mesh comes to a
+    chamfer, a foot, or a rounded cap somewhere under the walls. Standing it on
+    its lowest vertex hangs the walls over that point of contact — over a
+    rebuilt street of 148 buildings, one in six met the ground with under a
+    quarter of its own plan, and that is what reads as a building floating.
+
+    A real building meets the ground with all of its plan, so the ground goes
+    where the mesh is first that wide and the taper is buried. It is the same
+    thing the procedural pass does with its skirt, arrived at from the other
+    side: there the walls are extended down into the hill, here the underside
+    is sunk into it.
+
+    ``coverage`` is how much of the plan has to have started before the ground
+    goes in. It is low on purpose. A taper is a small tail of columns that
+    begin below the rest, and clearing that tail is all this has to do; asking
+    for three quarters of the plan instead buries a median of 0.62 m of real
+    building to chase the few columns under a recess or an entrance. Swept over
+    the same 148: at 0.75 fifteen buildings still met the ground with under half
+    their plan and the median burial was 0.62 m; at 0.30, twelve did and the
+    median burial was 0.05 m.
+    ``grid`` and ``limit`` are fractions of the mesh's own height, so this
+    works on a mesh in any units — which the ones out of the pipeline are,
+    being normalised into a unit cube. ``limit`` is the most that will ever be
+    buried: a building that genuinely narrows towards its base is unusual but
+    not wrong, and burying a fifth of it to make it sit flat would be.
+    """
+    z = vertices[:, 2]
+    low, high = float(z.min()), float(z.max())
+    span = high - low
+    if span <= 0:
+        return low
+
+    # Where the mesh *starts*, column by column, rather than how wide it is in
+    # a slab. Slabs do not work here: these meshes are decimated, so a flat
+    # wall is a few large triangles with no vertices in the middle of it, and a
+    # slab thin enough to see a chamfer is usually empty.
+    cell = max(span * grid, 1e-9)
+    plan = np.floor(vertices[:, :2] / cell).astype(np.int64)
+    order = np.lexsort((plan[:, 1], plan[:, 0]))
+    keys, starts = np.unique(plan[order], axis=0, return_index=True)
+    del keys
+    floors = np.minimum.reduceat(z[order], np.sort(starts))
+
+    # Only the columns that begin in the lower half of the building. A roof
+    # overhang is a column that begins near the top, and counting it here would
+    # ask the ground to rise to the eaves.
+    floors = floors[floors < low + span * 0.5]
+    if len(floors) < 4:
+        return low
+    return min(float(np.quantile(floors, coverage)), low + span * limit)
+
+
 def place(vertices: np.ndarray, *, yaw: float, scale: float,
           centre: tuple[float, float], base_z: float) -> np.ndarray:
-    """Apply a fit: rotate about Z, scale uniformly, stand it on ``base_z``."""
+    """Apply a fit: rotate about Z, scale uniformly, stand it on ``base_z``.
+
+    ``base_z`` takes the height the building is *full width* at, so whatever
+    the model closed its underside with ends up below the ground rather than
+    holding the walls off it. See :func:`seat_z`.
+    """
     plan = _rotate(vertices[:, :2] - vertices[:, :2].mean(axis=0), yaw) * scale
-    z = (vertices[:, 2] - vertices[:, 2].min()) * scale + base_z
+    z = (vertices[:, 2] - seat_z(vertices)) * scale + base_z
     return np.stack([plan[:, 0] + centre[0], plan[:, 1] + centre[1], z], axis=1)
 
 
