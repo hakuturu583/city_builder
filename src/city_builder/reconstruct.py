@@ -12,7 +12,7 @@ about *this* building's size and heading has to come from the plot.
 
 That is what the footprint is for. :mod:`city_builder.buildings` keeps the ring
 each plot was extruded from, and here it is the one measurement the fit is
-solved against: find the yaw, the uniform scale and the translation that lay the
+solved against: find the yaw, the plan scale and the translation that lay the
 mesh's plan outline over that ring, and report how well they agree.
 
 The plot also goes into the *prompt*, which is the cheap half of the same idea.
@@ -24,9 +24,15 @@ rescue.
 
 Three deliberate choices.
 
-**Uniform scale, not per-axis.** Squeezing the mesh onto the ring in x and y
-independently would fit the footprint exactly and put the windows out of square.
-The footprint decides one number; the aspect the model produced is kept.
+**Nearly uniform scale.** Squeezing the mesh onto the ring in x and y
+independently would fit the footprint exactly and put every window out of
+square, so the footprint essentially decides one number and the aspect the
+model produced is kept. Essentially, not exactly: the model has a prior about
+the proportions of a building and acts on it — over 200 real plots it returned
+a plan 1.4 to 1.5 times as long as it was deep whatever it was shown — so up to
+15 % of stretch is allowed along the plot's own long axis, which is about as
+much as a facade survives. On those 200 that alone took the models that fitted
+well enough to stand from 148 to 172.
 
 **Yaw is solved, not assumed.** The views are handed to the model in a known
 order, so in principle the heading is known — but "front" is the model's
@@ -706,19 +712,47 @@ def _hull(points_xy: np.ndarray):
     return MultiPoint([tuple(p) for p in points_xy]).convex_hull
 
 
+def _long_axis(plot) -> float:
+    """Which way a plot lies, in radians: the angle of its longest edge.
+
+    From the minimum rotated rectangle, so it is the plot's own heading and not
+    an artefact of which way the street it stands on happens to run.
+    """
+    corners = list(plot.minimum_rotated_rectangle.exterior.coords)[:4]
+    if len(corners) < 4:
+        return 0.0
+    edges = [(corners[i], corners[(i + 1) % 4]) for i in range(4)]
+    (x0, y0), (x1, y1) = max(edges, key=lambda e: math.dist(e[0], e[1]))
+    return math.atan2(y1 - y0, x1 - x0)
+
+
 def _rotate(points_xy: np.ndarray, radians: float) -> np.ndarray:
     cos, sin = math.cos(radians), math.sin(radians)
     return points_xy @ np.array([[cos, sin], [-sin, cos]])
 
 
+DEFAULT_STRETCH = 0.15
+
+
 def fit_to_footprint(vertices: np.ndarray, footprint: Sequence[Sequence[float]],
                      base_z: float, *, yaw_steps: int = 360,
-                     refine_steps: int = 40) -> dict[str, Any]:
-    """Yaw, uniform scale and translation that lay a mesh onto a plot.
+                     refine_steps: int = 40, stretch: float = DEFAULT_STRETCH,
+                     stretch_steps: int = 13) -> dict[str, Any]:
+    """Yaw, plan scale and translation that lay a mesh onto a plot.
 
     ``vertices`` are in scene axes (Z up) and any units. Returns the transform
     and, more usefully, the overlap it achieved: a reconstruction that came back
     as a different building fits badly, and the number says so.
+
+    ``stretch`` is how far the two plan axes may differ, as a fraction. It is
+    not zero because the model will not keep a plan aspect it was asked for —
+    over 200 real plots it returned a plan 1.4 to 1.5 times as long as it was
+    deep whatever it was shown, and plots at 2:1 or worse were dropped for it.
+    It is small because the alternative failure is worse: squeezing a mesh onto
+    a ring in x and y independently fits the footprint exactly and puts every
+    window out of square. Fifteen per cent is about the most that is invisible
+    on a facade. The height takes the geometric mean, so a stretched building
+    does not also get taller.
     """
     from shapely.geometry import Polygon as ShapelyPolygon
 
@@ -731,24 +765,54 @@ def fit_to_footprint(vertices: np.ndarray, footprint: Sequence[Sequence[float]],
     plan = vertices[:, :2] - vertices[:, :2].mean(axis=0)
     target = np.array([plot.centroid.x, plot.centroid.y])
 
+    # Which way the plot itself lies. The stretch has to be along *its* axes:
+    # scaling a plot-shaped outline along the world's x instead turns a
+    # rectangle into a parallelogram, which is a worse thing to do to a facade
+    # than the aspect error it was meant to fix.
+    phi = _long_axis(plot)
+
     # The hull once, not once per angle. Rotating a point set and taking its
     # hull gives the same polygon as rotating the hull, and the sweep below asks
     # for it several hundred times over a mesh with half a million vertices.
     outline = np.asarray(_hull(plan).exterior.coords)[:-1]
 
-    def score(radians: float) -> tuple[float, float]:
+    def score(radians: float, ratio: float = 1.0) -> tuple[float, np.ndarray]:
         from shapely.geometry import Polygon as ShapelyPolygon
 
-        turned = _rotate(outline, radians)
+        turned = _rotate(outline, radians - phi)  # into the plot's own frame
         hull = ShapelyPolygon(turned)
         if hull.area <= 0:
-            return 0.0, 1.0
-        scale = math.sqrt(plot.area / hull.area)
-        placed = ShapelyPolygon(turned * scale)
+            return 0.0, np.array([1.0, 1.0])
+        # The area is matched whatever the ratio, so the search below trades
+        # one plan axis against the other rather than growing the building.
+        axes = math.sqrt(plot.area / hull.area) * np.array([math.sqrt(ratio),
+                                                            1 / math.sqrt(ratio)])
+        placed = ShapelyPolygon(_rotate(turned * axes, phi))
         placed = _translate(placed, target[0] - placed.centroid.x,
                             target[1] - placed.centroid.y)
         union = placed.union(plot).area
-        return (placed.intersection(plot).area / union if union else 0.0), scale
+        return (placed.intersection(plot).area / union if union else 0.0), axes
+
+    def refine(iou: float, yaw: float, ratio: float,
+               span: float = 1.0) -> tuple[float, float]:
+        window = span * 2 * math.pi / yaw_steps
+        for _ in range(refine_steps):
+            window /= 2.0
+            for candidate in (yaw - window, yaw + window):
+                got, _axes = score(candidate, ratio)
+                if got > iou:
+                    iou, yaw = got, candidate
+        return iou, yaw
+
+    def best_stretch(iou: float, yaw: float, ratio: float) -> tuple[float, float]:
+        if stretch <= 0 or stretch_steps < 2:
+            return iou, ratio
+        edge = math.log(1.0 + stretch)
+        for candidate in np.exp(np.linspace(-edge, edge, stretch_steps)):
+            got, _axes = score(yaw, float(candidate))
+            if got > iou:
+                iou, ratio = got, float(candidate)
+        return iou, ratio
 
     # A coarse sweep and then a local refinement: the objective has one broad
     # maximum per symmetry of the plan, so a sweep finds the right basin and
@@ -756,20 +820,35 @@ def fit_to_footprint(vertices: np.ndarray, footprint: Sequence[Sequence[float]],
     coarse = [(score(2 * math.pi * i / yaw_steps)[0], 2 * math.pi * i / yaw_steps)
               for i in range(yaw_steps)]
     best_iou, best_yaw = max(coarse)
-    window = 2 * math.pi / yaw_steps
-    for _ in range(refine_steps):
-        window /= 2.0
-        for candidate in (best_yaw - window, best_yaw + window):
-            iou, _scale = score(candidate)
-            if iou > best_iou:
-                best_iou, best_yaw = iou, candidate
+    best_ratio = 1.0
 
-    _iou, scale = score(best_yaw)
-    placed = place(vertices, yaw=best_yaw, scale=scale,
+    # Heading and stretch, alternating. The heading is settled uniformly first,
+    # because searching the ratio at the coarse heading buys a stretch that is
+    # really paying for a heading a degree out. Then each is refined under the
+    # other — and the first refinement after a stretch is given a wide window,
+    # since under a uniform scale the optimum heading of a mesh of the wrong
+    # proportions sits a degree or two off the one the stretch wants and a
+    # bisection that starts inside that gap cannot cross it.
+    best_iou, best_yaw = refine(best_iou, best_yaw, 1.0)
+    for span in (4.0, 1.0):
+        was = best_ratio
+        best_iou, best_ratio = best_stretch(best_iou, best_yaw, best_ratio)
+        if best_ratio == was:
+            break
+        best_iou, best_yaw = refine(best_iou, best_yaw, best_ratio, span=span)
+
+    _iou, axes = score(best_yaw, best_ratio)
+    placed = place(vertices, yaw=best_yaw, scale=axes, stretch_deg=math.degrees(phi),
                    centre=(target[0], target[1]), base_z=base_z)
     return {
         "yaw_deg": round(math.degrees(best_yaw) % 360.0, 3),
-        "scale": round(float(scale), 6),
+        # Which way ``scale_xy`` points: the long axis of the plot.
+        "stretch_deg": round(math.degrees(phi) % 180.0, 3),
+        # The geometric mean, which is what the height is scaled by and what a
+        # ledger written before the stretch existed meant by "scale".
+        "scale": round(float(math.sqrt(axes[0] * axes[1])), 6),
+        "scale_xy": [round(float(axes[0]), 6), round(float(axes[1]), 6)],
+        "stretch": round(float(max(axes) / min(axes)), 4),
         "centre": [round(float(target[0]), 3), round(float(target[1]), 3)],
         "base_z": round(float(base_z), 3),
         "footprint_iou": round(float(best_iou), 4),
@@ -843,16 +922,29 @@ def seat_z(vertices: np.ndarray, *, coverage: float = 0.30,
     return min(float(np.quantile(floors, coverage)), low + span * limit)
 
 
-def place(vertices: np.ndarray, *, yaw: float, scale: float,
-          centre: tuple[float, float], base_z: float) -> np.ndarray:
-    """Apply a fit: rotate about Z, scale uniformly, stand it on ``base_z``.
+def place(vertices: np.ndarray, *, yaw: float, scale: float | Sequence[float],
+          centre: tuple[float, float], base_z: float,
+          stretch_deg: float = 0.0) -> np.ndarray:
+    """Apply a fit: rotate about Z, scale, stand it on ``base_z``.
+
+    ``scale`` is one number or the two plan axes, and ``stretch_deg`` is which
+    way the two point — the long axis of the plot, so that a stretched building
+    stays rectangular instead of becoming a parallelogram. It is ignored when
+    the scale is one number, a uniform scale being the same in every frame.
+
+    The height always takes the geometric mean of the axes: the stretch is a
+    plan correction and a building that got 8 % longer did not get 8 % taller.
 
     ``base_z`` takes the height the building is *full width* at, so whatever
     the model closed its underside with ends up below the ground rather than
     holding the walls off it. See :func:`seat_z`.
     """
-    plan = _rotate(vertices[:, :2] - vertices[:, :2].mean(axis=0), yaw) * scale
-    z = (vertices[:, 2] - seat_z(vertices)) * scale + base_z
+    axes = np.array([scale, scale], dtype=float) if np.isscalar(scale) \
+        else np.asarray(scale, dtype=float)
+    phi = math.radians(stretch_deg)
+    turned = _rotate(vertices[:, :2] - vertices[:, :2].mean(axis=0), yaw - phi)
+    plan = _rotate(turned * axes, phi)
+    z = (vertices[:, 2] - seat_z(vertices)) * math.sqrt(axes[0] * axes[1]) + base_z
     return np.stack([plan[:, 0] + centre[0], plan[:, 1] + centre[1], z], axis=1)
 
 
@@ -909,7 +1001,8 @@ def fit_glb(glb_path: str, plot: dict[str, Any], *, out_path: str | None = None,
     vertices = to_scene_axes(vertices)
     fit = fit_to_footprint(vertices, plot["footprint"], float(plot["base_z"]),
                            yaw_steps=yaw_steps)
-    placed = place(vertices, yaw=math.radians(fit["yaw_deg"]), scale=fit["scale"],
+    placed = place(vertices, yaw=math.radians(fit["yaw_deg"]), scale=fit["scale_xy"],
+                   stretch_deg=fit["stretch_deg"],
                    centre=(fit["centre"][0], fit["centre"][1]), base_z=fit["base_z"])
 
     report = {

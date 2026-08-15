@@ -119,6 +119,58 @@ def test_a_building_of_the_wrong_proportions_says_so():
     assert fit["footprint_iou"] < 0.75
 
 
+# ---------------------------------------------------------------------------
+# The stretch
+#
+# The model will not keep a plan aspect it is asked for — over 200 real plots
+# it returned a plan 1.4 to 1.5 times as long as it was deep whatever it was
+# shown — so the fit is allowed a little anisotropy to meet it halfway.
+# ---------------------------------------------------------------------------
+
+
+def test_a_mesh_a_little_too_square_is_stretched_onto_the_plot():
+    plot = _rect(30.0, 18.0)
+    mesh = R.to_scene_axes(_box_mesh(width=1.0, depth=0.66, height=0.4))  # 1.52:1, not 1.67:1
+
+    uniform = R.fit_to_footprint(mesh, _ring(plot), base_z=0.0, stretch=0.0)
+    stretched = R.fit_to_footprint(mesh, _ring(plot), base_z=0.0)
+
+    assert stretched["footprint_iou"] > uniform["footprint_iou"]
+    assert stretched["footprint_iou"] > 0.99
+
+
+def test_the_stretch_is_bounded_by_what_a_facade_survives():
+    plot = _rect(40.0, 10.0)
+    cube = R.to_scene_axes(_box_mesh(1.0, 1.0, 1.0))
+    fit = R.fit_to_footprint(cube, _ring(plot), base_z=0.0, stretch=0.15)
+    assert fit["stretch"] <= 1.15 + 1e-6
+    assert max(fit["scale_xy"]) / min(fit["scale_xy"]) == pytest.approx(fit["stretch"], rel=1e-3)
+
+
+def test_asking_for_no_stretch_gives_the_uniform_fit_back():
+    plot = _rect(30.0, 18.0)
+    mesh = R.to_scene_axes(_box_mesh(width=1.0, depth=0.66, height=0.4))
+    fit = R.fit_to_footprint(mesh, _ring(plot), base_z=0.0, stretch=0.0)
+    assert fit["stretch"] == pytest.approx(1.0)
+    assert fit["scale_xy"][0] == pytest.approx(fit["scale_xy"][1])
+
+
+def test_a_stretched_building_does_not_also_get_taller():
+    """The stretch is a plan correction; the height takes the mean of the axes."""
+    plot = _rect(40.0, 10.0)
+    cube = R.to_scene_axes(_box_mesh(1.0, 1.0, 1.0))
+    fit = R.fit_to_footprint(cube, _ring(plot), base_z=0.0)
+    assert fit["height_m"] == pytest.approx(fit["scale"], rel=1e-3)
+
+
+def test_the_stretch_does_not_turn_the_building_a_quarter_turn():
+    """The long axis of the mesh has to end up on the long axis of the plot."""
+    plot = _rect(30.0, 18.0, angle=25.0)
+    mesh = R.to_scene_axes(_box_mesh(width=1.0, depth=0.66, height=0.4))
+    fit = R.fit_to_footprint(mesh, _ring(plot), base_z=0.0)
+    assert fit["yaw_deg"] % 180 == pytest.approx(25.0, abs=2.0)
+
+
 def test_the_building_stands_on_the_ground_it_was_given():
     plot = _rect(20.0, 20.0)
     mesh = R.to_scene_axes(_box_mesh(1.0, 1.0, 1.0))

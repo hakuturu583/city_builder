@@ -47,6 +47,34 @@ DEFAULT_NEGATIVE = (
 )
 
 
+def licence(plot: dict[str, Any], brush_up: float, *, plain: float = 1.5,
+            elongated: float = 3.0, floor: float = 0.30) -> float:
+    """How far the image model may redraw *this* plot's massing.
+
+    Brushing the massing up is what makes the reconstruction look like a
+    building rather than a box, and it is also what loses the plot's shape. The
+    image model has a strong prior about the proportions of a house, and at a
+    strength of 0.55 it acts on it: over 200 real plots the mesh came back
+    between 1.4 and 1.5 times as long as it was deep whatever it was shown,
+    and the drop rate went with the plot's own aspect — 89 % of plots under
+    1.5:1 were kept against 7 % of those over 3:1.
+
+    So the licence is spent where there is shape to spare. A square-ish plot
+    gets the full ``brush_up``; by ``elongated`` it is down to ``floor``, which
+    is enough to change the materials and not enough to square the plan up.
+    """
+    from .reconstruct import plan_dimensions
+
+    if brush_up <= floor or not plot.get("footprint"):
+        return brush_up
+    long_side, short_side = plan_dimensions(plot["footprint"])
+    ratio = long_side / max(short_side, 1e-6)
+    if ratio <= plain:
+        return brush_up
+    towards = min((ratio - plain) / max(elongated - plain, 1e-6), 1.0)
+    return round(brush_up + (floor - brush_up) * towards, 4)
+
+
 def worth_rebuilding(plot: dict[str, Any], *, min_area: float = 0.0) -> bool:
     """Whether a plot is worth half a minute of GPU.
 
@@ -113,8 +141,9 @@ def rebuild(scene, out_dir: str, *, buildings: list[int] | None = None,
             rows.append(done[str(index)])
             continue
         name = f"b{index:04d}"
+        strength = licence(plots[index], brush_up)
         row: dict[str, Any] = {"building": index, "area_m2": plots[index]["area"],
-                               "roof": plots[index].get("roof")}
+                               "roof": plots[index].get("roof"), "brush_up": strength}
         try:
             shot = portrait_module.render_portrait(
                 scene, index, os.path.join(out_dir, f"{name}.png"), options=options,
@@ -124,10 +153,10 @@ def rebuild(scene, out_dir: str, *, buildings: list[int] | None = None,
             report = reconstruct_module.reconstruct(
                 plots[index], out_dir, image=shot["image"], name=name,
                 mesh_options=mesh_options, restyle_prompt=style,
-                restyle_options=(reconstruct_module.RestyleOptions(strength=brush_up,
+                restyle_options=(reconstruct_module.RestyleOptions(strength=strength,
                                                                   seed=seed + index,
                                                                   negative=negative)
-                                 if brush_up > 0 else None))
+                                 if strength > 0 else None))
             row.update({k: v for k, v in report.items() if k != "source"})
             row["used"] = report["footprint_iou"] >= keep_below
         except Exception as error:  # noqa: BLE001 - one building must not stop a street
@@ -148,6 +177,14 @@ def rebuild(scene, out_dir: str, *, buildings: list[int] | None = None,
         _write(ledger_path, scene, rows, keep_below)
 
     return _write(ledger_path, scene, rows, keep_below)
+
+
+def _turn(radians: float):
+    """The plan rotation :mod:`city_builder.reconstruct` applies, as a matrix."""
+    import numpy as np
+
+    cos, sin = math.cos(radians), math.sin(radians)
+    return np.array([[cos, sin], [-sin, cos]])
 
 
 def _write(path: str, scene, rows: list[dict[str, Any]], keep_below: float) -> dict[str, Any]:
@@ -250,11 +287,17 @@ def place(scene, ledger: str | dict[str, Any], *, facade_dir: str | None = None,
         everything = np.concatenate(parts)
         centroid = everything[:, :2].mean(axis=0)
         floor = reconstruct_module.seat_z(everything)
-        yaw = math.radians(row["yaw_deg"])
-        turn = np.array([[math.cos(yaw), math.sin(yaw)], [-math.sin(yaw), math.cos(yaw)]])
+        # The two plan axes if the fit stretched it, one number if it did not;
+        # ``stretch_deg`` is which way they point, the height always takes
+        # their mean, and a ledger written before any of that still reads.
+        axes = np.asarray(row.get("scale_xy") or [row["scale"], row["scale"]], dtype=float)
+        rise = math.sqrt(axes[0] * axes[1])
+        phi = math.radians(row.get("stretch_deg", 0.0))
+        into = _turn(math.radians(row["yaw_deg"]) - phi)
+        back = _turn(phi)
         for obj, coords in zip(added, parts):
-            plan = (coords[:, :2] - centroid) @ turn * row["scale"]
-            height = (coords[:, 2] - floor) * row["scale"] + row["base_z"]
+            plan = ((coords[:, :2] - centroid) @ into * axes) @ back
+            height = (coords[:, 2] - floor) * rise + row["base_z"]
             obj.data.vertices.foreach_set("co", np.column_stack(
                 [plan[:, 0] + row["centre"][0], plan[:, 1] + row["centre"][1],
                  height]).reshape(-1))

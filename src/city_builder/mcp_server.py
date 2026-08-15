@@ -808,7 +808,10 @@ def reconstruct_building(
                         Field(description="How far to let an image model re-imagine the "
                                           "massing render before it is modelled: 0 skips "
                                           "it, 0.6 is measured. This is the photorealism "
-                                          "dial — the mesh sampler has none")] = 0.6,
+                                          "dial — the mesh sampler has none. Spent in full "
+                                          "on a square-ish plot and tapered towards 0.3 on "
+                                          "a long thin one, which the image model would "
+                                          "otherwise square up")] = 0.6,
     seed: Annotated[int, Field(description="Same seed gives the same building")] = 0,
 ):
     """A textured 3D model of one building, standing on its own plot. **~40 s, GPU.**
@@ -816,8 +819,10 @@ def reconstruct_building(
     Three steps, and the division of labour is the point: the *shape* comes
     from the map and only the *surfaces* come from a model. The plot's massing
     is rendered on a transparent film, TRELLIS.2 turns that picture into a
-    PBR-textured mesh, and the footprint decides the yaw, one uniform scale and
-    where it stands.
+    PBR-textured mesh, and the footprint decides the yaw, the plan scale and
+    where it stands. The scale is very nearly uniform — up to 15 % of stretch
+    along the plot's long axis is allowed, because the model returns a plan
+    1.4 to 1.5 times as long as it is deep whatever it is shown.
 
     Asking an image model for the picture instead does not work, and the
     difference is not subtle: over seven promptings — metres, ratios, "a long
@@ -836,6 +841,7 @@ def reconstruct_building(
     from mcp.server.mcpserver import Image
 
     from .config import CityConfig
+    from .district import licence
     from .portrait import PortraitOptions, render_portrait
     from .reconstruct import MeshOptions, RestyleOptions, reconstruct
 
@@ -848,11 +854,12 @@ def reconstruct_building(
                            facade_dir=facade_dir, roof_texture=roof_texture,
                            marking_options=CityConfig.from_dict(held.options).markings,
                            verbose=False)
+    strength = licence(held.result.plots[building], brush_up)
     report = reconstruct(held.result.plots[building], out_dir, image=shot["image"], name=name,
                          mesh_options=MeshOptions(seed=seed, pipeline_type=resolution,
                                                   tex_guidance=3.0),
-                         restyle_options=(RestyleOptions(strength=brush_up, seed=seed)
-                                          if brush_up > 0 else None))
+                         restyle_options=(RestyleOptions(strength=strength, seed=seed)
+                                          if strength > 0 else None))
     with open(shot["image"], "rb") as handle:
         data = handle.read()
     return [{**shot, **report}, Image(data=data, format="png")]
