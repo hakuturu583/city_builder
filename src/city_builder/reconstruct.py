@@ -141,7 +141,7 @@ class ImageOptions:
     vram_budget_gb: float = 0.0  # 0 = no cap; this runs alone
 
 
-def cut_out(image, *, tolerance: int = 42) -> Any:
+def cut_out(image, *, tolerance: int = 42, protect=None) -> Any:
     """The backdrop of a plain-background picture, turned into transparency.
 
     Two things this does not do, both learned the hard way.
@@ -157,6 +157,12 @@ def cut_out(image, *, tolerance: int = 42) -> Any:
     the middle of the building. What counts as backdrop is the region *of that
     colour and connected to the border*, which a wall in the middle is not.
 
+    ``protect`` is a mask of pixels that may not be called backdrop whatever
+    their colour. A building re-imagined from a massing render is grey where
+    the sky is grey, and without this the flood walks in through the roof and
+    hollows it out — measured, the subject came back as 5 % of the frame
+    against the 30 % it should be.
+
     All of this exists so the reconstruction never reaches for a
     background-removal model: TRELLIS.2 skips its own — which is gated — when
     the image it is handed already has an alpha channel.
@@ -170,6 +176,8 @@ def cut_out(image, *, tolerance: int = 42) -> Any:
     backdrop = np.median(border, axis=0)
 
     plain = np.abs(rgb - backdrop).max(axis=2) <= tolerance
+    if protect is not None:
+        plain &= ~np.asarray(protect, dtype=bool)
     labels, count = ndimage.label(plain)
     alpha = np.full(rgb.shape[:2], 255, dtype=np.uint8)
     if count:
@@ -215,6 +223,102 @@ def elevation(prompt: str, path: str, options: ImageOptions | None = None) -> st
         torch.cuda.empty_cache()
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     cut_out(image).save(path)
+    return path
+
+
+VARIED_STYLE = (
+    "colour photograph of a Japanese urban building, taken with a long lens on "
+    "an overcast afternoon: a walled forecourt and an inner courtyard, a "
+    "recessed entrance bay, one wing set back from the street and lower than "
+    "the rest, a parapet and a railed roof terrace, an outdoor stair, "
+    "air-conditioning units and pipework on the roof, weathered concrete, "
+    "ceramic tile, painted steel, real materials with dirt and staining"
+)
+
+
+@dataclass
+class RestyleOptions:
+    """How far to let the picture leave the massing it started from."""
+
+    model: str = "stabilityai/stable-diffusion-xl-base-1.0"
+    # The one dial. The massing is the starting latent, so what survives is
+    # what has not been denoised away — the silhouette and the plan first,
+    # because they are the largest structures in the image.
+    strength: float = 0.55
+    steps: int = 30
+    guidance: float = 7.0
+    seed: int = 0
+    # The first four are the ones that matter. Handed a flat-shaded render an
+    # image model reads it as a *drawing* and returns a better drawing, which
+    # is a plausible picture and a useless one — a reconstruction of a line
+    # drawing is a shell with no thickness.
+    negative: str = ("line drawing, sketch, blueprint, architectural drawing, "
+                     "render, cgi, clay model, white outline, "
+                     "plain box, featureless slab, blank wall, "
+                     "street scene, adjacent buildings, cropped, cut off, people, cars, "
+                     "text, watermark")
+    # What the massing is composited onto before it goes in. Mid-grey rather
+    # than white: the model reads a white field as sky or as overexposure and
+    # paints the building lighter to match.
+    backdrop: tuple[int, int, int] = (150, 150, 152)
+
+
+def restyle(image_path: str, path: str, prompt: str = VARIED_STYLE,
+            options: RestyleOptions | None = None) -> str:
+    """Re-imagine a massing render as a building, keeping where it stands.
+
+    The massing that comes out of :mod:`city_builder.portrait` is a box, and a
+    reconstruction of a box is a box — which is faithful and useless, because
+    real streets are not made of them. This puts that render in as the starting
+    latent of an image model and returns part of the noise, so the plan and the
+    height are held by what is already there while the model supplies a
+    courtyard, a set-back wing, a parapet, and the surfaces.
+
+    ``strength`` is the whole trade-off and it has two ends that both fail: too
+    low and the picture is the box it started from, too high and the building
+    stops fitting its plot. The footprint IoU from the fit downstream is what
+    measures the second, so sweep it rather than guess.
+    """
+    import numpy as np
+    import torch
+    from diffusers import AutoPipelineForImage2Image
+    from PIL import Image as PILImage
+
+    options = options or RestyleOptions()
+
+    # The render is RGBA on nothing; an image model wants a picture. The alpha
+    # is re-derived afterwards, from this same backdrop.
+    source = PILImage.open(image_path).convert("RGBA")
+    flat = np.asarray(source, dtype=np.float32)
+    alpha = flat[..., 3:4] / 255.0
+    composited = flat[..., :3] * alpha + np.array(options.backdrop, dtype=np.float32) * (1 - alpha)
+    start = PILImage.fromarray(composited.astype(np.uint8))
+
+    pipeline = AutoPipelineForImage2Image.from_pretrained(
+        options.model, torch_dtype=torch.float16, variant="fp16", use_safetensors=True)
+    pipeline.set_progress_bar_config(disable=True)
+    pipeline.enable_model_cpu_offload()
+
+    image = pipeline(
+        prompt=prompt, negative_prompt=options.negative, image=start,
+        strength=options.strength, num_inference_steps=options.steps,
+        guidance_scale=options.guidance,
+        generator=torch.Generator(device="cpu").manual_seed(options.seed),
+    ).images[0]
+
+    del pipeline
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    # Where the massing stood is where the building is, give or take what the
+    # model added around it. Dilating that and protecting it from the flood is
+    # what stops a grey roof under a grey sky from being keyed out.
+    from scipy import ndimage
+
+    protect = ndimage.binary_dilation(alpha[..., 0] > 0.5,
+                                      iterations=max(1, source.width // 64))
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    cut_out(image, protect=protect).save(path)
     return path
 
 

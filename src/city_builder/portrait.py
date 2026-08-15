@@ -198,6 +198,7 @@ def keep_only(obj, start: int, end: int) -> int:
 def render_portrait(scene, building: int, out_path: str, *,
                     options: PortraitOptions | None = None, facade_dir: str | None = None,
                     road_texture: str | None = None, ground_texture: str | None = None,
+                    massing_options=None, massing_seed: int | None = None,
                     marking_options=None, verbose: bool = True) -> dict[str, Any]:
     """One RGBA picture of one building of a built scene.
 
@@ -206,6 +207,11 @@ def render_portrait(scene, building: int, out_path: str, *,
     subject and nothing else. Dress it: the facade sheets are the only thing in
     the picture that says what the building is made of, and the reconstruction
     carries that appearance into the mesh's textures.
+
+    ``massing_seed`` replaces the plot's extruded box with a building that has
+    something going on — see :mod:`city_builder.massing`. Photograph the box and
+    the reconstruction faithfully returns a box, which is the whole reason that
+    module exists.
     """
     import shutil
     import tempfile
@@ -221,9 +227,11 @@ def render_portrait(scene, building: int, out_path: str, *,
     markings = tempfile.mkdtemp(prefix="city-markings-")
     started = time.time()
     try:
-        _render(scene, building, out_path, options=options, facade_dir=facade_dir,
-                road_texture=road_texture, ground_texture=ground_texture,
-                marking_options=marking_options, markings_dir=markings, verbose=verbose)
+        features = _render(scene, building, out_path, options=options, facade_dir=facade_dir,
+                           road_texture=road_texture, ground_texture=ground_texture,
+                           massing_options=massing_options, massing_seed=massing_seed,
+                           marking_options=marking_options, markings_dir=markings,
+                           verbose=verbose)
     finally:
         shutil.rmtree(markings, ignore_errors=True)
 
@@ -232,6 +240,7 @@ def render_portrait(scene, building: int, out_path: str, *,
     return {
         "image": out_path,
         "building": building,
+        "features": features,
         "camera": [round(v, 2) for v in position],
         "looking_at": [round(v, 2) for v in target],
         "elevation_deg": options.elevation_deg,
@@ -239,9 +248,48 @@ def render_portrait(scene, building: int, out_path: str, *,
     }
 
 
+def _replace_with_massing(plot: dict[str, Any], massing_options, seed: int, *,
+                          facade_dir: str | None) -> list[str]:
+    """Take the plot's box out of the scene and put a varied building in its place.
+
+    The sheet is chosen by floor count, the same rule the whole-scene facade
+    pass uses: the wall UV normalises over the building's height, so a sheet
+    drawn for six floors only reads on a six-floor building.
+    """
+    import bpy
+
+    from . import massing as massing_module
+    from . import scene as scene_module
+    from .classes import get as surface_class
+
+    for name in ("Buildings", "Roofs"):
+        obj = bpy.data.objects.get(name)
+        if obj is not None:
+            bpy.data.objects.remove(obj, do_unlink=True)
+
+    built = massing_module.build(plot, massing_options, seed)
+    material = None
+    if facade_dir and os.path.isdir(facade_dir):
+        sheets = sorted(os.path.join(facade_dir, f) for f in os.listdir(facade_dir)
+                        if f.endswith(".png"))
+        if sheets:
+            choice = scene_module.assign_sheets(sheets, [int(plot.get("floors") or 1)],
+                                                seed=seed)
+            material = scene_module.tiled_material(f"MassingFacade{seed}",
+                                                   sheets[choice[0]], roughness=0.6)
+
+    for group, meshes in (("Buildings", built["Buildings"]), ("Roofs", built["Roofs"])):
+        for index, mesh in enumerate(meshes):
+            scene_module.add_object(f"{group}{index:03d}", mesh,
+                                    material if group == "Buildings" else None,
+                                    surface_class(group))
+    return built["features"]
+
+
 def _render(scene, building: int, out_path: str, *, options: PortraitOptions,
             facade_dir: str | None, road_texture: str | None, ground_texture: str | None,
-            marking_options, markings_dir: str, verbose: bool) -> None:
+            massing_options, massing_seed: int | None,
+            marking_options, markings_dir: str, verbose: bool) -> list[str]:
     import bpy
     import mathutils
 
@@ -254,24 +302,32 @@ def _render(scene, building: int, out_path: str, *, options: PortraitOptions,
     if not any(obj.type == "LIGHT" for obj in bpy.data.objects):
         scene_module.sunlit()
 
-    kept = 0
-    for name in ("Buildings", "Roofs"):
-        counts = scene_module.build.face_counts.get(name)
-        obj = bpy.data.objects.get(name)
-        if not counts or obj is None:
-            continue
-        kept += keep_only(obj, *face_range(counts, building))
-    if not kept:
-        raise RuntimeError("the built scene has no faces for this building")
+    plot = scene.result.plots[building]
+    features: list[str] = []
+    if massing_seed is None:
+        kept = 0
+        for name in ("Buildings", "Roofs"):
+            counts = scene_module.build.face_counts.get(name)
+            obj = bpy.data.objects.get(name)
+            if not counts or obj is None:
+                continue
+            kept += keep_only(obj, *face_range(counts, building))
+        if not kept:
+            raise RuntimeError("the built scene has no faces for this building")
+    else:
+        features = _replace_with_massing(plot, massing_options, massing_seed,
+                                         facade_dir=facade_dir)
 
     # Everything that is not the subject goes. The ground and the road are what
     # a video model needed to know where it was; a reconstruction of one
     # building needs them gone, and gone is cleaner than masked.
+    subject = {"Buildings", "Roofs"} if massing_seed is None else {
+        o.name for o in bpy.data.objects
+        if o.type == "MESH" and (o.name.startswith("Buildings") or o.name.startswith("Roofs"))}
     for obj in list(bpy.data.objects):
-        if obj.type == "MESH" and obj.name not in ("Buildings", "Roofs"):
+        if obj.type == "MESH" and obj.name not in subject:
             bpy.data.objects.remove(obj, do_unlink=True)
 
-    plot = scene.result.plots[building]
     position, target = portrait_pose(plot, options)
 
     data = bpy.data.cameras.new("Portrait")
@@ -296,5 +352,6 @@ def _render(scene, building: int, out_path: str, *, options: PortraitOptions,
     blender.render.filepath = out_path
     bpy.ops.render.render(write_still=True)
     if verbose:
-        print(f"[portrait] building {building}: {kept} face(s), "
+        print(f"[portrait] building {building}: {', '.join(features) or 'the plot as built'}, "
               f"{options.elevation_deg:g} deg above, {options.size}px")
+    return features
