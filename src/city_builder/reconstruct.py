@@ -435,6 +435,11 @@ def to_mesh(image_path: str, out_path: str, options: MeshOptions | None = None) 
                             seed=options.seed, pipeline_type=options.pipeline_type)[0]
     mesh.simplify(16777216)  # the nvdiffrast limit, not a quality choice
 
+    # Between the sampler and the mesher, because they are the two things here
+    # that want the whole card. Without it the decimation inside to_glb runs out
+    # of memory on a 32 GB card at the 1024 resolution.
+    torch.cuda.empty_cache()
+
     import o_voxel
 
     glb = o_voxel.postprocess.to_glb(
@@ -445,6 +450,13 @@ def to_mesh(image_path: str, out_path: str, options: MeshOptions | None = None) 
         remesh=True, remesh_band=1, remesh_project=0, verbose=False)
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     glb.export(out_path, extension_webp=True)
+
+    # The pipeline is kept but its working set is not. Reconstructing a street
+    # is one call per building in one process, and the voxel volumes are large
+    # enough that the second building runs out of memory inside CuMesh without
+    # this.
+    del mesh, glb
+    torch.cuda.empty_cache()
     return {"glb": out_path, "took_seconds": round(time.time() - started, 1),
             "bytes": os.path.getsize(out_path)}
 
@@ -643,24 +655,35 @@ def place(vertices: np.ndarray, *, yaw: float, scale: float,
     return np.stack([plan[:, 0] + centre[0], plan[:, 1] + centre[1], z], axis=1)
 
 
-def reconstruct(plot: dict[str, Any], out_dir: str, *, style: str = DEFAULT_STYLE,
-                image_options: ImageOptions | None = None,
+def reconstruct(plot: dict[str, Any], out_dir: str, *, image: str | None = None,
+                style: str = DEFAULT_STYLE, image_options: ImageOptions | None = None,
                 mesh_options: MeshOptions | None = None,
                 name: str = "building") -> dict[str, Any]:
-    """One plot to one placed building: prompt, image, mesh, fit.
+    """One plot to one placed building: a picture, a mesh, a fit.
 
-    Writes ``<name>.png`` (what was drawn), ``<name>.glb`` (the model as it came
-    out, in its own unit cube) and ``<name>.obj`` (the same mesh in scene metres,
-    standing on the plot). The GLB is kept because it carries the PBR textures
-    the OBJ cannot; the OBJ is what says where the building is.
+    ``image`` is the picture to model, and
+    :func:`city_builder.portrait.render_portrait` is where it should come from —
+    a render of this plot's own massing, dressed in its generated facade. Left
+    out, the picture is drawn from the prompt instead, which is measurably worse
+    at the thing this is for: over seven promptings the plan aspect came back
+    1.00 against a wanted 1.63, and the fitted footprint stalled at an IoU of
+    0.68 where the render reaches 0.87.
+
+    Writes ``<name>.glb`` (the model as it came out, in its own unit cube) and
+    ``<name>.obj`` (the same mesh in scene metres, standing on the plot). The
+    GLB is kept because it carries the PBR textures the OBJ cannot; the OBJ is
+    what says where the building is.
     """
     os.makedirs(out_dir, exist_ok=True)
-    prompt = describe(plot, style)
+    report: dict[str, Any] = {}
+    if image is None:
+        report["prompt"] = describe(plot, style)
+        image = elevation(report["prompt"], os.path.join(out_dir, f"{name}.png"),
+                          image_options)
 
-    image = elevation(prompt, os.path.join(out_dir, f"{name}.png"), image_options)
     made = to_mesh(image, os.path.join(out_dir, f"{name}.glb"), mesh_options)
     fit = fit_glb(made["glb"], plot, out_path=os.path.join(out_dir, f"{name}.obj"))
-    return {"prompt": prompt, "image": image, **made, **fit}
+    return {**report, "image": image, **made, **fit}
 
 
 def fit_glb(glb_path: str, plot: dict[str, Any], *, out_path: str | None = None,
