@@ -347,6 +347,17 @@ class MeshOptions:
     # show up as anything but seconds.
     attn_backend: str = "sdpa"
 
+    # What the samplers are allowed to do. TRELLIS.2 ships shape at guidance
+    # 7.5 and texture at 1.0 — which is no classifier-free guidance at all on
+    # the texture — over twelve steps. Raising a guidance pulls *towards* the
+    # conditioning image and lowering it drifts towards the model's own prior,
+    # so neither is a "creativity" dial in the way a denoise strength is: this
+    # model always generates from noise, and the only thing it is told about
+    # the building is the picture. Left at None each keeps the model's default.
+    steps: int | None = None
+    shape_guidance: float | None = None
+    tex_guidance: float | None = None
+
 
 _PIPELINE: Any = None
 
@@ -531,12 +542,26 @@ def to_mesh(image_path: str, out_path: str, options: MeshOptions | None = None) 
     options = options or MeshOptions()
     pipeline = _pipeline(options)
 
+    def tuned(defaults: dict, guidance: float | None) -> dict:
+        params = dict(defaults or {})
+        if options.steps is not None:
+            params["steps"] = options.steps
+        if guidance is not None:
+            params["guidance_strength"] = guidance
+        return params
+
     started = time.time()
     with torch.no_grad():
         # RGBA, not RGB: the alpha is what keeps the pipeline's own background
         # remover — a gated model this never downloads — out of the run.
-        mesh = pipeline.run(PILImage.open(image_path).convert("RGBA"),
-                            seed=options.seed, pipeline_type=options.pipeline_type)[0]
+        mesh = pipeline.run(
+            PILImage.open(image_path).convert("RGBA"),
+            seed=options.seed, pipeline_type=options.pipeline_type,
+            shape_slat_sampler_params=tuned(pipeline.shape_slat_sampler_params,
+                                            options.shape_guidance),
+            tex_slat_sampler_params=tuned(pipeline.tex_slat_sampler_params,
+                                          options.tex_guidance),
+        )[0]
     mesh.simplify(16777216)  # the nvdiffrast limit, not a quality choice
 
     # Between the sampler and the mesher, because they are the two things here
@@ -762,6 +787,8 @@ def place(vertices: np.ndarray, *, yaw: float, scale: float,
 def reconstruct(plot: dict[str, Any], out_dir: str, *, image: str | None = None,
                 style: str = DEFAULT_STYLE, image_options: ImageOptions | None = None,
                 mesh_options: MeshOptions | None = None,
+                restyle_options: RestyleOptions | None = None,
+                restyle_prompt: str = VARIED_STYLE,
                 name: str = "building") -> dict[str, Any]:
     """One plot to one placed building: a picture, a mesh, a fit.
 
@@ -772,6 +799,15 @@ def reconstruct(plot: dict[str, Any], out_dir: str, *, image: str | None = None,
     at the thing this is for: over seven promptings the plan aspect came back
     1.00 against a wanted 1.63, and the fitted footprint stalled at an IoU of
     0.68 where the render reaches 0.87.
+
+    ``restyle_options`` is what makes this a *brush-up* rather than a copy. The
+    reconstruction returns the shapes and surfaces it is shown, so a render of
+    a procedural massing comes back as a procedural massing: measured over five
+    settings of the mesh sampler — texture guidance 1 to 6, shape guidance 3,
+    twelve steps to twenty-five — every one of them was indistinguishable from
+    the default. Nothing in that model is a photorealism dial. Putting the
+    render through an image model first is: same building, same footprint fit
+    to within a thousandth, and a roof with ridge tiles and staining on it.
 
     Writes ``<name>.glb`` (the model as it came out, in its own unit cube) and
     ``<name>.obj`` (the same mesh in scene metres, standing on the plot). The
@@ -784,6 +820,10 @@ def reconstruct(plot: dict[str, Any], out_dir: str, *, image: str | None = None,
         report["prompt"] = describe(plot, style)
         image = elevation(report["prompt"], os.path.join(out_dir, f"{name}.png"),
                           image_options)
+    if restyle_options is not None:
+        image = restyle(image, os.path.join(out_dir, f"{name}_styled.png"),
+                        restyle_prompt, restyle_options)
+        report["styled"] = image
 
     made = to_mesh(image, os.path.join(out_dir, f"{name}.glb"), mesh_options)
     fit = fit_glb(made["glb"], plot, out_path=os.path.join(out_dir, f"{name}.obj"))

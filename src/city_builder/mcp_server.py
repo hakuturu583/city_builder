@@ -794,6 +794,11 @@ def reconstruct_building(
     resolution: Annotated[Literal["512", "1024", "1024_cascade"],
                           Field(description="TRELLIS.2 detail. 512 is ~30 s; 1024 wants "
                                             "more than 32 GB of VRAM at the meshing step")] = "512",
+    brush_up: Annotated[float,
+                        Field(description="How far to let an image model re-imagine the "
+                                          "massing render before it is modelled: 0 skips "
+                                          "it, 0.6 is measured. This is the photorealism "
+                                          "dial — the mesh sampler has none")] = 0.6,
     seed: Annotated[int, Field(description="Same seed gives the same building")] = 0,
 ):
     """A textured 3D model of one building, standing on its own plot. **~40 s, GPU.**
@@ -822,7 +827,7 @@ def reconstruct_building(
 
     from .config import CityConfig
     from .portrait import PortraitOptions, render_portrait
-    from .reconstruct import MeshOptions, reconstruct
+    from .reconstruct import MeshOptions, RestyleOptions, reconstruct
 
     held = STORE.get(scene)
     name = f"building{building:04d}"
@@ -833,9 +838,11 @@ def reconstruct_building(
                            facade_dir=facade_dir, roof_texture=roof_texture,
                            marking_options=CityConfig.from_dict(held.options).markings,
                            verbose=False)
-    report = reconstruct(held.result.plots[building], out_dir, image=shot["image"],
-                         name=name, mesh_options=MeshOptions(seed=seed,
-                                                             pipeline_type=resolution))
+    report = reconstruct(held.result.plots[building], out_dir, image=shot["image"], name=name,
+                         mesh_options=MeshOptions(seed=seed, pipeline_type=resolution,
+                                                  tex_guidance=3.0),
+                         restyle_options=(RestyleOptions(strength=brush_up, seed=seed)
+                                          if brush_up > 0 else None))
     with open(shot["image"], "rb") as handle:
         data = handle.read()
     return [{**shot, **report}, Image(data=data, format="png")]
