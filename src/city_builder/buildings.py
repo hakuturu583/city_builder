@@ -18,7 +18,7 @@ from __future__ import annotations
 import math
 import random
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -52,8 +52,33 @@ class BuildingOptions:
 
     facade_width: float = 12.0  # how much wall one sheet spans horizontally
     skirt: float = 1.0  # how far the walls run below the ground
+
+    # How each building is topped. Weighted by repetition rather than by
+    # numbers: a flat roof twice for every pitch, which is roughly what a
+    # Japanese block looks like once there is anything above two storeys on it.
+    #
+    # This is here rather than in a later pass because of what reads it. A
+    # reconstruction model returns the shapes it is shown, so a scene whose
+    # buildings are all flat-topped extrusions produces reconstructions that
+    # are all flat-topped extrusions — the intent has to be in the massing
+    # before anything downstream can pick it up.
+    roof_forms: list[str] = field(
+        default_factory=lambda: ["flat", "flat", "gable", "hip", "mono"])
+    roof_pitch: tuple[float, float] = (0.35, 0.65)  # rise over half the span
+    roof_eave: float = 0.7  # how far the roof oversails the walls
+
     max_buildings: int = 0  # 0 = unlimited
     seed: int = 0
+
+    def __post_init__(self) -> None:
+        self.roof_forms = list(self.roof_forms)
+        unknown = set(self.roof_forms) - set(ROOF_FORMS)
+        if unknown:
+            raise ValueError(
+                f"unknown roof form(s): {', '.join(sorted(unknown))}; "
+                f"expected {', '.join(ROOF_FORMS)}")
+        if not self.roof_forms:
+            raise ValueError("buildings.roof_forms cannot be empty; use ['flat']")
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +337,74 @@ def extrude(polygon, base_z: float, height: float, *, skirt: float = 1.0,
     return Mesh(wall_vertices, wall_faces, wall_uvs), Mesh(roof_vertices, roof_faces, roof_uvs)
 
 
+ROOF_FORMS = ("flat", "gable", "hip", "mono")
+
+
+def pitched_roof(polygon, top_z: float, form: str, *, pitch: float = 0.45,
+         eave: float = 0.7) -> Mesh:
+    """A pitched roof over a footprint, as a mesh. ``flat`` returns nothing.
+
+    Built on the footprint's *minimum rotated rectangle* rather than on the
+    outline itself. A roof over an arbitrary polygon is a straight-skeleton
+    problem and this is not one: real roofs are simple forms carried across a
+    plan, they overhang their walls anyway, and a hip that misses an inside
+    corner by half a metre is a hip.
+
+    A flat roof is what an extrusion gives, and for a long time it was all this
+    package had. That reads as a street of tofu blocks, and it carries: a
+    reconstruction model can only return the shapes it is shown, so a scene
+    with no pitched roof in it produces buildings with no pitched roof either.
+    """
+    if form not in ROOF_FORMS:
+        raise ValueError(f"roof form must be one of {ROOF_FORMS}, not {form!r}")
+    if form == "flat":
+        return Mesh([], [])
+
+    corners = list(polygon.minimum_rotated_rectangle.exterior.coords)[:4]
+    if len(corners) < 4:
+        return Mesh([], [])
+    edges = [(corners[i], corners[(i + 1) % 4]) for i in range(4)]
+    (ax, ay), (bx, by) = max(edges, key=lambda e: math.dist(e[0], e[1]))
+    length = math.dist((ax, ay), (bx, by))
+    if length < 1e-6:
+        return Mesh([], [])
+    ux, uy = (bx - ax) / length, (by - ay) / length  # along the ridge
+    vx, vy = -uy, ux  # across it
+    width = polygon.minimum_rotated_rectangle.area / length
+    cx, cy = polygon.minimum_rotated_rectangle.centroid.coords[0]
+
+    half_l, half_w = length / 2.0 + eave, width / 2.0 + eave
+
+    def at(u: float, v: float, z: float) -> tuple[float, float, float]:
+        return (cx + ux * u + vx * v, cy + uy * u + vy * v, z)
+
+    rise = pitch * half_w
+    a, b = at(-half_l, -half_w, top_z), at(half_l, -half_w, top_z)
+    c, d = at(half_l, half_w, top_z), at(-half_l, half_w, top_z)
+
+    if form == "mono":
+        # One slope, the whole width. The low eave is the street side.
+        high_c, high_d = at(half_l, half_w, top_z + 2 * rise), at(-half_l, half_w,
+                                                                 top_z + 2 * rise)
+        vertices = [a, b, high_c, high_d, c, d]
+        faces = [[0, 1, 2, 3], [1, 4, 2], [5, 0, 3]]
+        return Mesh(vertices, faces)
+
+    inset = half_w if form == "hip" else 0.0
+    if inset >= half_l:  # too short to hip: the ridge would be a point
+        inset = half_l * 0.5
+    r0, r1 = at(-half_l + inset, 0.0, top_z + rise), at(half_l - inset, 0.0, top_z + rise)
+
+    vertices = [a, b, c, d, r0, r1]
+    faces = [
+        [0, 1, 5, 4],  # the slope on one side
+        [2, 3, 4, 5],  # and on the other
+        [0, 4, 3],  # the end: a gable wall, or a hip slope
+        [1, 2, 5],
+    ]
+    return Mesh(vertices, faces)
+
+
 def base_height(polygon, heightmap: HeightMap) -> float:
     """Ground height to stand a footprint on: the lowest of its corners.
 
@@ -358,6 +451,18 @@ def generate(
         height = pick_height(plot.area, options, rng)
         wall_mesh, roof_mesh = extrude(plot, base, height, skirt=options.skirt,
                                       facade_width=options.facade_width)
+        form = rng.choice(options.roof_forms)
+        pitch = rng.uniform(*options.roof_pitch)
+        if form != "flat":
+            # The pitch replaces the extrusion's cap rather than sitting over
+            # it: two roofs in the same place is a surface a renderer z-fights
+            # over and a reconstruction has to choose between.
+            pitched = pitched_roof(plot, base + height, form, pitch=pitch,
+                                   eave=options.roof_eave)
+            if pitched.faces:
+                roof_mesh = pitched
+            else:
+                form = "flat"
         if not wall_mesh.faces or not roof_mesh.faces:
             continue
         walls.append(wall_mesh)
@@ -365,6 +470,10 @@ def generate(
         records.append({
             "area": round(plot.area, 2),
             "height": round(height, 2),
+            # What tops it, so anything downstream photographing this building
+            # knows what it is looking at without measuring the mesh.
+            "roof": form,
+            "roof_pitch": round(pitch, 3) if form != "flat" else 0.0,
             # The facade UV normalises V over the height, so a sheet belongs to
             # a floor count rather than to a height. Recorded per building
             # because that is what decides which sheet it may wear.

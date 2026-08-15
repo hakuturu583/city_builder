@@ -198,6 +198,27 @@ FACADE_STYLES: tuple[tuple[str, str], ...] = (
     ("sandstone", "photograph of a warm sandstone clad office facade, deep reveals"),
     ("green glass", ("photograph of a pale green tinted glass and steel facade, "
                      "slender vertical fins")),
+    # The residential half. Everything above is a commercial mid-rise, which is
+    # what a street of 900 m2 plots wants; drop the lot size to house scale and
+    # the same set puts an office block on every one of them. These are what
+    # the low buildings on a Japanese street are actually faced with.
+    ("mortar", ("photograph of a cream mortar rendered Japanese house wall, "
+                "aluminium sliding windows, thin steel awning")),
+    ("clapboard", ("photograph of a dark stained timber clapboard Japanese house wall, "
+                   "vertical battens, small square windows")),
+    ("siding", ("photograph of a beige ceramic siding board Japanese suburban house wall, "
+                "grooved panels, white trim")),
+    ("machiya", ("photograph of a traditional Japanese machiya townhouse front, "
+                 "dark timber lattice, plaster panels, sliding paper screens")),
+    ("shopfront", ("photograph of a small Japanese shophouse front, glazed shopfront "
+                   "below, tiled wall above, vertical signage")),
+    ("corrugated", ("photograph of a painted corrugated metal Japanese workshop wall, "
+                    "rusted seams, louvred vent")),
+)
+
+#: The styles that suit a street of houses rather than of offices.
+RESIDENTIAL_STYLES: tuple[str, ...] = (
+    "mortar", "clapboard", "siding", "machiya", "shopfront", "corrugated",
 )
 
 COMMON_PROMPT = "flat elevation, uniform overcast daylight, no sky, no perspective"

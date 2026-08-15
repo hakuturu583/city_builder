@@ -15,6 +15,7 @@ from shapely.affinity import rotate, translate
 from shapely.geometry import Polygon as ShapelyPolygon
 
 from city_builder import massing as M
+from city_builder.buildings import pitched_roof
 
 
 def _plot(long_side=30.0, short_side=18.0, angle=0.0, at=(0.0, 0.0), height=12.0, base=2.0):
@@ -153,19 +154,19 @@ def _rect(long_side=30.0, short_side=18.0, angle=0.0):
 
 
 def test_a_flat_roof_is_the_absence_of_one():
-    assert M.roof(_rect(), 10.0, "flat").faces == []
+    assert pitched_roof(_rect(), 10.0, "flat").faces == []
 
 
 def test_a_form_nobody_builds_is_refused():
     with pytest.raises(ValueError, match="roof form"):
-        M.roof(_rect(), 10.0, "onion")
+        pitched_roof(_rect(), 10.0, "onion")
 
 
 @pytest.mark.parametrize("form", ["gable", "hip", "mono"])
 @pytest.mark.parametrize("angle", [0.0, 37.0, 90.0])
 def test_the_ridge_is_the_pitch_above_the_eave(form, angle):
     eave, pitch, top = 0.7, 0.5, 10.0
-    mesh = M.roof(_rect(30.0, 18.0, angle), top, form, pitch=pitch, eave=eave)
+    mesh = pitched_roof(_rect(30.0, 18.0, angle), top, form, pitch=pitch, eave=eave)
     heights = [v[2] for v in mesh.vertices]
     rise = pitch * (18.0 / 2 + eave)
     assert min(heights) == pytest.approx(top)
@@ -176,7 +177,7 @@ def test_the_ridge_is_the_pitch_above_the_eave(form, angle):
 @pytest.mark.parametrize("form", ["gable", "hip", "mono"])
 def test_the_roof_overhangs_the_walls_it_sits_on(form):
     plan_shape = _rect(30.0, 18.0, angle=20.0)
-    mesh = M.roof(plan_shape, 10.0, form, eave=0.7)
+    mesh = pitched_roof(plan_shape, 10.0, form, eave=0.7)
     cover = ShapelyPolygon([(x, y) for x, y, _z in mesh.vertices]).convex_hull
     assert cover.contains(plan_shape), "a roof with no overhang is a lid"
 
@@ -185,7 +186,7 @@ def test_a_hip_has_a_shorter_ridge_than_a_gable():
     plan_shape = _rect(30.0, 18.0)
     ridges = {}
     for form in ("gable", "hip"):
-        mesh = M.roof(plan_shape, 10.0, form)
+        mesh = pitched_roof(plan_shape, 10.0, form)
         top = max(v[2] for v in mesh.vertices)
         at_top = [v for v in mesh.vertices if math.isclose(v[2], top, abs_tol=1e-6)]
         ridges[form] = math.dist(at_top[0][:2], at_top[-1][:2])

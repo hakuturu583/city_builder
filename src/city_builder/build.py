@@ -488,6 +488,7 @@ def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | Non
                 fbx: str | None = None,
                 ground_texture: str | None = None, tile_metres: float = 12.0,
                 road_tile_metres: float | None = None,
+                roof_texture: str | None = None, roof_tile_metres: float = 3.0,
                 facade_dir: str | None = None, road_texture: str | None = None,
                 marking_options: MarkingOptions | None = None,
                 markings_dir: str | None = None, verbose: bool = True) -> None:
@@ -543,6 +544,19 @@ def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | Non
                 matched = sum(1 for path in sheets if facade_layout.sheet_floors(path) is not None)
                 print(f"[scene] Buildings: {len(sheets)} facade sheet(s) "
                       f"({matched} floor-matched) across {len(counts)} buildings")
+
+    if roof_texture:
+        # Its own scale, and a small one. A roof tile is a hand's width and the
+        # pitched roofs this generates are the largest single surfaces in a
+        # low-rise street — at the ground's twelve metres a kawara roof reads as
+        # a tarpaulin.
+        roofs = objects.get("Roofs")
+        if roofs is None:
+            raise RuntimeError("no Roofs object to texture; build with buildings=True")
+        scene.apply_tiled_texture(roofs, roof_texture, roof_tile_metres)
+        if verbose:
+            print(f"[scene] Roofs: tiled {os.path.basename(roof_texture)} every "
+                  f"{roof_tile_metres:g} m")
 
     if ground_texture:
         ground = objects.get("Ground")
