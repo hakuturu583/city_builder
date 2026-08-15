@@ -198,6 +198,7 @@ def keep_only(obj, start: int, end: int) -> int:
 def render_portrait(scene, building: int, out_path: str, *,
                     options: PortraitOptions | None = None, facade_dir: str | None = None,
                     road_texture: str | None = None, ground_texture: str | None = None,
+                    roof_texture: str | None = None, roof_tile_metres: float = 1.0,
                     massing_options=None, massing_seed: int | None = None,
                     marking_options=None, verbose: bool = True) -> dict[str, Any]:
     """One RGBA picture of one building of a built scene.
@@ -207,6 +208,11 @@ def render_portrait(scene, building: int, out_path: str, *,
     subject and nothing else. Dress it: the facade sheets are the only thing in
     the picture that says what the building is made of, and the reconstruction
     carries that appearance into the mesh's textures.
+
+    ``roof_texture`` matters more than it looks. The reconstruction textures
+    what it is shown, roof included — and a three-quarter view from 35 degrees
+    is mostly roof — so leaving it out is asking for a building with a blank
+    grey top, which is what the first run of this produced.
 
     ``massing_seed`` replaces the plot's extruded box with a building that has
     something going on — see :mod:`city_builder.massing`. Photograph the box and
@@ -229,6 +235,7 @@ def render_portrait(scene, building: int, out_path: str, *,
     try:
         features = _render(scene, building, out_path, options=options, facade_dir=facade_dir,
                            road_texture=road_texture, ground_texture=ground_texture,
+                           roof_texture=roof_texture, roof_tile_metres=roof_tile_metres,
                            massing_options=massing_options, massing_seed=massing_seed,
                            marking_options=marking_options, markings_dir=markings,
                            verbose=verbose)
@@ -288,6 +295,7 @@ def _replace_with_massing(plot: dict[str, Any], massing_options, seed: int, *,
 
 def _render(scene, building: int, out_path: str, *, options: PortraitOptions,
             facade_dir: str | None, road_texture: str | None, ground_texture: str | None,
+            roof_texture: str | None, roof_tile_metres: float,
             massing_options, massing_seed: int | None,
             marking_options, markings_dir: str, verbose: bool) -> list[str]:
     import bpy
@@ -298,6 +306,7 @@ def _render(scene, building: int, out_path: str, *, options: PortraitOptions,
 
     build_scene(scene.result, facade_dir=facade_dir, road_texture=road_texture,
                 ground_texture=ground_texture, road_tile_metres=4.0,
+                roof_texture=roof_texture, roof_tile_metres=roof_tile_metres,
                 marking_options=marking_options, markings_dir=markings_dir, verbose=False)
     if not any(obj.type == "LIGHT" for obj in bpy.data.objects):
         scene_module.sunlit()

@@ -783,6 +783,10 @@ def reconstruct_building(
                           Field(description="Painted sheets from generate_facades. Bring "
                                             "them: they are the only thing in the picture "
                                             "that says what the building is made of")] = None,
+    roof_texture: Annotated[str | None,
+                            Field(description="A roof tile from make_tile. A three-quarter "
+                                              "view is mostly roof, and the reconstruction "
+                                              "textures what it is shown")] = None,
     elevation: Annotated[float,
                          Field(description="Degrees above the horizon the massing is shot "
                                            "from. 35 is the measured default; at 12 the roof "
@@ -826,7 +830,7 @@ def reconstruct_building(
 
     shot = render_portrait(held, building, os.path.join(out_dir, f"{name}.png"),
                            options=PortraitOptions(elevation_deg=elevation),
-                           facade_dir=facade_dir,
+                           facade_dir=facade_dir, roof_texture=roof_texture,
                            marking_options=CityConfig.from_dict(held.options).markings,
                            verbose=False)
     report = reconstruct(held.result.plots[building], out_dir, image=shot["image"],
