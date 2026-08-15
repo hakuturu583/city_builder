@@ -530,6 +530,20 @@ def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | Non
             print(f"[scene] paint: {len(pages)} page(s) over "
                   f"{', '.join(result.marking_page_of_shape)}")
 
+    if road_texture:
+        # The carriageway that no marking page landed on. A map with no paint
+        # in it, or one built with markings off, has none at all — and until
+        # this existed, `road_texture` was silently doing nothing on those
+        # scenes while every report said the road had been dressed.
+        painted = set(result.marking_page_of_shape) if result.marking_pages else set()
+        bare = [name for name, obj in objects.items()
+                if name not in painted and classes.get(name).material == "asphalt" and obj]
+        for name in bare:
+            scene.apply_tiled_texture(objects[name], road_texture, road_tile_metres)
+        if bare and verbose:
+            print(f"[scene] asphalt: {os.path.basename(road_texture)} every "
+                  f"{road_tile_metres:g} m over {', '.join(bare)}")
+
     if facade_dir:
         sheets = sorted(
             os.path.join(facade_dir, f) for f in os.listdir(facade_dir) if f.endswith(".png")

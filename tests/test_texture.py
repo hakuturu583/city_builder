@@ -6,6 +6,8 @@ procedural path, the seam metric and the scene wiring all are.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pytest
 
@@ -78,6 +80,41 @@ def test_applying_a_tile_replaces_only_that_object(tmp_path):
     assert ground.data.uv_layers, "the tile needs UVs to repeat over"
     assert markings.data.materials[0].name == before, "a preserved surface must not change"
     assert not markings.data.uv_layers, "and must not be re-parameterised either"
+
+
+def test_the_carriageway_gets_its_tile_with_no_paint_to_carry_it(tmp_path):
+    """Regression: `road_texture` did nothing on a scene with no marking pages.
+
+    The asphalt was only reached through the marking material, so a map with no
+    paint in it — or one built with markings off — took the argument, reported
+    the road as dressed, and rendered it flat.
+    """
+    import bpy
+    import numpy as np
+
+    from city_builder.build import BuildResult, build_scene
+    from city_builder.frame import LocalFrame
+    from city_builder.geometry import Ribbon
+    from city_builder.ground import HeightMap
+
+    path = str(tmp_path / "asphalt.png")
+    make_tile("unused", TextureOptions(size=32, diffusion=False), path=path)
+
+    lane = Ribbon(1, [(0, 4, 0), (40, 4, 0)], [(0, -4, 0), (40, -4, 0)])
+    result = BuildResult(
+        frame=LocalFrame(35.0, 139.0), groups={"Roads": [lane]},
+        heightmap=HeightMap(0.0, 0.0, 10.0, np.zeros((5, 5)), np.zeros((5, 5))),
+        elevated=set(), z_datum=0.0,
+    )
+    assert not result.marking_pages, "this scene is the case under test"
+
+    build_scene(result, road_texture=path, road_tile_metres=4.0, verbose=False)
+
+    roads = bpy.data.objects["Roads"]
+    images = [node.image.filepath for material in roads.data.materials
+              for node in material.node_tree.nodes if node.type == "TEX_IMAGE" and node.image]
+    assert images, "the carriageway is still wearing a flat colour"
+    assert os.path.basename(images[0]) == "asphalt.png"
 
 
 # ---------------------------------------------------------------------------

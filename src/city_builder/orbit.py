@@ -449,13 +449,27 @@ def render_frames(directory: str, *, frames: int, resolution: tuple[int, int],
 
 
 def render_orbit(scene, building: int, out_dir: str, *, options: OrbitOptions | None = None,
-                 facade_dir: str | None = None, marking_options=None,
+                 facade_dir: str | None = None, road_texture: str | None = None,
+                 ground_texture: str | None = None, tile_metres: float = 12.0,
+                 road_tile_metres: float = 4.0, marking_options=None,
                  verbose: bool = True) -> dict[str, Any]:
     """Circle one building of a built scene: a clip, a mask, and the numbers.
 
     Writes ``orbit.mp4`` (what the refinement takes), ``mask/`` (a PNG per
     frame) and ``orbit.json`` (what the reconstruction downstream needs to put
     the mesh it makes back at the right size and heading).
+
+    Dress it. ``facade_dir``, ``road_texture`` and ``ground_texture`` are the
+    generated textures, and this is the one render where leaving them out costs
+    something: a video model asked to make a grey box photoreal has nothing to
+    tell it where the storeys are or which way the building faces, and at the
+    low denoise this pipeline runs at it will not invent them. The provisional
+    textures are the difference between "make this photoreal" and "imagine a
+    building".
+
+    ``road_tile_metres`` defaults to 4 rather than 12 for the same reason it
+    does on the command line: asphalt aggregate is finer than paving, and a
+    12 m road tile renders as cobblestone.
     """
     import shutil
     import tempfile
@@ -470,6 +484,8 @@ def render_orbit(scene, building: int, out_dir: str, *, options: OrbitOptions | 
     markings = tempfile.mkdtemp(prefix="city-markings-")
     try:
         return _render_orbit(scene, building, out_dir, options=options, facade_dir=facade_dir,
+                             road_texture=road_texture, ground_texture=ground_texture,
+                             tile_metres=tile_metres, road_tile_metres=road_tile_metres,
                              marking_options=marking_options, markings_dir=markings,
                              verbose=verbose)
     finally:
@@ -477,8 +493,9 @@ def render_orbit(scene, building: int, out_dir: str, *, options: OrbitOptions | 
 
 
 def _render_orbit(scene, building: int, out_dir: str, *, options: OrbitOptions,
-                  facade_dir: str | None, marking_options, markings_dir: str,
-                  verbose: bool) -> dict[str, Any]:
+                  facade_dir: str | None, road_texture: str | None,
+                  ground_texture: str | None, tile_metres: float, road_tile_metres: float,
+                  marking_options, markings_dir: str, verbose: bool) -> dict[str, Any]:
     import time
 
     import bpy
@@ -490,7 +507,9 @@ def _render_orbit(scene, building: int, out_dir: str, *, options: OrbitOptions,
     plot = scene.result.plots[building]
     shot = plan_orbit(plot, options)
 
-    build_scene(scene.result, facade_dir=facade_dir, marking_options=marking_options,
+    build_scene(scene.result, facade_dir=facade_dir, road_texture=road_texture,
+                ground_texture=ground_texture, tile_metres=tile_metres,
+                road_tile_metres=road_tile_metres, marking_options=marking_options,
                 markings_dir=markings_dir, verbose=False)
     if not any(obj.type == "LIGHT" for obj in bpy.data.objects):
         scene_module.sunlit()
@@ -546,6 +565,10 @@ def _render_orbit(scene, building: int, out_dir: str, *, options: OrbitOptions,
         "neighbours": options.neighbours,
         "neighbours_removed": len(removed),
         "neighbours_standing": len(plots) - 1 - len(removed),
+        # What it was wearing, because a clip refined from an undressed render
+        # is a different experiment from one refined from a dressed one.
+        "dressed": {"facades": bool(facade_dir), "road": bool(road_texture),
+                    "ground": bool(ground_texture)},
         "video": video,
         "mask_dir": os.path.join(out_dir, "mask"),
         "mask_frames": len(masks),

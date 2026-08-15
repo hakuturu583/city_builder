@@ -784,7 +784,12 @@ def render_orbit(
                                             "keep: all of them. The road and the ground "
                                             "stay whatever this says")] = "hide",
     elevation: Annotated[float, Field(description="Degrees above the horizon")] = 12.0,
-    facade_dir: Annotated[str | None, Field(description="Facade sheets to dress it with")] = None,
+    facade_dir: Annotated[str | None,
+                          Field(description="Painted sheets from generate_facades. Bring "
+                                            "them: this is the render a video model has to "
+                                            "work from")] = None,
+    road_texture: Annotated[str | None, Field(description="Carriageway tile from make_tile")] = None,
+    ground_texture: Annotated[str | None, Field(description="Ground tile from make_tile")] = None,
     width: Annotated[int, Field(description="Pixels, multiple of 32")] = 832,
     height: Annotated[int, Field(description="Pixels, multiple of 32")] = 480,
 ):
@@ -811,6 +816,13 @@ def render_orbit(
     the middle: it empties only the disc every sightline lies inside, so the
     view cannot be blocked while the far city still stands.
 
+    **Dress it first.** make_layouts → generate_facades for the sheets,
+    make_tile for the road and the ground, then pass all three here. This is
+    the render the video model has to work from, and at the low denoise that
+    keeps the geometry it will not invent what is missing: an undressed grey
+    box says nothing about where the storeys are or which side is the front,
+    and what comes back is a grey box that is merely photoreal.
+
     Answers with the four quadrant views, because whether the building reads as
     a building is not something the numbers can tell you.
     """
@@ -826,6 +838,7 @@ def render_orbit(
     options = OrbitOptions(frames=frames, neighbours=neighbours, elevation_deg=elevation,
                            width=width, height=height)
     report = run(held, building, out_dir, options=options, facade_dir=facade_dir,
+                 road_texture=road_texture, ground_texture=ground_texture,
                  marking_options=CityConfig.from_dict(held.options).markings, verbose=False)
 
     picks = report.get("quadrant_frames")

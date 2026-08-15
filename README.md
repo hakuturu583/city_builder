@@ -867,6 +867,21 @@ centre of a ring of radius `distance · cos(elevation)` from a point on it, so
 every sightline it ever has lies inside that disc. Empty the disc and the view
 *cannot* be blocked, whatever the elevation and whatever the frame.
 
+**Dress it before shooting it.** `make_layouts` → `generate_facades` for the
+sheets, `make_tile` for the carriageway and the ground, and all three go to
+`render_orbit`. This is the render a video model has to work from, and at the
+low denoise that keeps the geometry it will not invent what is not there: an
+undressed grey box says nothing about where the storeys are or which side is
+the front, and what comes back is a grey box that is merely photoreal. A sheet
+scoring 0.74 for floor alignment puts three storeys of windows and a shopfront
+band on a three-storey building, in the same place in all four quadrant views,
+which is what the reconstruction is being asked to agree with.
+
+One thing had to be fixed for that. `road_texture` was only ever reached
+through the marking material, so a map with no paint in it — or one built with
+markings off — took the argument, reported the road as dressed, and rendered it
+flat. The carriageway now gets its tile either way.
+
 The mask is **rendered, not projected**. Projecting the footprint gets the
 silhouette wrong wherever anything stands in front of the building, and
 something always does. A second EEVEE pass over the same camera keys, subject
