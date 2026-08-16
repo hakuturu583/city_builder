@@ -759,18 +759,24 @@ EAVE_ROOM = 0.6
 # block height, measured over 184 of them.
 #
 # A fraction rather than metres, because a metre of ridge on a shed is a
-# different building and on an office block is nothing. 0.3 because a shell
-# envelope is filled to 0.97 of its height (1.37, 1.32 and 1.39 of the block at
-# an allowance of 0.4), so the allowance is very nearly the overshoot. It was
-# 0.4 while the envelope was solid, when the model reached only 0.81 of what it
-# was given — that was not modesty, it was being handed an object unlike
-# anything it was trained on. See :func:`envelope_coords`.
-ROOF_ROOM = 0.3
+# different building and on an office block is nothing. 0.4 against a solid
+# envelope, where the model reaches 0.81 of what it is given, lands on 1.23-1.26
+# of the block at one, two and three storeys alike.
+ROOF_ROOM = 0.4
+
+# How many cells the sampler will take. Not a tidy number: 22 272 generated and
+# 28 672 did not, on a 32 GB card with the model resident, so the ceiling is
+# somewhere between and this is inside it. Above it the run does not degrade,
+# it throws — nineteen buildings on this map, three attempts each, twice, every
+# one out of memory — so something has to give, and it is better that it be the
+# envelope than the building.
+VOXEL_BUDGET = 20_000
 
 
 def envelope_coords(footprint: Sequence[Sequence[float]], height: float, *,
                     grid: int = 32, eave_room: float = EAVE_ROOM,
-                    roof_room: float = ROOF_ROOM) -> np.ndarray:
+                    roof_room: float = ROOF_ROOM,
+                    budget: int = VOXEL_BUDGET) -> np.ndarray:
     """The plot's own prism, voxelised into the cube TRELLIS samples in.
 
     TRELLIS.2 generates in three stages, and the first one is only a *choice of
@@ -795,15 +801,22 @@ def envelope_coords(footprint: Sequence[Sequence[float]], height: float, *,
     than it by ``roof_room`` — see :data:`ROOF_ROOM` — because a roof stands
     above the walls.
 
-    **The prism is a shell.** What comes back from ``sample_sparse_structure``
-    is a surface, not a solid, and handing the shape model a solid instead is
-    handing it a kind of object it has never seen. Measured on this map's own
-    conditioning photograph its occupancy was 4905 cells of 32768, each column
-    filling 0.62 of the levels between its own top and bottom; solid prisms for
-    these plots ran to 11 000 at the median and 29 600 at the worst. The
-    nineteen buildings that would not generate at all — six attempts each,
-    across two processes, every one out of memory — were exactly the densest,
-    and as shells they generate in nineteen seconds. A building is hollow.
+    **The prism is solid, unless it will not fit.** What
+    ``sample_sparse_structure`` returns is a *surface* — measured on this map's
+    own conditioning photograph, 4905 cells of 32768, each column filling 0.62
+    of the levels between its own top and bottom — and a solid prism is
+    therefore not the kind of object the shape model is used to. That is a real
+    observation and it is not a reason to hollow the envelope out: the whole
+    map generated from surface envelopes and came back a district of cages,
+    walls you could see daylight through, while the solid prisms had produced
+    buildings. The footprint IoU is blind to it, and was slightly *better* on
+    the cages, which is the whole reason that run reached 189 buildings before
+    anybody looked at it.
+
+    So the envelope stays solid and only the plots that would not otherwise
+    generate at all are peeled, one layer at a time, until they are inside
+    :data:`VOXEL_BUDGET`. On this map that is nineteen of a hundred and
+    eighty-nine.
     """
     from shapely.geometry import Point, Polygon
 
@@ -826,28 +839,43 @@ def envelope_coords(footprint: Sequence[Sequence[float]], height: float, *,
         raise ValueError(f"the plot is too small to voxelise at {grid}: "
                          f"{len(columns)} columns, {len(levels)} levels")
 
-    # The surface of the prism, not its inside. What `sample_sparse_structure`
-    # hands the shape model is a *shell* — measured on this map's own
-    # conditioning photograph, 4905 cells of 32768, with each column occupying
-    # 0.62 of the levels between its own top and bottom. A solid prism is a
-    # different kind of object: the plots here came to 11 000 cells at the
-    # median and 29 600 at the worst, up to six times denser than anything the
-    # model has seen, and the nineteen buildings that would not generate at all
-    # were exactly the densest. A building is hollow anyway.
     solid = {(i, j, k) for i, j in columns for k in levels}
-    return np.array(
-        sorted(cell for cell in solid
-               if any((cell[0] + di, cell[1] + dj, cell[2] + dk) not in solid
-                      for di, dj, dk in ((1, 0, 0), (-1, 0, 0), (0, 1, 0),
-                                         (0, -1, 0), (0, 0, 1), (0, 0, -1)))),
-        dtype=np.int32)
+    return np.array(sorted(_afford(solid, budget)), dtype=np.int32)
+
+
+def _afford(solid: set, budget: int) -> set:
+    """``solid``, peeled from the inside until it is within ``budget`` cells.
+
+    Peeled a layer at a time rather than by a distance transform, because
+    ``solid`` is at most 32768 cells and the loop runs a handful of times. The
+    innermost layer goes first because it is the one the model can least see:
+    what it is being told is where the building is, and the middle of a
+    building is the least informative part of that.
+    """
+    if budget <= 0 or len(solid) <= budget:
+        return solid
+    faces = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
+    layers, inner = [], solid
+    while inner:
+        surface = {cell for cell in inner
+                   if any((cell[0] + di, cell[1] + dj, cell[2] + dk) not in inner
+                          for di, dj, dk in faces)}
+        layers.append(surface)
+        inner = inner - surface
+    kept: set = set()
+    for layer in layers:
+        if kept and len(kept) + len(layer) > budget:
+            break
+        kept |= layer
+    return kept
 
 
 def to_mesh_in_envelope(image_path: str, out_path: str, *,
                         footprint: Sequence[Sequence[float]], height: float,
                         options: MeshOptions | None = None,
                         eave_room: float = EAVE_ROOM,
-                        roof_room: float = ROOF_ROOM) -> dict[str, Any]:
+                        roof_room: float = ROOF_ROOM,
+                        budget: int = VOXEL_BUDGET) -> dict[str, Any]:
     """A textured GLB whose *plan is the plot's* and whose surface is the picture's.
 
     The same model and the same call sequence as :func:`to_mesh`, with the one
@@ -885,7 +913,7 @@ def to_mesh_in_envelope(image_path: str, out_path: str, *,
 
     pipeline = _pipeline(options)
     coords = envelope_coords(footprint, height, grid=grid, eave_room=eave_room,
-                             roof_room=roof_room)
+                             roof_room=roof_room, budget=budget)
 
     def tuned(defaults: dict, guidance: float | None) -> dict:
         params = dict(defaults or {})
@@ -1327,6 +1355,7 @@ def reconstruct_in_envelope(plot: dict[str, Any], out_dir: str, *, image: str,
                             mesh_options: MeshOptions | None = None,
                             eave_room: float = EAVE_ROOM,
                             roof_room: float = ROOF_ROOM,
+                            budget: int = VOXEL_BUDGET,
                             name: str = "building") -> dict[str, Any]:
     """One plot to one placed building, with the plot holding the massing.
 
@@ -1348,7 +1377,8 @@ def reconstruct_in_envelope(plot: dict[str, Any], out_dir: str, *, image: str,
     made = to_mesh_in_envelope(
         image, os.path.join(out_dir, f"{name}.glb"),
         footprint=plot["footprint"], height=float(plot["height"]),
-        options=mesh_options, eave_room=eave_room, roof_room=roof_room)
+        options=mesh_options, eave_room=eave_room, roof_room=roof_room,
+        budget=budget)
     # No stretch: the plan came from this plot, so a mesh that does not fit it
     # is a mesh that departed from its envelope, and squeezing it would hide
     # exactly the thing the IoU is there to report.
