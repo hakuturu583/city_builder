@@ -1,4 +1,4 @@
-# Keep the shape, ask only for the surface
+# Two ways to stop inventing the shape twice
 
 An investigation, with what it proved and what it did not. Nothing here is in
 the pipeline yet; it lives on `feat/direct-trellis` behind
@@ -95,3 +95,77 @@ is not.
    seating, `keep_below` — becomes dead code. If it does not, it is still worth
    keeping for the buildings the fit rejects, where the alternative is a
    procedural box.
+
+
+---
+
+# Give it the envelope and let it invent inside
+
+The texturing route above keeps the footprint but can only ever return a
+textured box, because the box is what it is handed. The better question is
+whether the *generation* can be constrained instead — a prompt and a footprint
+in, a building out. It can, and the mechanism is already exposed.
+
+## How TRELLIS.2 actually generates
+
+`run()` is three stages, and the first one is the whole of the plan:
+
+```
+coords     = sample_sparse_structure(cond, 32 or 64)   # occupied voxels
+shape_slat = sample_shape_slat(cond, model, coords)    # geometry in them
+tex_slat   = sample_tex_slat(cond, model, shape_slat)  # PBR on it
+mesh       = decode_latent(shape_slat, tex_slat, res)
+```
+
+`coords` is an ordinary tensor of occupied cells in a cube, and
+`sample_shape_slat` takes it as an *argument*. So it can be replaced: voxelise
+the plot's own prism — the footprint extruded to the building's height — and the
+plan and the height stop being something the model guesses and something the fit
+has to repair. The model is then left to invent what we actually want from it,
+inside that envelope.
+
+## Measured, on the largest plot of the Kashiwanoha map
+
+| grid | eave room | time | footprint IoU, **uniform fit only** |
+|---|---|---|---|
+| 32 | 0 | 10 s | 0.822 |
+| 64 | 0 | 47 s | 0.743 |
+| 32 | 0.6 m | 9 s | **0.882** |
+
+Against the current path's 0.917 — which needs the anisotropic stretch, the yaw
+sweep and a 3 % rejection rate to get there. Two things in that table were not
+obvious:
+
+**A finer grid is worse, and five times slower.** At 64 the envelope is a
+tighter cast of the box and the shape model has less room to depart from it;
+what comes back is smaller relative to the plot, not truer to it.
+
+**Leaving room for the eaves is worth more than resolution.** Growing the prism
+by 0.6 m in plan took the IoU from 0.822 to 0.882 at the same 9 s. A roof
+overhangs, and an envelope drawn exactly on the walls has nowhere to put it.
+
+**The voxel axes are the identity.** `(i, j, k)` in this package's own order,
+handed straight over. Not the Y-up convention `preprocess_mesh` uses — that
+belongs to the texturing pipeline's *mesh* input, and applying it here stands
+the building on end. Checked by comparing the output's sorted extents against
+the envelope's: identity gives ratios 0.225 / 0.501 / 1.0 against the envelope's
+0.254 / 0.473 / 1.0, and puts the height on the height axis. Every other mapping
+tried put a plan dimension there.
+
+## Where this leaves the three routes
+
+| | shape | surface | footprint | time |
+|---|---|---|---|---|
+| image → 3D (in the pipeline) | invented | invented | fitted, 0.917 mean, 3 % rejected | 17 s |
+| mesh → texture | **the map's, exactly** | invented | exact | 26 s |
+| **envelope → 3D** | **invented inside the map's** | invented | 0.882 uniform, no stretch | **9 s** |
+
+The third is the one worth pursuing. It is the fastest of the three, it is the
+only one where the model is still free to produce something that is not a box,
+and its footprint error is already close to a path that needs three corrective
+mechanisms to beat it — none of which it needs.
+
+What is untested and would decide it: a real photograph as the conditioning
+image rather than the massing wearing SDXL sheets, and whether the remaining
+0.12 of IoU closes with a slightly larger eave allowance or is the shape model
+declining to fill its envelope.
