@@ -349,6 +349,8 @@ def place(scene, ledger: str | dict[str, Any] | District, *, facade_dir: str | N
           roof_texture: str | None = None, roof_tile_metres: float = 0.45,
           ground_texture: str | None = None, tile_metres: float = 3.0,
           road_texture: str | None = None, road_tile_metres: float = 2.5,
+          cover_options=None, cover_path: str | None = None,
+          cover_texels_per_metre: float = 8.0,
           marking_options=None, verbose: bool = True) -> dict[str, Any]:
     """Build the scene into Blender with the reconstructions standing in it.
 
@@ -356,8 +358,13 @@ def place(scene, ledger: str | dict[str, Any] | District, *, facade_dir: str | N
     were not keep it, which is what makes a partial run useful rather than a
     scene with holes in it.
     """
-    import bmesh
-    import bpy
+    # bpy first, and not alphabetically: bmesh is a submodule of the Blender
+    # runtime and is not importable until bpy has set it up. Sorted the other
+    # way this raises ModuleNotFoundError in any process that has not already
+    # loaded bpy for some other reason — which is every run that places an
+    # existing district without reconstructing one first.
+    import bpy  # isort: skip
+    import bmesh  # isort: skip
     import numpy as np
 
     from . import reconstruct as reconstruct_module
@@ -374,8 +381,10 @@ def place(scene, ledger: str | dict[str, Any] | District, *, facade_dir: str | N
     build_scene(scene.result, facade_dir=facade_dir, roof_texture=roof_texture,
                 roof_tile_metres=roof_tile_metres, ground_texture=ground_texture,
                 tile_metres=tile_metres, road_texture=road_texture,
-                road_tile_metres=road_tile_metres, marking_options=marking_options,
-                verbose=False)
+                road_tile_metres=road_tile_metres, cover_options=cover_options,
+                cover_path=cover_path,
+                cover_texels_per_metre=cover_texels_per_metre,
+                marking_options=marking_options, verbose=False)
 
     rebuilt = sorted({row.building for row in rows})
     for group in ("Buildings", "Roofs"):

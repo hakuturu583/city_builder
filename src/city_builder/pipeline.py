@@ -317,11 +317,18 @@ def _scene(map_path, out_dir, config, recipe, state, *, force, verbose):
     ledger = state.get("ledger") or os.path.join(out_dir, "models", "district.json")
     placed = {}
     if os.path.exists(ledger):
+        # The cover goes in here too. Placing the reconstructions rebuilds the
+        # scene from scratch, so a ground painted by an earlier stage is gone
+        # unless it is painted again — which is how a run came out with every
+        # building reconstructed and the ground a flat grey.
         placed = district.place(
             handle, ledger, facade_dir=_dir(out_dir, "facades"),
             roof_texture=_file(out_dir, "tiles", "kawara.png"),
             roof_tile_metres=recipe.roof_tile_metres,
             road_texture=_file(out_dir, "tiles", "asphalt.png"),
+            cover_options=_cover(out_dir, config),
+            cover_path=os.path.join(out_dir, "ground.png"),
+            cover_texels_per_metre=recipe.cover_texels_per_metre,
             marking_options=config.markings, verbose=verbose)
     else:
         build_scene(result, facade_dir=_dir(out_dir, "facades"),
