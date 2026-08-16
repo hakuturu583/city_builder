@@ -27,6 +27,7 @@ import json
 import math
 import os
 import time
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any
 
 DEFAULT_STYLE = (
@@ -73,6 +74,131 @@ def licence(plot: dict[str, Any], brush_up: float, *, plain: float = 1.5,
         return brush_up
     towards = min((ratio - plain) / max(elongated - plain, 1e-6), 1.0)
     return round(brush_up + (floor - brush_up) * towards, 4)
+
+
+# ---------------------------------------------------------------------------
+# The ledger
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Rebuilt:
+    """One plot's attempt: what was asked, what came back, where it stands.
+
+    Typed rather than a bare dict because this is the only statement of *how* a
+    reconstruction goes back into the world. A mesh out of TRELLIS.2 is
+    normalised into a unit cube and knows neither its size nor its heading, so
+    ``yaw_deg``, ``scale_xy``, ``stretch_deg``, ``centre`` and ``base_z``
+    together are the whole of that — and something a consumer has to read and
+    apply is worth being a type with a name.
+
+    ``extra`` carries any key a reader does not recognise, so a ledger written
+    by a newer version round-trips through an older one without losing it.
+    """
+
+    building: int
+    area_m2: float = 0.0
+    roof: str | None = None
+    brush_up: float | None = None
+    used: bool = False
+    tries: int = 1
+    error: str | None = None
+
+    # The fit: how the mesh is put back on its plot.
+    yaw_deg: float | None = None
+    scale: float | None = None
+    scale_xy: list[float] | None = None
+    stretch: float | None = None
+    stretch_deg: float | None = None
+    centre: list[float] | None = None
+    base_z: float | None = None
+    footprint_iou: float | None = None
+    height_m: float | None = None
+    sunk_m: float | None = None
+    procedural_height_m: float | None = None
+
+    # What was written, and what it cost.
+    image: str | None = None
+    styled: str | None = None
+    glb: str | None = None
+    mesh: str | None = None
+    took_seconds: float | None = None
+    bytes: int | None = None
+    vertices: int | None = None
+    triangles: int | None = None
+
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    def to_json(self) -> dict[str, Any]:
+        """The row, with the empty fields left out and ``extra`` flattened back."""
+        out = {key: value for key, value in asdict(self).items()
+               if key != "extra" and value is not None}
+        return {**out, **self.extra}
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> Rebuilt:
+        known = {f.name for f in fields(cls)} - {"extra"}
+        return cls(**{k: v for k, v in data.items() if k in known},
+                   extra={k: v for k, v in data.items() if k not in known})
+
+    def update(self, report: dict[str, Any]) -> None:
+        """Take what a reconstruction reported, keeping anything unrecognised."""
+        known = {f.name for f in fields(self)} - {"extra"}
+        for key, value in report.items():
+            if key in known:
+                setattr(self, key, value)
+            else:
+                self.extra[key] = value
+
+
+@dataclass
+class District:
+    """A whole run: what was attempted, what stands, and the fits that put it there."""
+
+    scene: str = ""
+    map: str = ""
+    kept_above: float = 0.80
+    buildings: list[Rebuilt] = field(default_factory=list)
+
+    @property
+    def standing(self) -> list[Rebuilt]:
+        return [row for row in self.buildings if row.used]
+
+    def to_json(self) -> dict[str, Any]:
+        ious = [row.footprint_iou for row in self.standing
+                if row.footprint_iou is not None]
+        return {
+            "scene": self.scene,
+            "map": self.map,
+            "attempted": len(self.buildings),
+            "used": len(self.standing),
+            "kept_above": self.kept_above,
+            # What the retries cost and what they bought.
+            "generations": sum(row.tries for row in self.buildings),
+            "retried": sum(1 for row in self.buildings if row.tries > 1),
+            "footprint_iou": {
+                "mean": round(sum(ious) / len(ious), 4) if ious else None,
+                "min": round(min(ious), 4) if ious else None,
+            },
+            "buildings": [row.to_json() for row in self.buildings],
+        }
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> District:
+        return cls(scene=data.get("scene", ""), map=data.get("map", ""),
+                   kept_above=float(data.get("kept_above", 0.80)),
+                   buildings=[Rebuilt.from_json(row) for row in data.get("buildings", ())])
+
+    @classmethod
+    def read(cls, path: str) -> District:
+        with open(path, encoding="utf-8") as handle:
+            return cls.from_json(json.load(handle))
+
+    def write(self, path: str) -> dict[str, Any]:
+        summary = self.to_json()
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(summary, handle, indent=2)
+        return summary
 
 
 def worth_rebuilding(plot: dict[str, Any], *, min_area: float = 0.0) -> bool:
@@ -130,24 +256,23 @@ def rebuild(scene, out_dir: str, *, buildings: list[int] | None = None,
 
     os.makedirs(out_dir, exist_ok=True)
     ledger_path = os.path.join(out_dir, "district.json")
-    done: dict[str, Any] = {}
+    done: dict[int, Rebuilt] = {}
     if resume and os.path.exists(ledger_path):
-        with open(ledger_path, encoding="utf-8") as handle:
-            done = {str(row["building"]): row for row in json.load(handle)["buildings"]}
+        done = {row.building: row for row in District.read(ledger_path).buildings}
         if verbose and done:
             print(f"[district] resuming: {len(done)} building(s) already modelled")
 
     options = portrait_module.PortraitOptions()
     started = time.time()
-    rows: list[dict[str, Any]] = []
+    ledger = District(scene=scene.name, map=scene.map_path, kept_above=keep_below)
     for count, index in enumerate(buildings, start=1):
-        if str(index) in done:
-            rows.append(done[str(index)])
+        if index in done:
+            ledger.buildings.append(done[index])
             continue
         name = f"b{index:04d}"
         strength = licence(plots[index], brush_up)
-        row: dict[str, Any] = {"building": index, "area_m2": plots[index]["area"],
-                               "roof": plots[index].get("roof"), "brush_up": strength}
+        row = Rebuilt(building=index, area_m2=plots[index]["area"],
+                      roof=plots[index].get("roof"), brush_up=strength)
 
         # The massing render is deterministic, so it is shot once and the tries
         # differ in what the image model and the mesh sampler make of it.
@@ -189,22 +314,22 @@ def rebuild(scene, out_dir: str, *, buildings: list[int] | None = None,
             if best.get("footprint_iou", 0.0) >= keep_below:
                 break
         row.update(best or {})
-        row["tries"] = attempt + 1
-        row["used"] = row.get("footprint_iou", 0.0) >= keep_below
-        rows.append(row)
+        row.tries = attempt + 1
+        row.used = (row.footprint_iou or 0.0) >= keep_below
+        ledger.buildings.append(row)
 
         if verbose:
             elapsed = time.time() - started
-            fresh = sum(1 for r in rows if "took_seconds" in r)
+            fresh = sum(1 for r in ledger.buildings if r.took_seconds is not None)
             left = (len(buildings) - count) * (elapsed / max(fresh, 1))
-            mark = "ok " if row.get("used") else "skip"
-            again = f" x{row['tries']}" if row["tries"] > 1 else ""
+            mark = "ok " if row.used else "skip"
+            again = f" x{row.tries}" if row.tries > 1 else ""
             print(f"[district] {count}/{len(buildings)} {mark} {name}{again} "
-                  f"iou={row.get('footprint_iou', float('nan')):.3f} "
+                  f"iou={row.footprint_iou if row.footprint_iou is not None else float('nan'):.3f} "
                   f"~{left / 60:.0f} min left")
-        _write(ledger_path, scene, rows, keep_below)
+        ledger.write(ledger_path)
 
-    return _write(ledger_path, scene, rows, keep_below)
+    return ledger.write(ledger_path)
 
 
 def _turn(radians: float):
@@ -215,35 +340,12 @@ def _turn(radians: float):
     return np.array([[cos, sin], [-sin, cos]])
 
 
-def _write(path: str, scene, rows: list[dict[str, Any]], keep_below: float) -> dict[str, Any]:
-    used = [r for r in rows if r.get("used")]
-    ious = [r["footprint_iou"] for r in used]
-    summary = {
-        "scene": scene.name,
-        "map": scene.map_path,
-        "attempted": len(rows),
-        "used": len(used),
-        "kept_above": keep_below,
-        # What the retries cost and what they bought.
-        "generations": sum(r.get("tries", 1) for r in rows),
-        "retried": sum(1 for r in rows if r.get("tries", 1) > 1),
-        "footprint_iou": {
-            "mean": round(sum(ious) / len(ious), 4) if ious else None,
-            "min": round(min(ious), 4) if ious else None,
-        },
-        "buildings": rows,
-    }
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(summary, handle, indent=2)
-    return summary
-
-
 # ---------------------------------------------------------------------------
 # Putting them back
 # ---------------------------------------------------------------------------
 
 
-def place(scene, ledger: str | dict[str, Any], *, facade_dir: str | None = None,
+def place(scene, ledger: str | dict[str, Any] | District, *, facade_dir: str | None = None,
           roof_texture: str | None = None, roof_tile_metres: float = 0.45,
           ground_texture: str | None = None, tile_metres: float = 3.0,
           road_texture: str | None = None, road_tile_metres: float = 2.5,
@@ -264,9 +366,10 @@ def place(scene, ledger: str | dict[str, Any], *, facade_dir: str | None = None,
     from .portrait import face_range
 
     if isinstance(ledger, str):
-        with open(ledger, encoding="utf-8") as handle:
-            ledger = json.load(handle)
-    rows = [r for r in ledger["buildings"] if r.get("used")]
+        ledger = District.read(ledger)
+    elif isinstance(ledger, dict):
+        ledger = District.from_json(ledger)
+    rows = ledger.standing
 
     build_scene(scene.result, facade_dir=facade_dir, roof_texture=roof_texture,
                 roof_tile_metres=roof_tile_metres, ground_texture=ground_texture,
@@ -274,7 +377,7 @@ def place(scene, ledger: str | dict[str, Any], *, facade_dir: str | None = None,
                 road_tile_metres=road_tile_metres, marking_options=marking_options,
                 verbose=False)
 
-    rebuilt = sorted({r["building"] for r in rows})
+    rebuilt = sorted({row.building for row in rows})
     for group in ("Buildings", "Roofs"):
         counts = scene_module.build.face_counts.get(group)
         obj = bpy.data.objects.get(group)
@@ -294,10 +397,10 @@ def place(scene, ledger: str | dict[str, Any], *, facade_dir: str | None = None,
 
     placed = 0
     for row in rows:
-        if not os.path.exists(row.get("glb", "")):
+        if not row.glb or not os.path.exists(row.glb):
             continue
         before = set(bpy.data.objects)
-        bpy.ops.import_scene.gltf(filepath=os.path.abspath(row["glb"]))
+        bpy.ops.import_scene.gltf(filepath=os.path.abspath(row.glb))
         added = [o for o in bpy.data.objects if o not in before and o.type == "MESH"]
         parts = []
         for obj in added:
@@ -321,19 +424,19 @@ def place(scene, ledger: str | dict[str, Any], *, facade_dir: str | None = None,
         # The two plan axes if the fit stretched it, one number if it did not;
         # ``stretch_deg`` is which way they point, the height always takes
         # their mean, and a ledger written before any of that still reads.
-        axes = np.asarray(row.get("scale_xy") or [row["scale"], row["scale"]], dtype=float)
+        axes = np.asarray(row.scale_xy or [row.scale, row.scale], dtype=float)
         rise = math.sqrt(axes[0] * axes[1])
-        phi = math.radians(row.get("stretch_deg", 0.0))
-        into = _turn(math.radians(row["yaw_deg"]) - phi)
+        phi = math.radians(row.stretch_deg or 0.0)
+        into = _turn(math.radians(row.yaw_deg) - phi)
         back = _turn(phi)
         for obj, coords in zip(added, parts):
             plan = ((coords[:, :2] - centroid) @ into * axes) @ back
-            height = (coords[:, 2] - floor) * rise + row["base_z"]
+            height = (coords[:, 2] - floor) * rise + row.base_z
             obj.data.vertices.foreach_set("co", np.column_stack(
-                [plan[:, 0] + row["centre"][0], plan[:, 1] + row["centre"][1],
+                [plan[:, 0] + row.centre[0], plan[:, 1] + row.centre[1],
                  height]).reshape(-1))
             obj.data.update()
-            obj.name = f"rebuilt_b{row['building']:04d}_{obj.name}"
+            obj.name = f"rebuilt_b{row.building:04d}_{obj.name}"
         placed += 1
 
     if not any(obj.type == "LIGHT" for obj in bpy.data.objects):

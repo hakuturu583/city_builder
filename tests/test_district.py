@@ -6,6 +6,8 @@ model, which is where the street-scale decisions live.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from shapely.affinity import rotate
 from shapely.geometry import Polygon as ShapelyPolygon
@@ -166,3 +168,79 @@ def test_one_attempt_is_the_old_behaviour(monkeypatch, tmp_path):
     seen = _stub(monkeypatch, [0.4, 0.9])
     D.rebuild(_Scene([_plot()]), str(tmp_path), attempts=1, verbose=False)
     assert len(seen) == 1
+
+
+# ---------------------------------------------------------------------------
+# The ledger as a type
+#
+# It is the only statement of how a reconstruction goes back into the world — a
+# mesh out of TRELLIS.2 is normalised into a unit cube and knows neither its
+# size nor its heading — so it is worth being something a consumer can read,
+# write and hand on without losing anything.
+# ---------------------------------------------------------------------------
+
+
+def _row(**kwargs):
+    fields = {"building": 1, "area_m2": 90.0, "roof": "hip", "used": True,
+              "footprint_iou": 0.93, "yaw_deg": 12.0, "scale": 14.0,
+              "scale_xy": [14.5, 13.5], "stretch": 1.07, "stretch_deg": 90.0,
+              "centre": [10.0, 20.0], "base_z": 3.0, "glb": "b0001.glb"}
+    return D.Rebuilt(**{**fields, **kwargs})
+
+
+def test_a_row_round_trips_through_json():
+    row = _row()
+    assert D.Rebuilt.from_json(row.to_json()) == row
+
+
+def test_a_key_from_a_newer_version_survives_a_round_trip():
+    """An older reader must not silently drop what it does not understand."""
+    raw = {**_row().to_json(), "provenance": "some-future-stage", "score": 0.5}
+    back = D.Rebuilt.from_json(raw)
+    assert back.extra == {"provenance": "some-future-stage", "score": 0.5}
+    assert back.to_json() == raw
+
+
+def test_the_empty_fields_are_left_out_rather_than_written_as_null():
+    written = D.Rebuilt(building=7).to_json()
+    assert "glb" not in written and "footprint_iou" not in written
+    assert written["building"] == 7 and written["used"] is False
+
+
+def test_a_district_counts_what_stands_and_what_it_cost():
+    ledger = D.District(scene="s", map="m.osm", kept_above=0.8, buildings=[
+        _row(), _row(building=2, used=False, footprint_iou=0.61, tries=3),
+        _row(building=3, footprint_iou=0.85)])
+    summary = ledger.to_json()
+    assert summary["attempted"] == 3 and summary["used"] == 2
+    assert summary["generations"] == 5 and summary["retried"] == 1
+    assert summary["footprint_iou"]["min"] == pytest.approx(0.85)
+    assert summary["footprint_iou"]["mean"] == pytest.approx(0.89)
+
+
+def test_a_district_round_trips_through_a_file(tmp_path):
+    ledger = D.District(scene="s", map="m.osm", buildings=[_row(), _row(building=2)])
+    path = str(tmp_path / "district.json")
+    ledger.write(path)
+    back = D.District.read(path)
+    assert back.scene == "s" and back.map == "m.osm"
+    assert [r.building for r in back.buildings] == [1, 2]
+    assert back.buildings[0] == ledger.buildings[0]
+
+
+def test_a_ledger_written_before_this_was_a_type_still_reads():
+    """Plain dicts on disk, from every run so far."""
+    raw = {"scene": "old", "map": "m.osm", "kept_above": 0.8, "buildings": [
+        {"building": 4, "area_m2": 80.0, "used": True, "footprint_iou": 0.9,
+         "yaw_deg": 0.0, "scale": 10.0, "centre": [0.0, 0.0], "base_z": 1.0,
+         "glb": "b0004.glb"}]}
+    ledger = D.District.from_json(raw)
+    assert len(ledger.standing) == 1
+    assert ledger.standing[0].scale_xy is None, "a fit written before the stretch existed"
+
+
+def test_rebuild_hands_back_a_summary_that_reads_the_same_as_the_file(monkeypatch, tmp_path):
+    _stub(monkeypatch, [0.91])
+    summary = D.rebuild(_Scene([_plot()]), str(tmp_path), verbose=False)
+    with open(tmp_path / "district.json", encoding="utf-8") as handle:
+        assert json.load(handle) == summary
