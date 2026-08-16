@@ -270,9 +270,17 @@ def rebuild(scene, out_dir: str, *, buildings: list[int] | None = None,
     ledger_path = os.path.join(out_dir, "district.json")
     done: dict[int, Rebuilt] = {}
     if resume and os.path.exists(ledger_path):
-        done = {row.building: row for row in District.read(ledger_path).buildings}
-        if verbose and done:
-            print(f"[district] resuming: {len(done)} building(s) already modelled")
+        was = District.read(ledger_path).buildings
+        # A row that *errored* is unfinished work; a row that came back and
+        # fitted badly is a verdict. Resume keeps the verdicts and retries the
+        # accidents — otherwise a run that lost twenty buildings to the card
+        # being momentarily full has lost them for good, and the only way to
+        # get them back is to hand-edit the ledger. Which is what happened.
+        done = {row.building: row for row in was if row.used or row.error is None}
+        if verbose and was:
+            again = len(was) - len(done)
+            print(f"[district] resuming: {len(done)} building(s) already modelled"
+                  + (f", {again} to try again" if again else ""))
 
     options = portrait_module.PortraitOptions()
     started = time.time()

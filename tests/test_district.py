@@ -306,3 +306,36 @@ def test_rebuild_hands_back_a_summary_that_reads_the_same_as_the_file(monkeypatc
     summary = D.rebuild(_Scene([_plot()]), str(tmp_path), verbose=False)
     with open(tmp_path / "district.json", encoding="utf-8") as handle:
         assert json.load(handle) == summary
+
+
+# ---------------------------------------------------------------------------
+# What resume owes a run that was interrupted by the card
+# ---------------------------------------------------------------------------
+
+
+def _ran(monkeypatch, tmp_path, ious, **kwargs):
+    seen = _stub(monkeypatch, ious)
+    D.rebuild(_Scene([_plot()]), str(tmp_path), verbose=False, **kwargs)
+    return seen
+
+
+def test_a_building_that_errored_is_tried_again_on_the_next_run(monkeypatch, tmp_path):
+    """A row that errored is unfinished work, not a verdict. Twenty buildings
+    were lost to the card being momentarily full, and the only way to get them
+    back was to hand-edit the ledger."""
+    _ran(monkeypatch, tmp_path, [RuntimeError("out of memory")] * 3, attempts=3)
+    seen = _ran(monkeypatch, tmp_path, [0.93], attempts=3)
+    assert len(seen) == 1, "the errored building was treated as done"
+
+
+def test_a_building_that_came_back_and_fitted_badly_is_left_alone(monkeypatch, tmp_path):
+    """That one *is* a verdict: the model returned a building, just not this
+    one, and asking again is paying for the same answer."""
+    _ran(monkeypatch, tmp_path, [0.4, 0.4, 0.4], attempts=3)
+    seen = _ran(monkeypatch, tmp_path, [0.93], attempts=3)
+    assert seen == [], "a rejected fit was paid for twice"
+
+
+def test_a_building_that_stands_is_never_paid_for_again(monkeypatch, tmp_path):
+    _ran(monkeypatch, tmp_path, [0.93])
+    assert _ran(monkeypatch, tmp_path, [0.93]) == []
