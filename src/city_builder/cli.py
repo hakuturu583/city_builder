@@ -6,6 +6,8 @@ import os
 
 import click
 
+from .pipeline import STAGES as PIPELINE_STAGES
+
 
 @click.group()
 @click.version_option(package_name="city-builder")
@@ -707,3 +709,65 @@ def make_command(input_path, out_dir, config_path, facade_dir, road_texture, gro
     click.echo(f"\nwrote {len(made)} scene(s) to {out_dir}")
     for name, clip in made:
         click.echo(f"  {name}" + ("" if clip else "   (no drivable route: no video)"))
+
+
+@main.command("pipeline")
+@click.argument("input_path", type=click.Path(exists=True))
+@click.option("--out", "out_dir", required=True, help="Everything is written here")
+@click.option("--config", "config_path", default=None, help="A city_builder config YAML")
+@click.option("--stages", default=",".join(PIPELINE_STAGES),
+              help="Which stages to run, comma separated: " + ", ".join(PIPELINE_STAGES))
+@click.option("--force", default="", help="Stages to run again even though their output is there")
+@click.option("--cell", type=float, default=None, help="Ground grid spacing (m)")
+@click.option("--relief/--no-relief", default=None, help="Invent terrain between the roads")
+@click.option("--elevation-model", is_flag=True, help="Take the terrain's shape from a survey")
+@click.option("--resolution", type=click.Choice(["512", "1024", "1024_cascade"]), default=None)
+@click.option("--brush-up", type=float, default=None)
+@click.option("--keep-below", type=float, default=None,
+              help="Footprint IoU under which a reconstruction is not used")
+@click.option("--attempts", type=int, default=None, help="Tries per building")
+@click.option("--limit", type=int, default=None, help="Only the N biggest plots")
+@click.option("--seed", type=int, default=None)
+@click.option("--no-renders", is_flag=True)
+@click.option("--quiet", is_flag=True)
+def pipeline_command(input_path, out_dir, config_path, stages, force, quiet, **overrides):
+    """A Lanelet2 map to a textured, reconstructed city, in one run.
+
+    Ground and terrain, then the tiles the massing wears, then a facade family
+    per floor count the map produced, then TRELLIS.2 over every plot, then the
+    scene. Each stage is skipped when its output is already there, so an
+    interrupted run continues where it stopped.
+
+    **Stages 2-4 need a GPU**, TRELLIS.2 and a diffusion stack; `--stages
+    ground,scene` runs the geometry alone.
+    """
+    from .config import CityConfig
+    from .pipeline import Recipe, run
+
+    try:
+        config = CityConfig.from_yaml(config_path) if config_path else CityConfig()
+    except (ValueError, TypeError) as error:
+        raise click.UsageError(f"{config_path}: {error}") from error
+
+    recipe = Recipe()
+    if overrides.pop("no_renders", False):
+        recipe.renders = False
+    if overrides.pop("elevation_model", False):
+        recipe.elevation_model = True
+    for name, value in overrides.items():
+        if value is not None:
+            setattr(recipe, name, value)
+
+    wanted = tuple(s.strip() for s in stages.split(",") if s.strip())
+    unknown = set(wanted) - set(PIPELINE_STAGES)
+    if unknown:
+        raise click.UsageError(f"unknown stage(s): {', '.join(sorted(unknown))}")
+
+    report = run(input_path, out_dir, config=config, recipe=recipe, stages=wanted,
+                 force=tuple(s.strip() for s in force.split(",") if s.strip()),
+                 verbose=not quiet)
+    click.echo(f"\n{out_dir}: {report['seconds'] / 60:.1f} min")
+    for stage, got in report["stages"].items():
+        click.echo(f"  {stage:<12} {got.get('seconds', 0):>7.1f}s  "
+                   + ", ".join(f"{k}={v}" for k, v in got.items()
+                               if k != "seconds" and not isinstance(v, (list, dict))))

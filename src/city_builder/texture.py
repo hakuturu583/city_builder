@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -574,3 +575,69 @@ def seam_error_axis(tile: np.ndarray, axis: int) -> float:
         wrap = np.abs(image[:, 0] - image[:, -1]).mean()
     inner = np.abs(np.diff(image, axis=axis)).mean()
     return float(wrap / (inner + 1e-9))
+
+
+def paint_family(control_dir: str, output_dir: str, *, prompt=None,
+                 negative_prompt: str = "", floors: Sequence[int] | None = None,
+                 keep_below: float | None = None,
+                 options: FacadeOptions | None = None) -> dict[str, Any]:
+    """Diffusion sheets for a family of control drawings, scored as they are made.
+
+    One family per floor count, taking the drawing as the structure and letting
+    the model decide only the materials. Each sheet is scored against the
+    drawing it was given *before* it is written, so a run that lost the storeys
+    says so instead of leaving it to a glance at a contact sheet.
+
+    ``prompt`` defaults to a spread across :data:`FACADE_STYLES`. Leaving it
+    fixed quietly produces a city of one material, because the alignment score
+    cannot see colour and will not complain.
+    """
+    import os
+    import time
+
+    import numpy as np
+    from PIL import Image
+
+    from .facade_layout import alignment, diversity, saturation, sheet_floors, sheet_name, wrap_seam
+
+    options = options or FacadeOptions()
+    wanted = set(floors) if floors else None
+    controls = []
+    for name in sorted(os.listdir(control_dir)):
+        count = sheet_floors(name) if name.endswith(".png") else None
+        if count is not None and (wanted is None or count in wanted):
+            controls.append((count, os.path.join(control_dir, name)))
+    if not controls:
+        raise ValueError(f"no control images in {control_dir} matching {sorted(wanted or [])}")
+
+    os.makedirs(output_dir, exist_ok=True)
+    started = time.time()
+    pipeline = load_facade_pipeline(options)
+    loaded = time.time()
+
+    written, dropped, scores, kept = 0, 0, [], []
+    for index, (count, path) in enumerate(controls):
+        control = np.asarray(Image.open(path).convert("RGB"))
+        prompts = prompt or styled_prompts(options.count,
+                                           seed=options.seed + index * options.count)
+        for sheet in facade_sheets(prompts, control, options,
+                                   negative_prompt=negative_prompt, pipeline=pipeline):
+            floor_score = alignment(sheet, control, axis=0)
+            scores.append((count, floor_score, alignment(sheet, control, axis=1),
+                           wrap_seam(sheet, control)))
+            if keep_below is not None and floor_score < keep_below:
+                dropped += 1
+                continue
+            save_tile(sheet, os.path.join(output_dir, sheet_name(count, written)))
+            kept.append(sheet)
+            written += 1
+
+    return {
+        "written": written, "dropped": dropped, "scores": scores,
+        "load_seconds": round(loaded - started, 1),
+        "seconds": round(time.time() - loaded, 1),
+        "floor_alignment": (sum(s[1] for s in scores) / len(scores)) if scores else None,
+        "diversity": diversity(kept) if kept else None,
+        "saturation": [min(saturation(s) for s in kept),
+                       max(saturation(s) for s in kept)] if kept else None,
+    }

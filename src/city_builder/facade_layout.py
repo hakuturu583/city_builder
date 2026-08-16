@@ -34,7 +34,9 @@ identical grey concrete.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -567,3 +569,63 @@ def sheet_floors(path: str) -> int | None:
     """The floor count a sheet was drawn for, or None if it does not say."""
     match = SHEET_PATTERN.search(path.replace("\\", "/").rsplit("/", 1)[-1])
     return int(match.group(1)) if match else None
+
+
+def draw_family(output_dir: str, counts: Sequence[int], *, variants: int = 4,
+                facade_width: float = 24.0, bay_metres: float = 4.0,
+                floor_height: float = 3.0, px_per_floor: int = 128,
+                px_per_bay: int = 128, seed: int = 0,
+                control: bool = True) -> dict[str, Any]:
+    """One family of stand-in sheets per floor count, and the drawings behind them.
+
+    No model and no GPU: this is the geometry half. The sheets are plain
+    stand-ins that finish and check the UV path, and the control images beside
+    them are what a diffusion pass is conditioned on so its windows land on the
+    same storeys.
+
+    A drawing per *variant*, not per floor count. One canonical layout would
+    give every building in the city the same window proportions and the same
+    bay rhythm, and the conditioner then holds the model to it — structure is
+    the half of a facade's variety that no prompt supplies.
+    """
+    import os
+    import random
+
+    from .texture import save_tile, seam_error_axis
+
+    counts = list(counts)
+    control_dir = os.path.join(output_dir, "control")
+    os.makedirs(output_dir, exist_ok=True)
+    if control:
+        os.makedirs(control_dir, exist_ok=True)
+
+    sheets, seams, floors_score, bays_score, densities = [], [], [], [], []
+    for floors in counts:
+        for variant in range(variants):
+            rng = random.Random(seed + 1000 * floors + variant)
+            layout = sample_layout(floors, rng, facade_width=facade_width,
+                                   bay_metres=bay_metres)
+            width, height = layout.pixel_size(px_per_floor, px_per_bay)
+            if control:
+                save_tile(control_image(layout, width, height),
+                          os.path.join(control_dir, sheet_name(floors, variant, "control")))
+            sheet = procedural_facade(layout, width, height,
+                                      seed=seed + 1000 * floors + variant)
+            path = os.path.join(output_dir, sheet_name(floors, variant))
+            save_tile(sheet, path)
+            sheets.append(path)
+            seams.append(seam_error_axis(sheet, axis=1))
+            floors_score.append(floor_alignment(sheet, layout))
+            bays_score.append(bay_alignment(sheet, layout))
+            densities.append(100.0 * layout.texel_metres(floors * floor_height, height))
+
+    return {
+        "sheets": sheets,
+        "control_dir": control_dir if control else None,
+        "counts": counts,
+        "bays": bays_for(facade_width, bay_metres),
+        "seam": sum(seams) / len(seams) if seams else None,
+        "floor_alignment": min(floors_score) if floors_score else None,
+        "bay_alignment": min(bays_score) if bays_score else None,
+        "texel_cm": [min(densities), max(densities)] if densities else None,
+    }
