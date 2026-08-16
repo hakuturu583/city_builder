@@ -333,16 +333,10 @@ def pick_height(area: float, options: BuildingOptions, rng: random.Random) -> fl
 
 
 def _triangulate(polygon) -> list[list[tuple[float, float]]]:
-    """Triangulate a simple polygon (Delaunay, keeping the inside triangles)."""
-    from shapely.ops import triangulate
-    from shapely.prepared import prep
+    """The rings of a polygon's own triangles. See ``geometry.cover_with_triangles``."""
+    from .geometry import cover_with_triangles
 
-    inside = prep(polygon)
-    return [
-        list(tri.exterior.coords)[:-1]
-        for tri in triangulate(polygon)
-        if inside.contains(tri.representative_point())
-    ]
+    return [list(tri.exterior.coords)[:-1] for tri in cover_with_triangles(polygon)]
 
 
 def plinth(polygon, base_z: float, *, height: float = 0.35, proud: float = 0.12,

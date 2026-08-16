@@ -63,8 +63,6 @@ GSI_TILES = (
     ("dem_png", 14),    # DEM10B, 10 m, nationwide
 )
 
-NO_DATA = -83886.08  # what (128, 0, 0) decodes to under the GSI encoding
-
 
 # ---------------------------------------------------------------------------
 # Inventing one instead
@@ -382,7 +380,7 @@ def align(model: np.ndarray, samples: np.ndarray, frame_x0: float, frame_y0: flo
     return offset, float(np.median(residual)), float(np.percentile(residual, 90))
 
 
-def prior_for(frame, x0: float, y0: float, nx: int, ny: int, cell: float,
+def terrain_for(frame, x0: float, y0: float, nx: int, ny: int, cell: float,
               samples: Sequence[Sequence[float]], *,
               sources: Sequence[Any] | None = None,
               cache_dir: str | None = None,
@@ -391,7 +389,9 @@ def prior_for(frame, x0: float, y0: float, nx: int, ny: int, cell: float,
 
     The whole module in one call: read it, solve the offset, subtract it, and
     hand back something that goes straight into ``build_heightmap`` as
-    ``guidance=``. ``None`` when nothing covers the map — the ordinary answer
+    ``guidance=`` — whose *curvature* is what gets used, so the offset is
+    solved for the report and for a caller who wants the heights, not because
+    the solve needs it. ``None`` when nothing covers the map — the ordinary answer
     outside Japan with no invented source in the list, and not an error.
     """
     found = sample_grid(frame, x0, y0, nx, ny, cell, sources=sources,

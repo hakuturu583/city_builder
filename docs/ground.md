@@ -342,17 +342,27 @@ terrain decides how much of it does.
 
 ## The order to do it in
 
-Each of these stands alone and is measurable on its own:
+Each of these stands alone and is measurable on its own. The first four are
+built; what each turned out to cost, and where the measurement contradicted the
+plan, is in *What was built* above.
 
-1. **Biharmonic instead of harmonic**, solved sparsely. One operator change;
-   removes the kerb crease and the maximum-principle flatness; replaces 400
-   Jacobi iterations with one solve. No new data, no new dependency.
-2. **Fetch the GSI DEM and solve for the datum offset.** Turns the problem from
-   invention into fitting. This is where the biggest error is: 3.5 m.
-3. **The class grid**, vectors first, raster second.
-4. **Constrained Delaunay with the lane boundaries as breaklines**, which makes
-   the seam exact and retires `snap_tolerance`.
-5. **Per-class texturing** on the baking pipeline that already exists.
+1. ~~**Biharmonic instead of harmonic**, solved sparsely.~~ Built. One operator
+   change, one sparse solve in place of 400 Jacobi iterations.
+2. ~~**Fetch the GSI DEM and solve for the datum offset.**~~ Built — but only
+   its curvature is used, because its heights fight the roads. And it is one
+   provider behind a tile-source interface, so a terrain invented from stated
+   conditions goes through the same door.
+3. ~~**The class grid.**~~ Built, by rule rather than raster: for a procedural
+   city most of what a classifier would label is invented anyway, and a rule
+   set is authorable where a download is not.
+4. ~~**Constrained Delaunay with the lane boundaries as breaklines.**~~ Built,
+   and `snap_tolerance` is gone — though the seam's real error turned out to be
+   the height lookup rather than the snap.
+5. **Per-class texturing** on the baking pipeline that already exists — built
+   as one baked ground texture; what is left is the rest of stage 4, the class
+   boundaries that are genuine discontinuities: a retaining wall, the toe of an
+   embankment. The mechanism for them exists — `build_mesh` takes breaklines,
+   and the shoreline already goes in as one.
 
 ## Where the sources are
 

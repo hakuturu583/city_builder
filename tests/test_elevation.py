@@ -169,7 +169,7 @@ def test_the_prior_comes_back_in_the_scenes_own_datum(monkeypatch):
     _served(monkeypatch, {"dem5a_png": _tile(28.5)})
     frame = LocalFrame(35.9, 139.9)
     samples = [(0.0, 0.0, 1.5), (10.0, 0.0, 1.5), (20.0, 0.0, 1.5)]
-    got = el.prior_for(frame, 0.0, 0.0, 4, 4, 10.0, samples)
+    got = el.terrain_for(frame, 0.0, 0.0, 4, 4, 10.0, samples)
     assert got is not None
     prior, coverage = got
     # 28.5 in the model's datum against 1.5 in the scene's: the prior must come
@@ -254,7 +254,7 @@ def test_the_solved_datum_absorbs_whatever_the_invented_terrain_calls_zero():
     """Its heights mean nothing, so they must not arrive as metres above sea."""
     frame = LocalFrame(35.9, 139.9)
     samples = [(0.0, 0.0, 4.0), (20.0, 0.0, 4.0), (40.0, 0.0, 4.0)]
-    got = el.prior_for(frame, 0.0, 0.0, 8, 8, 10.0, samples,
+    got = el.terrain_for(frame, 0.0, 0.0, 8, 8, 10.0, samples,
                        sources=[el.InventedTiles(el.Relief(amplitude=2.0, seed=9))])
     assert got is not None
     prior, _coverage = got

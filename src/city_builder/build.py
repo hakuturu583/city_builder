@@ -157,7 +157,7 @@ def build_city(
                 return None
 
             samples = [tuple(p) for r in surfaces for p in (*r.left, *r.right)]
-            got = elevation_module.prior_for(frame, x0, y0, nx, ny, cell_size, samples,
+            got = elevation_module.terrain_for(frame, x0, y0, nx, ny, cell_size, samples,
                                              sources=sources)
             if got is None:
                 return None

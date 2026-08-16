@@ -27,7 +27,7 @@ from typing import Any
 
 import numpy as np
 
-from .geometry import Mesh, Ribbon, signed_area_xy
+from .geometry import Mesh, Ribbon, cover_with_triangles, signed_area_xy
 
 DEFAULT_CELL = 10.0
 DEFAULT_ORDER = 2  # thin plate; see _solve for why 1 creases at every kerb
@@ -102,8 +102,6 @@ def build_heightmap(
     smooth: float = DEFAULT_SMOOTH,
     order: int = DEFAULT_ORDER,
     guidance: np.ndarray | Callable[..., np.ndarray | None] | None = None,
-    prior: np.ndarray | None = None,
-    prior_weight: float = 0.0,
     percentile: float = 10.0,
     drop: float = 0.05,
 ) -> HeightMap | None:
@@ -164,8 +162,7 @@ def build_heightmap(
         guidance = guidance(x0, y0, nx, ny, cell)
 
     support = _support_distance(known)
-    filled = _solve(np.minimum(z, floor), known, order=order, guidance=guidance,
-                    prior=prior, prior_weight=prior_weight)
+    filled = _solve(np.minimum(z, floor), known, order=order, guidance=guidance)
     if smooth > 0:
         filled = _smooth(filled, smooth)
 
@@ -174,8 +171,7 @@ def build_heightmap(
     # free cells re-settle, clamp again.
     constrained = known & ~np.isnan(floor)
     filled = np.where(constrained, np.minimum(filled, floor), filled)
-    filled = _solve(filled, constrained, order=order, guidance=guidance,
-                    prior=prior, prior_weight=prior_weight)
+    filled = _solve(filled, constrained, order=order, guidance=guidance)
     filled = np.where(constrained, np.minimum(filled, floor), filled)
 
     return HeightMap(x0, y0, cell, filled, support)
@@ -212,7 +208,6 @@ def _laplacian(ny: int, nx: int):
 
 
 def _solve(z: np.ndarray, known: np.ndarray, *, order: int = DEFAULT_ORDER,
-           prior: np.ndarray | None = None, prior_weight: float = 0.0,
            guidance: np.ndarray | None = None) -> np.ndarray:
     """Fill the unknown cells by minimising a surface energy under constraints.
 
@@ -243,15 +238,10 @@ def _solve(z: np.ndarray, known: np.ndarray, *, order: int = DEFAULT_ORDER,
     constant offset and the tilt both cancel because neither survives a
     Laplacian.
 
-    ``prior`` and ``prior_weight`` add the value-screening term
-    :math:`w\\|z - p\\|^2` anyway, for the case where the model *is* trusted
-    over the map. It defaults off, on the measurement above.
-
     Solved once, sparsely, rather than iterated: a city map is tens of
     thousands of cells, which is small for a direct sparse solve and was four
     hundred Jacobi sweeps before.
     """
-    from scipy.sparse import identity
     from scipy.sparse.linalg import spsolve
 
     ny, nx = z.shape
@@ -276,12 +266,6 @@ def _solve(z: np.ndarray, known: np.ndarray, *, order: int = DEFAULT_ORDER,
                          np.isfinite(shape).any() else 0.0)
         wanted = laplace @ shape.ravel()
         rhs = rhs + ((laplace.T @ wanted) if order >= 2 else -wanted)
-
-    if prior is not None and prior_weight > 0:
-        usable = np.isfinite(prior)
-        weights = np.where(usable, prior_weight, 0.0).ravel()
-        system = system + identity(ny * nx, format="csr").multiply(weights[:, None]).tocsr()
-        rhs = rhs + weights * np.where(usable, prior, 0.0).ravel()
 
     free = ~known.ravel()
     fixed_values = filled.ravel()[~free]
@@ -617,7 +601,6 @@ def build_mesh(
     between the roads would never be sampled. The cell edges are constraints
     too, so the grid keeps its 10 m resolution where there is no road.
     """
-    import shapely
     from shapely.geometry import LineString, Point, box
     from shapely.ops import polygonize, unary_union
     from shapely.prepared import prep
@@ -681,7 +664,7 @@ def build_mesh(
     def emit(piece) -> None:
         if piece.is_empty or piece.area < 1e-6:
             return
-        for tri in shapely.constrained_delaunay_triangles(piece).geoms:
+        for tri in cover_with_triangles(piece):
             add_face(list(tri.exterior.coords)[:-1])
 
     # A shoreline, a retaining wall, the toe of an embankment: a line the

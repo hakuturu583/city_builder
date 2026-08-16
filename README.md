@@ -186,6 +186,29 @@ road network is a dense set of ground samples, so the ground is interpolated
 from it and then **clipped to the road outline**, meeting the carriageway at
 the kerb line.
 
+The gaps between the streets — most of a city block — are filled by a **thin
+plate**: one sparse solve minimising the surface's own curvature with the road
+heights as hard constraints. Not the harmonic fill that came before it, and the
+difference is a property rather than a setting. A harmonic surface can never
+leave the range of its samples, so ground beyond the last street went flat at
+that street's height however steadily the streets had been climbing, and a rise
+inside a block was not unlikely but impossible.
+
+What the ground does between the roads can also be **given a shape**, from a
+published elevation model or from one invented out of stated conditions — the
+same tile-source interface either way, so a fully procedural city anywhere is
+the same code with a different provider. Only the model's *curvature* is taken:
+measured on Kashiwanoha, Japan's 5 m lidar and the map's own road elevations
+disagree by p90 3.19 m after their datums are aligned, so screening the solve
+against its heights fights the roads, while matching its Laplacian does not.
+See `docs/ground.md` for the measurements, and `city_builder.elevation`.
+
+**What the ground is made of** is said by rule — grass, gravel, packed earth,
+paving — and baked into one texture anchored to the map. Standing water is the
+one class that changes the ground's *shape* rather than its colour: each body
+is dug to a level its banks can hold, and gets a surface of its own. See
+`city_builder.cover`.
+
 Elevated structure has to come out first or the ground ends up on top of the
 overpass, and these maps carry no `bridge` or `layer` tag. Lanelets that
 overlap in plan view but sit apart in z seed the elevated set; connectivity
@@ -199,6 +222,7 @@ Measured on the Nishi-Shinjuku Autoware map (979 lanelets, 1.1 km across):
 |---|---|
 | elevated lanelets | 97 of 887 |
 | ground surface vs the road | never above it by more than **5 mm** (ray-cast at every road vertex) |
+| seam vs the carriageway, Kashiwanoha | **9e-16 m** — the kerb is a forced edge of the triangulation |
 | heightmap vs the street | ±0.35 m (p90) |
 | viaduct above the ground | 5.9 m (median) |
 | cells containing a road sample | ~12 % |

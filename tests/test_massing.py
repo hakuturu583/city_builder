@@ -218,7 +218,10 @@ def test_a_hip_has_a_shorter_ridge_than_a_gable():
         mesh = pitched_roof(plan_shape, 10.0, form)
         top = max(v[2] for v in mesh.vertices)
         at_top = [v for v in mesh.vertices if math.isclose(v[2], top, abs_tol=1e-6)]
-        ridges[form] = math.dist(at_top[0][:2], at_top[-1][:2])
+        # How far apart the highest points are, not how far apart the first and
+        # last of them happen to be: the triangulation decides the order and a
+        # ridge is the span of the whole set.
+        ridges[form] = max(math.dist(a[:2], b[:2]) for a in at_top for b in at_top)
     assert ridges["hip"] < ridges["gable"]
 
 
