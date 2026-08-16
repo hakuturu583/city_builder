@@ -641,3 +641,99 @@ def paint_family(control_dir: str, output_dir: str, *, prompt=None,
         "saturation": [min(saturation(s) for s in kept),
                        max(saturation(s) for s in kept)] if kept else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# A tile that is fit to lay
+# ---------------------------------------------------------------------------
+
+#: A near-white pixel. Ground is not white; a tile with a lot of this in it is
+#: an illustration on a background rather than a photograph of anything.
+BLOWN = 235
+
+
+def tile_score(tile) -> dict[str, float]:
+    """Three numbers that decide whether a tile can go on the ground.
+
+    ``blown`` is the fraction of near-white pixels. "Seamless texture" is a
+    phrase that pulls an image model towards stock clipart, and clipart comes
+    on a white background; laid over a town those gaps read as speckle, which
+    is exactly how a bad tile was noticed.
+
+    ``sd`` is contrast. Ground photographed from above is low-contrast — the
+    tiles that look right measure 10 to 65 — and an illustration of ground is
+    not: the grass tile that had to be thrown away measured 99.
+
+    ``seam`` is the existing wrap error, near 1.0 when the tile tiles.
+    """
+    a = np.asarray(tile, dtype=float)
+    if a.max() <= 1.001:
+        a = a * 255.0
+    return {
+        "blown": float((a.min(axis=2) > BLOWN).mean()),
+        "sd": float(a.std()),
+        "seam": float(seam_error(tile)),
+    }
+
+
+def tile_is_usable(score: dict[str, float], *, blown: float = 0.01,
+                   sd: tuple[float, float] = (4.0, 70.0),
+                   seam: tuple[float, float] = (0.6, 1.4)) -> bool:
+    """Whether a score passes. The bounds are the measured ones; see above."""
+    return (score["blown"] <= blown
+            and sd[0] <= score["sd"] <= sd[1]
+            and seam[0] <= score["seam"] <= seam[1])
+
+
+def ground_tile(prompt: str, options: TextureOptions | None = None, *,
+                path: str | None = None, negative_prompt: str = "",
+                attempts: int = 3) -> dict[str, Any]:
+    """A tile drawn, scored, and drawn again if it is not fit to lay.
+
+    The same discipline the reconstruction uses: a generation is a draw from a
+    distribution, so score it and draw again rather than shipping whatever came
+    back. The grass tile that made a whole town look like static was one bad
+    draw with nothing checking it.
+
+    The seed moves between attempts and is *stable* between runs, which the
+    caller's own seed has to be too — `abs(hash(name))` is not, because Python
+    randomises string hashing per process, so a tile set generated that way
+    cannot be reproduced and its quality is a lottery. Use
+    :func:`stable_seed`.
+    """
+    options = options or TextureOptions()
+    attempts = max(1, attempts)
+    best, best_score, best_try = None, None, 0
+    for attempt in range(attempts):
+        draw = TextureOptions(**{**options.__dict__,
+                                 "seed": options.seed + attempt * 7919})
+        tile = make_tile(prompt, draw, negative_prompt=negative_prompt)
+        score = tile_score(tile)
+        if best is None or _distance(score) < _distance(best_score):
+            best, best_score, best_try = tile, score, attempt + 1
+        if tile_is_usable(score):
+            break
+    if path:
+        save_tile(best, path)
+    return {"path": path, "tries": best_try, "usable": tile_is_usable(best_score),
+            **{k: round(v, 4) for k, v in best_score.items()}}
+
+
+def _distance(score: dict[str, float]) -> float:
+    """How far a score is from usable, so the least-bad draw can be kept."""
+    return (max(0.0, score["blown"] - 0.01) * 100.0
+            + max(0.0, score["sd"] - 70.0) / 10.0
+            + max(0.0, 4.0 - score["sd"]) / 10.0
+            + max(0.0, abs(score["seam"] - 1.0) - 0.4))
+
+
+def stable_seed(name: str) -> int:
+    """A seed from a name that is the same in every process.
+
+    ``hash()`` is not: Python randomises string hashing per interpreter, so a
+    tile set seeded that way is a different tile set every run and cannot be
+    reproduced or bisected.
+    """
+    import zlib
+
+    return zlib.crc32(name.encode("utf-8")) % 100_000

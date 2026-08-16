@@ -68,6 +68,14 @@ COVER_PROMPTS: dict[str, str] = {
 ROOF_PROMPT = ("top-down photograph of grey Japanese kawara roof tiles in even courses, "
                "overcast daylight, seamless texture")
 
+# "Seamless texture" is the phrase that gets a tileable image out of the model
+# and also the phrase that pulls it towards stock clipart, which arrives on a
+# white background. Saying no to the background is cheaper than losing the
+# phrase that makes the tile tile.
+TILE_NEGATIVE = ("illustration, clipart, vector art, cartoon, drawing, "
+                 "white background, isolated objects, cut out, border, frame, "
+                 "watermark, text, high contrast, black outlines")
+
 
 @dataclass
 class Recipe:
@@ -96,6 +104,7 @@ class Recipe:
     # --- materials ------------------------------------------------------
     tile_size: int = 768
     tile_steps: int = 30
+    tile_attempts: int = 3       # a tile is a draw; score it and draw again
     roof_tile_metres: float = 0.45
     cover_texels_per_metre: float = 12.0
 
@@ -216,27 +225,35 @@ def _cover(out_dir: str, config):
 
 def _materials(map_path, out_dir, config, recipe, state, *, force, verbose):
     """A tile per ground class, and one for the roofs."""
-    from .texture import TextureOptions, make_tile, save_tile, seam_error
+    from .texture import TextureOptions, ground_tile, stable_seed
 
     tiles = os.path.join(out_dir, "tiles")
     os.makedirs(tiles, exist_ok=True)
     wanted = {**COVER_PROMPTS, "kawara": ROOF_PROMPT}
-    made, skipped, seams = [], 0, {}
+    made, skipped, scores, poor = [], 0, {}, []
     for name, prompt in wanted.items():
         path = os.path.join(tiles, f"{name}.png")
         if os.path.exists(path) and not force:
             skipped += 1
             continue
+        # A stable seed, because `hash()` is randomised per process and a tile
+        # set seeded that way is a different set every run — which is how one
+        # bad grass tile got laid over a whole town with nothing to reproduce.
         options = TextureOptions(size=recipe.tile_size, steps=recipe.tile_steps,
-                                 seed=abs(hash(name)) % 1000)
-        tile = make_tile(prompt, options)
-        save_tile(tile, path)
-        seams[name] = round(float(seam_error(tile)), 4)
+                                 seed=stable_seed(name) + recipe.seed)
+        got = ground_tile(prompt, options, path=path,
+                          negative_prompt=TILE_NEGATIVE,
+                          attempts=recipe.tile_attempts)
+        scores[name] = {k: got[k] for k in ("blown", "sd", "seam", "tries")}
         made.append(path)
+        if not got["usable"]:
+            poor.append(name)
         if verbose:
-            print(f"[pipeline] {name}: {path} (seam {seams[name]})")
+            mark = "" if got["usable"] else "  <- still not usable"
+            print(f"[pipeline] {name}: blown {got['blown']:.3f}, sd {got['sd']:.1f}, "
+                  f"seam {got['seam']:.2f}, x{got['tries']}{mark}")
     state["roof_texture"] = os.path.join(tiles, "kawara.png")
-    return {"made": len(made), "kept": skipped, "seam_error": seams}
+    return {"made": len(made), "kept": skipped, "unusable": poor, "tiles": scores}
 
 
 # ---------------------------------------------------------------------------

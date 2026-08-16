@@ -50,15 +50,15 @@ def stubbed(monkeypatch, tmp_path):
         with open(path, "w", encoding="utf-8") as handle:
             handle.write("{}")
 
-    def make_tile(prompt, options):
-        calls.append(("tile", {"prompt": prompt[:24], "seed": options.seed}))
-        return __import__("numpy").zeros((8, 8, 3), dtype=float)
-
-    def save_tile(tile, path):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "wb") as handle:
-            handle.write(b"x")
-        return path
+    def ground_tile(prompt, options, *, path=None, negative_prompt="", attempts=3):
+        calls.append(("tile", {"prompt": prompt[:24], "seed": options.seed,
+                               "negative": bool(negative_prompt)}))
+        if path:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as handle:
+                handle.write(b"x")
+        return {"path": path, "tries": 1, "usable": True,
+                "blown": 0.0, "sd": 30.0, "seam": 1.0}
 
     def draw_family(out, counts, **kwargs):
         calls.append(("layouts", {"counts": list(counts)}))
@@ -94,9 +94,7 @@ def stubbed(monkeypatch, tmp_path):
 
     monkeypatch.setattr(build_module, "build_city_from_config", build)
     monkeypatch.setattr(build_module, "write_manifest", manifest)
-    monkeypatch.setattr(texture_module, "make_tile", make_tile)
-    monkeypatch.setattr(texture_module, "save_tile", save_tile)
-    monkeypatch.setattr(texture_module, "seam_error", lambda tile: 0.5)
+    monkeypatch.setattr(texture_module, "ground_tile", ground_tile)
     monkeypatch.setattr(texture_module, "paint_family", paint_family)
     monkeypatch.setattr(layout_module, "draw_family", draw_family)
     monkeypatch.setattr(district_module, "rebuild", rebuild)

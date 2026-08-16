@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from city_builder import scene
+from city_builder import scene, texture
 from city_builder.geometry import Mesh
 from city_builder.texture import TextureOptions, make_tile, procedural_tile, seam_error
 
@@ -176,3 +176,88 @@ def test_both_sides_land_on_the_stride_the_vae_uses():
     at = _sizes()
     for wanted in ((384, 216), (391, 233), (500, 501)):
         assert all(side % 8 == 0 for side in at(*wanted))
+
+
+# ---------------------------------------------------------------------------
+# A tile fit to lay
+#
+# A ground tile goes over a whole town, so one bad draw is a town that looks
+# like static. These are the numbers that decide, and the reason there is a
+# number at all.
+# ---------------------------------------------------------------------------
+
+
+def _noise(size=64, mean=120.0, spread=12.0, seed=0):
+    """A stand-in tile, in the uint8 a real one comes back as."""
+    rng = np.random.default_rng(seed)
+    return np.clip(rng.normal(mean, spread, (size, size, 3)), 0, 255).astype(np.uint8)
+
+
+def test_a_photograph_of_ground_passes():
+    assert texture.tile_is_usable(texture.tile_score(_noise()))
+
+
+def test_clipart_on_a_white_background_is_refused():
+    """The failure that was actually shipped: white gaps read as speckle."""
+    tile = _noise()
+    tile[:32] = 255  # half the frame is background
+    score = texture.tile_score(tile)
+    assert score["blown"] > 0.4
+    assert not texture.tile_is_usable(score)
+
+
+def test_an_illustration_is_refused_on_contrast():
+    """The grass tile that had to be thrown away measured 99; ground measures 10-65."""
+    harsh = _noise(spread=90.0)
+    assert texture.tile_score(harsh)["sd"] > 70.0
+    assert not texture.tile_is_usable(texture.tile_score(harsh))
+
+
+def test_a_flat_grey_tile_is_refused_too():
+    assert not texture.tile_is_usable(texture.tile_score(_noise(spread=0.2)))
+
+
+def test_a_seed_from_a_name_is_the_same_in_every_process():
+    """`hash()` is randomised per interpreter, so a tile set seeded that way
+    cannot be reproduced — which is how one bad tile reached a whole town."""
+    import subprocess
+    import sys
+
+    code = "from city_builder.texture import stable_seed; print(stable_seed('grass'))"
+    seen = {subprocess.run([sys.executable, "-c", code], capture_output=True,
+                           text=True, check=True).stdout.strip()
+            for _ in range(3)}
+    assert len(seen) == 1
+    assert texture.stable_seed("grass") != texture.stable_seed("gravel")
+
+
+def test_a_tile_that_misses_is_drawn_again(monkeypatch, tmp_path):
+    draws = []
+
+    def make_tile(prompt, options, *, negative_prompt=""):
+        draws.append(options.seed)
+        # The first two are clipart on white; the third is ground.
+        tile = _noise(seed=len(draws))
+        if len(draws) < 3:
+            tile[:] = 255
+        return tile
+
+    monkeypatch.setattr(texture, "make_tile", make_tile)
+    got = texture.ground_tile("grass", texture.TextureOptions(seed=5),
+                              path=str(tmp_path / "g.png"), attempts=4)
+    assert got["tries"] == 3 and got["usable"]
+    assert len(set(draws)) == 3, "the same seed was drawn again"
+
+
+def test_the_least_bad_draw_is_kept_when_none_pass(monkeypatch, tmp_path):
+    def make_tile(prompt, options, *, negative_prompt=""):
+        tile = _noise(seed=options.seed, spread=90.0)
+        if options.seed % 2 == 0:
+            tile[:] = 255          # worse: blown out entirely
+        return tile
+
+    monkeypatch.setattr(texture, "make_tile", make_tile)
+    got = texture.ground_tile("grass", texture.TextureOptions(seed=1),
+                              path=str(tmp_path / "g.png"), attempts=3)
+    assert not got["usable"]
+    assert got["blown"] < 0.5, "the blown-out draw was kept over the merely harsh one"
