@@ -56,6 +56,7 @@ import math
 import os
 import struct
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -376,25 +377,34 @@ _PIPELINE: Any = None
 _RESTYLE: tuple[str, Any] | None = None
 
 
+def _prepare_trellis(root: str, attn_backend: str = "sdpa") -> None:
+    """The environment TRELLIS.2 needs, and the checkout on the path.
+
+    Shared by both pipelines: the flash-attn substitution and the import path
+    are properties of the checkout, not of which of its two models is wanted.
+    """
+    os.environ.setdefault("ATTN_BACKEND", attn_backend)
+    os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    if attn_backend == "sdpa":
+        _install_varlen_sdpa()
+    if root not in sys.path:
+        if not os.path.isdir(os.path.join(root, "trellis2")):
+            raise RuntimeError(
+                f"no TRELLIS.2 checkout at {root}. Clone "
+                "https://github.com/microsoft/TRELLIS.2 and point TRELLIS2_PATH at it; "
+                "its CUDA extensions (o-voxel, CuMesh, FlexGEMM, nvdiffrast, nvdiffrec) "
+                "have to be built as well.")
+        sys.path.insert(0, root)
+
+
 def _pipeline(options: MeshOptions):
     """The loaded model, kept between calls — it is sixteen gigabytes."""
     global _PIPELINE
     if _PIPELINE is not None:
         return _PIPELINE
 
-    os.environ.setdefault("ATTN_BACKEND", options.attn_backend)
-    os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
-    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-    if options.attn_backend == "sdpa":
-        _install_varlen_sdpa()
-    if options.root not in sys.path:
-        if not os.path.isdir(os.path.join(options.root, "trellis2")):
-            raise RuntimeError(
-                f"no TRELLIS.2 checkout at {options.root}. Clone "
-                "https://github.com/microsoft/TRELLIS.2 and point TRELLIS2_PATH at it; "
-                "its CUDA extensions (o-voxel, CuMesh, FlexGEMM, nvdiffrast, nvdiffrec) "
-                "have to be built as well.")
-        sys.path.insert(0, options.root)
+    _prepare_trellis(options.root, options.attn_backend)
 
     from trellis2.pipelines import Trellis2ImageTo3DPipeline
     from trellis2.pipelines import trellis2_image_to_3d as module
@@ -1018,3 +1028,126 @@ def fit_glb(glb_path: str, plot: dict[str, Any], *, out_path: str | None = None,
     if out_path:
         report["mesh"] = write_obj(out_path, placed, faces)
     return report
+
+
+# ---------------------------------------------------------------------------
+# The other way round: keep the shape, ask only for the surface
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TextureMeshOptions:
+    """Painting a mesh we already have, rather than asking for a new one."""
+
+    weights: str = "microsoft/TRELLIS.2-4B"
+    config_file: str = "texturing_pipeline.json"
+    root: str = field(default_factory=lambda: os.environ.get("TRELLIS2_PATH", "/opt/TRELLIS.2"))
+    resolution: int = 1024        # 512 or 1024
+    texture_size: int = 2048
+    seed: int = 0
+
+
+_TEXTURER: Any = None
+
+
+def texture_pipeline(options: TextureMeshOptions):
+    """TRELLIS.2's texturing pipeline, kept between buildings."""
+    global _TEXTURER
+    if _TEXTURER is not None:
+        return _TEXTURER
+
+    _prepare_trellis(options.root)
+    import trellis2.pipelines.trellis2_texturing as module
+    from trellis2.pipelines import Trellis2TexturingPipeline
+
+    original = module.rembg
+    module.rembg = _NoBackgroundRemover()
+    try:
+        pipeline = Trellis2TexturingPipeline.from_pretrained(
+            options.weights, config_file=options.config_file)
+    finally:
+        module.rembg = original
+    _teach_it_where_the_layers_are(pipeline.image_cond_model)
+    pipeline.cuda()
+    _TEXTURER = pipeline
+    return pipeline
+
+
+def texture_mesh(vertices: np.ndarray, faces: Sequence[Sequence[int]], image: str,
+                 out_path: str, *, options: TextureMeshOptions | None = None) -> dict[str, Any]:
+    """Paint *our* mesh from a picture, and hand it back in scene coordinates.
+
+    The other half of TRELLIS.2, and a different division of labour from
+    :func:`to_mesh`. That one is shown a picture and invents a shape, which then
+    has to be fitted back onto the plot it came from — a fit that succeeds 97 %
+    of the time and is a lie the other 3 %. This is shown a *mesh* and invents
+    only the surface, so the footprint is exact by construction: no yaw to
+    solve, no scale, no stretch, no IoU, nothing to reject.
+
+    Two things have to be right or the result is a smear, and both were found
+    the hard way.
+
+    **The mesh goes in Y-up.** ``preprocess_mesh`` applies ``(x, y, z) ->
+    (x, -z, y)``, which is a Y-up convention; handed this package's Z-up mesh it
+    lays the building on its side, and the picture — which shows it standing —
+    then paints the facade onto the roof. Fed a red brick house that produced a
+    uniformly red slab.
+
+    **The resolution is not the image-to-3D default.** At ``512``/``1024`` the
+    roof came back washed out, a pale field with a faint chequer in it; at
+    ``1024``/``2048`` it reads as tiles and the walls as boarding. 7 s against
+    26 s, which is still under the 17 s median of asking for a new shape.
+
+    **Unfinished, and the reason this is on a branch.** The transform back to
+    scene coordinates is exact — fed the forward normalisation, the inverse
+    reproduces the input vertices to 0.0 — but the *file* does not carry it:
+    read back with :func:`read_glb`, the mesh lands at the wrong height with a
+    footprint IoU of 0.31 against the plot it was made from. The exporter puts
+    the placement somewhere the reader does not look, and that has not been run
+    down yet. Until it is, use the ``placed`` vertices this returns rather than
+    re-reading the GLB.
+    """
+    import trimesh
+    from PIL import Image as PILImage
+
+    options = options or TextureMeshOptions()
+    started = time.time()
+    verts = np.asarray(vertices, dtype=float)
+
+    # Fan-triangulate: the pipeline wants triangles, and this package's walls
+    # and roofs are quads and n-gons.
+    triangles = [[face[0], face[k], face[k + 1]]
+                 for face in faces for k in range(1, len(face) - 1)]
+    up = np.column_stack([verts[:, 0], verts[:, 2], -verts[:, 1]])
+    mesh = trimesh.Trimesh(vertices=up, faces=np.asarray(triangles), process=False)
+
+    # The normalisation `preprocess_mesh` will apply, so it can be undone.
+    low, high = up.min(axis=0), up.max(axis=0)
+    centre = (low + high) / 2.0
+    scale = 0.99999 / (high - low).max()
+
+    import torch
+
+    pipeline = texture_pipeline(options)
+    with torch.no_grad():
+        out = pipeline.run(mesh, PILImage.open(image).convert("RGBA"),
+                           seed=options.seed, resolution=options.resolution,
+                           texture_size=options.texture_size)
+
+    # Back out of the unit cube, then back out of Y-up.
+    got = np.asarray(out.vertices, dtype=float)
+    got = np.column_stack([got[:, 0], got[:, 2], -got[:, 1]])   # undo preprocess
+    got = got / scale + centre
+    out.vertices = np.column_stack([got[:, 0], -got[:, 2], got[:, 1]])  # undo Y-up
+
+    placed = np.asarray(out.vertices, dtype=float)
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
+    out.export(out_path, extension_webp=True)
+    return {"glb": out_path, "took_seconds": round(time.time() - started, 1),
+            "vertices": len(out.vertices), "triangles": len(out.faces),
+            "bytes": os.path.getsize(out_path),
+            # The scene-space vertices, because the GLB does not yet carry them
+            # where this package's reader looks — see the caveat above.
+            "placed": placed}
+
+
