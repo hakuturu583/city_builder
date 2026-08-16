@@ -572,10 +572,10 @@ def sheet_floors(path: str) -> int | None:
 
 
 def draw_family(output_dir: str, counts: Sequence[int], *, variants: int = 4,
-                facade_width: float = 24.0, bay_metres: float = 4.0,
+                facade_width: float = 24.0, bay_metres: float | None = None,
                 floor_height: float = 3.0, px_per_floor: int = 128,
-                px_per_bay: int = 128, seed: int = 0,
-                control: bool = True) -> dict[str, Any]:
+                px_per_bay: int = 128, seed: int = 0, kind="commercial",
+                min_side: int = 512, control: bool = True) -> dict[str, Any]:
     """One family of stand-in sheets per floor count, and the drawings behind them.
 
     No model and no GPU: this is the geometry half. The sheets are plain
@@ -587,6 +587,23 @@ def draw_family(output_dir: str, counts: Sequence[int], *, variants: int = 4,
     give every building in the city the same window proportions and the same
     bay rhythm, and the conditioner then holds the model to it — structure is
     the half of a facade's variety that no prompt supplies.
+
+    ``facade_width`` is how much wall one sheet spans, and it has to be the
+    width of the buildings it will be worn by. Drawn for 24 m and wrapped round
+    a 12 m house it puts a bay every 2 m instead of every 4, which is twice as
+    many windows at half the size — and a house with a hundred small windows in
+    it is an office block whatever the prompt said.
+
+    ``kind`` may be a callable of the floor count, because whether the ground
+    floor is a shop depends on how tall the building is.
+
+    ``min_side`` grows the sheet until its shorter side reaches it. At house
+    scale the honest pixel size is small — a single-storey wall three bays wide
+    at 128 px a floor is 384 x 128 — and a diffusion model handed that loses
+    the storeys it was conditioned on: measured, floor alignment fell from 0.52
+    to 0.30 and the run kept 15 sheets instead of 31 the moment the metric
+    width was passed in correctly. Growing the canvas costs nothing but texels
+    and gives it back.
     """
     import os
     import random
@@ -604,8 +621,14 @@ def draw_family(output_dir: str, counts: Sequence[int], *, variants: int = 4,
         for variant in range(variants):
             rng = random.Random(seed + 1000 * floors + variant)
             layout = sample_layout(floors, rng, facade_width=facade_width,
-                                   bay_metres=bay_metres)
+                                   bay_metres=bay_metres,
+                                   kind=kind(floors) if callable(kind) else kind)
             width, height = layout.pixel_size(px_per_floor, px_per_bay)
+            if min_side and min(width, height) < min_side:
+                # Rounded to eights, which is what the latent grid wants.
+                grow = min_side / min(width, height)
+                width = round(width * grow / 8) * 8
+                height = round(height * grow / 8) * 8
             if control:
                 save_tile(control_image(layout, width, height),
                           os.path.join(control_dir, sheet_name(floors, variant, "control")))
@@ -623,7 +646,7 @@ def draw_family(output_dir: str, counts: Sequence[int], *, variants: int = 4,
         "sheets": sheets,
         "control_dir": control_dir if control else None,
         "counts": counts,
-        "bays": bays_for(facade_width, bay_metres),
+        "bays": bays_for(facade_width, bay_metres or 3.0),
         "seam": sum(seams) / len(seams) if seams else None,
         "floor_alignment": min(floors_score) if floors_score else None,
         "bay_alignment": min(bays_score) if bays_score else None,

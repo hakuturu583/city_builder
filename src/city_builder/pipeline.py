@@ -285,7 +285,15 @@ def _facades(map_path, out_dir, config, recipe, state, *, force, verbose):
     if os.path.isdir(sheets) and os.listdir(sheets) and not force:
         return {"kept": len(os.listdir(sheets)), "floors": floors}
 
+    # The wall the sheet will be worn by, not a default. `config.buildings`
+    # already says how wide a sheet spans and how tall a storey is; drawing for
+    # 24 m and wrapping the result round a 12 m house is what put a hundred
+    # small windows on every one of them.
+    homes = config.buildings
     drawn = draw_family(layouts, floors, variants=recipe.facade_variants,
+                        facade_width=homes.facade_width,
+                        floor_height=homes.floor_height,
+                        kind=lambda n: "house" if n <= recipe.house_floors else "commercial",
                         seed=recipe.seed, control=True)
     if verbose:
         print(f"[pipeline] {len(drawn['sheets'])} layout(s), "
