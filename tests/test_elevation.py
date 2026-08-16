@@ -178,3 +178,84 @@ def test_the_prior_comes_back_in_the_scenes_own_datum(monkeypatch):
     assert coverage.datum_offset == pytest.approx(27.0)
     assert coverage.covered == pytest.approx(1.0)
     assert coverage.to_json()["source"] == "dem5a_png"
+
+
+# ---------------------------------------------------------------------------
+# Inventing one instead
+#
+# The procedural terrain is a *tile source*, not a separate path: it arrives
+# through the same door as a downloaded one, so the datum solve, the coverage
+# report and the guidance term are all one code path with two providers.
+# ---------------------------------------------------------------------------
+
+
+def test_invented_tiles_answer_the_same_questions_a_downloaded_one_does():
+    source = el.InventedTiles(el.Relief(seed=3))
+    assert isinstance(source.name, str) and isinstance(source.zoom, int)
+    grid = source.grid(29121, 12878)
+    assert grid.shape == (256, 256) and np.isfinite(grid).all()
+
+
+def test_a_map_with_no_survey_over_it_still_gets_terrain(monkeypatch):
+    """The point of the thing: a fully procedural city, anywhere on earth."""
+    _served(monkeypatch, {})  # nothing published here
+    frame = LocalFrame(48.85, 2.35)
+    sources = [*el.web_sources(), el.InventedTiles(el.Relief(amplitude=3.0, seed=1))]
+    got = el.sample_grid(frame, 0.0, 0.0, 12, 12, 10.0, sources=sources)
+    assert got is not None and got[1] == "invented"
+    assert np.isfinite(got[0]).all()
+
+
+def test_neighbouring_tiles_join_along_their_edge():
+    """The artefact this is built not to have: a step at every tile boundary.
+
+    Both the noise and the amplitude normalisation are functions of absolute
+    position, so two tiles agree at their seam without being asked to.
+    """
+    source = el.InventedTiles(el.Relief(amplitude=3.0, metres=140.0, seed=4))
+    left, right = source.grid(29121, 12878), source.grid(29122, 12878)
+    seam = float(np.abs(left[:, -1] - right[:, 0]).mean())
+    ordinary = float(np.abs(np.diff(left, axis=1)).mean())
+    assert seam < 2.0 * ordinary, "the terrain steps at the tile boundary"
+
+    below = source.grid(29121, 12879)
+    seam_y = float(np.abs(left[-1, :] - below[0, :]).mean())
+    assert seam_y < 2.0 * float(np.abs(np.diff(left, axis=0)).mean())
+
+
+def test_the_same_conditions_give_the_same_terrain():
+    def made(seed):
+        return el.InventedTiles(el.Relief(seed=seed)).grid(29121, 12878)
+
+    assert np.array_equal(made(5), made(5))
+    assert not np.array_equal(made(5), made(6))
+
+
+def test_the_amplitude_is_what_was_asked_for():
+    def spread(amplitude):
+        source = el.InventedTiles(el.Relief(amplitude=amplitude, metres=140.0, seed=2))
+        wide = np.concatenate([source.grid(29121 + i, 12878) for i in range(4)], axis=1)
+        return float(np.ptp(wide))
+
+    assert spread(6.0) == pytest.approx(2.0 * spread(3.0), rel=0.02)
+    assert 0.3 < spread(3.0) / 3.0 <= 1.0, "a whole tile should see much of the range"
+
+
+def test_a_bigger_feature_size_gives_smoother_ground():
+    def roughness(metres):
+        grid = el.InventedTiles(el.Relief(amplitude=3.0, metres=metres, seed=8)).grid(
+            29121, 12878)
+        return float(np.abs(np.diff(grid, axis=1)).mean())
+
+    assert roughness(400.0) < roughness(80.0)
+
+
+def test_the_solved_datum_absorbs_whatever_the_invented_terrain_calls_zero():
+    """Its heights mean nothing, so they must not arrive as metres above sea."""
+    frame = LocalFrame(35.9, 139.9)
+    samples = [(0.0, 0.0, 4.0), (20.0, 0.0, 4.0), (40.0, 0.0, 4.0)]
+    got = el.prior_for(frame, 0.0, 0.0, 8, 8, 10.0, samples,
+                       sources=[el.InventedTiles(el.Relief(amplitude=2.0, seed=9))])
+    assert got is not None
+    prior, _coverage = got
+    assert abs(float(np.median(prior)) - 4.0) < 2.0

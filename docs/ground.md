@@ -158,7 +158,7 @@ Replace the binning with a constraint set, in OSM2World's vocabulary:
 
 The lower-envelope clamp becomes one of these rather than a pass of its own.
 
-### 3. One solve: gradients from the road, values from the DEM
+### 3. One solve: values from the road, shape from a terrain source
 
 This is where the measurement above is spent. A **screened Poisson** solve over
 the constrained Delaunay triangulation:
@@ -232,6 +232,41 @@ classes and decals.
 - Never let *every* layer be height-blended — the documented failure is all
   heights reaching zero together and the blend collapsing to black speckle,
   worst on normals. Base layer linear, upper layers height-blended.
+
+## What was built
+
+Stages 1-3 are implemented on `feat/ground-cover`, and two things changed
+against the design above once they were measured.
+
+**The elevation model's *values* are not used, only its curvature.** Screening
+the solve against its heights made the held-out road error worse at every
+weight tried (0.32 m to 0.50 m at 0.1, to 0.79 m at 1.0), because the model and
+the lanelets disagree by metres and the screening term fights the roads.
+Matching its Laplacian instead does not: the error goes to 0.31 m, the constant
+offset and the tilt both cancel because neither survives a Laplacian, and the
+correlation of block-interior relief with the lidar's own goes from -0.04 to
++0.67.
+
+**The terrain source is an interface, not a branch.** A published survey and an
+invented relief both arrive as *tile sources* — `name`, `zoom`, `grid(tx, ty)` —
+so the datum solve, the coverage report, the caching and the guidance term are
+one code path with two providers behind it, and a config line swaps them. Put
+the invented one last in the list and it becomes the fallback for a map nobody
+has surveyed; a fully procedural city anywhere on earth is then the same code
+as Kashiwanoha with a different provider.
+
+The invented terrain is stated as conditions — how much the ground moves, over
+what distance, how rough it is up close — and evaluated at absolute positions
+on the globe rather than per tile, so neighbouring tiles join at their seams
+without being asked to. It carries no overall grade on purpose: a constant
+slope has no curvature and would be silently discarded, and it is the one part
+of the terrain the road elevations already carry exactly.
+
+One thing worth knowing when setting it: **features much larger than a city
+block are cancelled by the roads.** Measured on Kashiwanoha, the relief left in
+the block interiors was 0.18 m for 200 m features and 0.45 m for 60 m ones at
+the same amplitude, because the roads pin the low frequencies and only what
+fits between them survives.
 
 ## The order to do it in
 

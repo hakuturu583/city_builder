@@ -60,6 +60,7 @@ def build_city(
     ground_order: int = ground_module.DEFAULT_ORDER,
     elevation_model: bool = False,
     elevation_cache: str | None = None,
+    relief=None,
     buildings: bool = False,
     building_options: BuildingOptions | None = None,
     viaduct_options: ViaductOptions | None = None,
@@ -127,18 +128,29 @@ def build_city(
     if ground:
         surfaces = list(groups.get("Roads", [])) + list(groups.get("Junctions", []))
         adjacency = lanelet.build_adjacency(lanelet.lanelet_end_keys(lmap))
-        # A published elevation model, if one is asked for and one covers the
-        # map. Only its *shape* is taken — see city_builder.elevation. The grid
-        # is not known until the heightmap is being built, so this is handed in
-        # as a callback and the extent comes back to it.
+        # Where the shape of the ground comes from: a downloaded survey, an
+        # invented terrain, or both with the survey first and the invention
+        # behind it. Only the curvature is taken — see city_builder.elevation.
+        # The grid is not settled until the heightmap is being built, so this
+        # goes in as a callback and the extent comes back to it.
         found: dict[str, Any] = {}
 
         def terrain_shape(x0, y0, nx, ny, cell_size, found=found, surfaces=surfaces):
             from . import elevation as elevation_module
 
+            sources: list[Any] = []
+            if elevation_model:
+                sources += elevation_module.web_sources(elevation_cache)
+            if relief is not None:
+                # The map's own latitude, so "140 m across" is 140 m here.
+                sources.append(elevation_module.InventedTiles(
+                    relief, latitude=frame.ref_lat))
+            if not sources:
+                return None
+
             samples = [tuple(p) for r in surfaces for p in (*r.left, *r.right)]
             got = elevation_module.prior_for(frame, x0, y0, nx, ny, cell_size, samples,
-                                             cache_dir=elevation_cache)
+                                             sources=sources)
             if got is None:
                 return None
             shape, coverage = got
@@ -150,7 +162,7 @@ def build_city(
             cell=cell, z_gap=z_gap, min_overlap=min_overlap,
             clearance=clearance, smooth=smooth, drop=ground_drop,
             order=ground_order,
-            guidance=terrain_shape if elevation_model else None,
+            guidance=terrain_shape if (elevation_model or relief is not None) else None,
             bounds=plan.box if plan.points else None,
         )
         if heightmap is None:
@@ -176,15 +188,15 @@ def build_city(
 
         measured = float((heightmap.support == 0).mean() * 100)
         if found.get("coverage") is not None:
-            stats["elevation_model"] = found["coverage"].to_json()
+            stats["terrain"] = found["coverage"].to_json()
             if verbose:
                 c = found["coverage"]
-                print(f"[build] elevation model: {c.source} at {c.metres_per_pixel:.1f} m/px, "
+                print(f"[build] terrain: {c.source} at {c.metres_per_pixel:.1f} m/px, "
                       f"{c.covered*100:.0f}% coverage, datum offset {c.datum_offset:+.2f} m, "
                       f"disagrees with the roads by {c.residual_p90:.2f} m (p90) — "
                       f"its shape is used, its heights are not")
-        elif elevation_model and verbose:
-            print("[build] elevation model: none covers this map; "
+        elif (elevation_model or relief is not None) and verbose:
+            print("[build] terrain: no source covers this map; "
                   "the ground is interpolated from the roads alone")
         stats.update({
             "elevated_lanelets": len(elevated),
@@ -428,6 +440,17 @@ def infill_roads(groups: dict[str, list], options, elevated: set[int] | None = N
     return len(meshes), area
 
 
+def _relief_of(g):
+    """The invented-terrain settings, as the dataclass that generates it."""
+    if not getattr(g, "relief", False):
+        return None
+    from .elevation import Relief
+
+    return Relief(amplitude=g.relief_amplitude, metres=g.relief_metres,
+                  octaves=g.relief_octaves, roughness=g.relief_roughness,
+                  warp=g.relief_warp, seed=g.relief_seed)
+
+
 def build_city_from_config(input_path: str, config, *, buildings: bool = False,
                            ref_lat: float | None = None, ref_lon: float | None = None,
                            projector: str = "utm", z_datum: float | None = None,
@@ -443,6 +466,7 @@ def build_city_from_config(input_path: str, config, *, buildings: bool = False,
         min_overlap=g.min_overlap, clearance=g.clearance,
         ground_drop=g.drop, fill_island=g.fill_island, ground_order=g.order,
         elevation_model=g.elevation_model, elevation_cache=g.elevation_cache,
+        relief=_relief_of(g),
         buildings=buildings, building_options=config.buildings,
         viaduct_options=config.viaduct, extend_options=config.extend, verbose=verbose,
     )

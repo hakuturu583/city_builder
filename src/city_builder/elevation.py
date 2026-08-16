@@ -1,11 +1,25 @@
-"""A measured elevation model to put under a map, where one is published.
+"""What shape the ground is, between the roads — measured or invented.
+
+Two sources for one thing. A published elevation model where one covers the
+map, and a procedural relief where none does or none is wanted, and both come
+out as the same object: a grid handed to
+:func:`city_builder.ground.build_heightmap` as ``guidance``, whose *curvature*
+is copied while its heights are ignored.
+
+That last point is what makes the two interchangeable. The road elevations stay
+hard constraints either way, so neither source can move a carriageway; all
+either one decides is what the ground does between them.
 
 A Lanelet2 map knows the height of its carriageway and nothing else, so
 :mod:`city_builder.ground` reconstructs the rest by interpolation. Where a
 national elevation model exists, most of that is invention where a measurement
-was available.
+was available — and where none does, inventing it deliberately beats letting
+the interpolation invent a flat one by default.
 
-This fetches one as ordinary XYZ tiles. The only source wired up is Japan's
+Measured
+--------
+
+This fetches a published model as ordinary XYZ tiles. The only source wired up is Japan's
 Geospatial Information Authority, because the maps this package is aimed at —
 Autoware's — are largely Japanese, and because the GSI tiles need no key, no
 registration and no account: they are the same tiles the 地理院地図 viewer uses,
@@ -50,6 +64,150 @@ GSI_TILES = (
 )
 
 NO_DATA = -83886.08  # what (128, 0, 0) decodes to under the GSI encoding
+
+
+# ---------------------------------------------------------------------------
+# Inventing one instead
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Relief:
+    """Terrain to invent where none is published, stated as conditions.
+
+    The knobs are the ones somebody asking for terrain actually has an opinion
+    about: how much it moves, over what distance, and how rough it is up close.
+
+    Note what is *not* here: an overall grade. A constant slope has no
+    curvature, and curvature is all that is taken from this — so a tilt would
+    be silently discarded. It is also the one part of the terrain the map
+    already knows, since the road elevations carry it exactly.
+    """
+
+    amplitude: float = 2.5      # metres between the lowest and highest ground
+    metres: float = 140.0       # how far across the largest feature is
+    octaves: int = 4            # how many halvings of that size are added
+    roughness: float = 0.45     # how much each octave keeps of the last
+    warp: float = 0.35          # bends the features; 0 is plain, dull fBm
+    seed: int = 0
+
+
+class InventedTiles:
+    """A tile source that generates the terrain instead of downloading it.
+
+    Deliberately shaped as a *tile source*. Once the invented terrain arrives
+    through the same door as a published one, everything downstream — the datum
+    solve, the coverage report, the caching, the guidance term — is one code
+    path with two providers behind it, and a caller swaps them with a config
+    line. It also means an invented terrain can be written out and looked at as
+    ordinary elevation tiles.
+
+    Seamless across tile boundaries by construction: the noise is a function of
+    absolute position on the globe, not of an array the size of one tile, so
+    neighbouring tiles agree along their edge without being asked to.
+    """
+
+    #: Metres per radian on the sphere.
+    RADIUS = 6378137.0
+
+    def __init__(self, relief: Relief | None = None, *, zoom: int = 15,
+                 size: int = 256, latitude: float = 35.0):
+        self.relief = relief or Relief()
+        self.zoom = zoom
+        self.size = size
+        # A *constant* for the whole source, and that matters. Mercator metres
+        # are stretched by 1/cos(lat), so undoing that per tile would give two
+        # vertically adjacent tiles different scales and put a step along their
+        # seam — the artefact this source exists not to have. One factor,
+        # correct at the map's own latitude, is continuous everywhere.
+        self.latitude = latitude
+        self.name = "invented"
+        self.fetched = 0
+
+    def grid(self, tx: int, ty: int) -> np.ndarray:
+        step = (np.arange(self.size) + 0.5) / self.size
+        n = 2.0 ** self.zoom
+        lon = ((tx + step) / n * 2.0 - 1.0) * math.pi
+        lat = np.arctan(np.sinh(math.pi * (1.0 - 2.0 * (ty + step) / n)))
+
+        # Ground metres, from coordinates that are continuous across any tile
+        # boundary because they are functions of position on the globe.
+        east = self.RADIUS * math.cos(math.radians(self.latitude)) * lon
+        north = self.RADIUS * lat
+        world_x, world_y = np.meshgrid(east, north)
+
+        self.fetched += 1
+        return _fbm(world_x, world_y, self.relief) * _scale(self.relief)
+
+
+_SCALES: dict[tuple, float] = {}
+
+
+def _scale(relief: Relief) -> float:
+    """What to multiply the raw field by to get ``amplitude`` peak to trough.
+
+    Measured once over a wide reference patch rather than over the tile in
+    hand. Normalising each tile by its own range would be the obvious thing and
+    is wrong: two neighbouring tiles would be divided by different numbers and
+    the terrain would step at every tile boundary — the artefact this source is
+    built to not have.
+    """
+    key = (relief.metres, relief.octaves, relief.roughness, relief.warp, relief.seed)
+    if key not in _SCALES:
+        step = np.linspace(0.0, relief.metres * 24.0, 192)
+        x, y = np.meshgrid(step, step)
+        field = _fbm(x, y, relief)
+        spread = float(field.max() - field.min())
+        _SCALES[key] = (1.0 / spread) if spread > 1e-9 else 0.0
+    return _SCALES[key] * relief.amplitude
+
+
+def _lattice(ix: np.ndarray, iy: np.ndarray, seed: int) -> np.ndarray:
+    """A repeatable random value per integer lattice point, in [0, 1).
+
+    Hashed rather than drawn from a generator, because the whole point is that
+    the value at a position does not depend on which tile asked for it.
+    """
+    h = (ix.astype(np.int64) * 374761393 + iy.astype(np.int64) * 668265263
+         + seed * 1442695041) & 0xFFFFFFFF
+    h = ((h ^ (h >> 13)) * 1274126177) & 0xFFFFFFFF
+    return ((h ^ (h >> 16)) & 0xFFFFFF) / float(0xFFFFFF)
+
+
+def _value_noise(x: np.ndarray, y: np.ndarray, cell: float, seed: int) -> np.ndarray:
+    """Smooth noise sampled at absolute positions, one feature per ``cell``."""
+    fx, fy = x / cell, y / cell
+    ix, iy = np.floor(fx), np.floor(fy)
+    tx, ty = fx - ix, fy - iy
+    # Quintic smoothstep: C2, so the second derivative this is read through
+    # does not step at every lattice line.
+    sx = tx * tx * tx * (tx * (tx * 6 - 15) + 10)
+    sy = ty * ty * ty * (ty * (ty * 6 - 15) + 10)
+    c00 = _lattice(ix, iy, seed)
+    c10 = _lattice(ix + 1, iy, seed)
+    c01 = _lattice(ix, iy + 1, seed)
+    c11 = _lattice(ix + 1, iy + 1, seed)
+    return ((c00 * (1 - sx) + c10 * sx) * (1 - sy)
+            + (c01 * (1 - sx) + c11 * sx) * sy) * 2.0 - 1.0
+
+
+def _fbm(x: np.ndarray, y: np.ndarray, relief: Relief) -> np.ndarray:
+    """Fractional Brownian motion, optionally warped through itself."""
+    if relief.warp:
+        # Bending the sample positions is what turns the round blobs of plain
+        # fBm into ridges and hollows that look like ground.
+        reach = relief.metres * relief.warp
+        x = x + reach * _value_noise(x, y, relief.metres * 2.0, relief.seed + 101)
+        y = y + reach * _value_noise(x, y, relief.metres * 2.0, relief.seed + 202)
+
+    total = np.zeros_like(x, dtype=float)
+    amplitude, cell = 1.0, max(relief.metres, 1e-6)
+    for octave in range(max(relief.octaves, 1)):
+        total += amplitude * _value_noise(x, y, cell, relief.seed + 7 * octave)
+        amplitude *= relief.roughness
+        cell /= 2.0
+    return total
+
 
 
 @dataclass
@@ -98,10 +256,12 @@ def _decode(image) -> np.ndarray:
     return np.where(missing, np.nan, metres)
 
 
-class _Tiles:
-    """Fetches and remembers tiles. One HTTP request per tile per run."""
+class WebTiles:
+    """A tile source that downloads. Fetches and remembers: one request each."""
 
-    def __init__(self, template: str, zoom: int, cache_dir: str | None, timeout: float):
+    def __init__(self, template: str, zoom: int, cache_dir: str | None = None,
+                 timeout: float = 30.0):
+        self.name = template
         self.template = template
         self.zoom = zoom
         self.cache_dir = cache_dir
@@ -142,19 +302,29 @@ class _Tiles:
         return self.held[(tx, ty)]
 
 
+def web_sources(cache_dir: str | None = None, timeout: float = 30.0,
+                specs: tuple[tuple[str, int], ...] = GSI_TILES) -> list[WebTiles]:
+    """The published sources, finest first."""
+    return [WebTiles(template, zoom, cache_dir, timeout) for template, zoom in specs]
+
+
 def sample_grid(frame, x0: float, y0: float, nx: int, ny: int, cell: float, *,
-                sources: tuple[tuple[str, int], ...] = GSI_TILES,
+                sources: Sequence[Any] | None = None,
                 cache_dir: str | None = None,
                 timeout: float = 30.0) -> tuple[np.ndarray, str, int, int] | None:
-    """The published elevation over a heightmap's grid, in the model's own datum.
+    """An elevation model over a heightmap's grid, in the model's own datum.
 
-    Returns ``(z, source, zoom, tiles_fetched)`` with NaN where the model has
-    no data, or
-    ``None`` if no source covers the map at all. Sources are tried finest
-    first, and the first one that reaches more than half the grid is taken —
-    a source that covers a corner is worse than a coarser one that covers
-    everything, because a prior with a coverage boundary running through the
-    scene puts a step in the ground.
+    Returns ``(z, source, zoom, tiles_read)`` with NaN where the model has no
+    data, or ``None`` if no source covers the map at all.
+
+    ``sources`` is anything with ``name``, ``zoom`` and ``grid(tx, ty)``, which
+    is how a downloaded model and an invented one become interchangeable —
+    :class:`WebTiles` and :class:`InventedTiles` both qualify. They are tried
+    in order and the first that reaches more than half the grid is taken: a
+    source covering a corner is worse than a coarser one covering everything,
+    because a coverage boundary running through the scene puts a step in the
+    ground. Put an :class:`InventedTiles` last and it becomes the fallback for
+    a map nobody has surveyed.
     """
     xs = x0 + np.arange(nx) * cell
     ys = y0 + np.arange(ny) * cell
@@ -165,10 +335,9 @@ def sample_grid(frame, x0: float, y0: float, nx: int, ny: int, cell: float, *,
         for i in range(nx):
             lat[j, i], lon[j, i] = frame.to_wgs84(grid_x[j, i], grid_y[j, i])
 
-    for template, zoom in sources:
-        tiles = _Tiles(template, zoom, cache_dir, timeout)
+    for tiles in (sources if sources is not None else web_sources(cache_dir, timeout)):
         out = np.full((ny, nx), np.nan)
-        n = 2 ** zoom
+        n = 2 ** tiles.zoom
         fx = (lon + 180.0) / 360.0 * n
         fy = (1.0 - np.arcsinh(np.tan(np.radians(lat))) / np.pi) / 2.0 * n
         tx, ty = np.floor(fx).astype(int), np.floor(fy).astype(int)
@@ -181,7 +350,7 @@ def sample_grid(frame, x0: float, y0: float, nx: int, ny: int, cell: float, *,
             py = np.clip(((fy[here] - key[1]) * grid.shape[0]).astype(int), 0, grid.shape[0] - 1)
             out[here] = grid[py, px]
         if np.isfinite(out).mean() > 0.5:
-            return out, template, zoom, tiles.fetched
+            return out, tiles.name, tiles.zoom, tiles.fetched
     return None
 
 
@@ -215,15 +384,15 @@ def align(model: np.ndarray, samples: np.ndarray, frame_x0: float, frame_y0: flo
 
 def prior_for(frame, x0: float, y0: float, nx: int, ny: int, cell: float,
               samples: Sequence[Sequence[float]], *,
-              sources: tuple[tuple[str, int], ...] = GSI_TILES,
+              sources: Sequence[Any] | None = None,
               cache_dir: str | None = None,
               timeout: float = 30.0) -> tuple[np.ndarray, Coverage] | None:
-    """A published elevation model over a grid, brought into the scene's datum.
+    """An elevation model over a grid, brought into the scene's own datum.
 
-    This is the whole module in one call: fetch, solve the offset, subtract it,
-    and hand back something that can be added to ``build_heightmap`` as
-    ``prior=``. ``None`` when nothing covers the map, which is the ordinary
-    answer outside Japan and is not an error.
+    The whole module in one call: read it, solve the offset, subtract it, and
+    hand back something that goes straight into ``build_heightmap`` as
+    ``guidance=``. ``None`` when nothing covers the map — the ordinary answer
+    outside Japan with no invented source in the list, and not an error.
     """
     found = sample_grid(frame, x0, y0, nx, ny, cell, sources=sources,
                         cache_dir=cache_dir, timeout=timeout)
