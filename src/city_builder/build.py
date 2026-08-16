@@ -66,12 +66,19 @@ def build_city(
     viaduct_options: ViaductOptions | None = None,
     marking_options: MarkingOptions | None = None,
     extend_options: ExtendOptions | None = None,
+    cover_options=None,
     verbose: bool = True,
 ) -> BuildResult:
     """Read a map and produce every surface, without touching Blender.
 
     Split out from the scene building so the geometry can be inspected, tested
     or fed somewhere other than Blender.
+
+    ``cover_options`` is read here for one thing only: standing water, which is
+    the single land-cover class that changes the *shape* of the ground rather
+    than its colour. The rest of the cover is a texture and is applied at scene
+    time. A palette with no water rule in it is never even classified, so a
+    build without water is the build it always was.
     """
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"Lanelet2 map not found: {input_path}")
@@ -125,6 +132,7 @@ def build_city(
     elevated: set[int] = set()
     heightmap = None
     road_union = None
+    water: list[Any] = []
     if ground:
         surfaces = list(groups.get("Roads", [])) + list(groups.get("Junctions", []))
         adjacency = lanelet.build_adjacency(lanelet.lanelet_end_keys(lmap))
@@ -168,10 +176,34 @@ def build_city(
         if heightmap is None:
             raise RuntimeError("no ground-level road surfaces found; cannot build a ground surface")
 
+        # Before the mesh, because this changes the heights the mesh is built
+        # from. The class grid it reads is the one the painter will build again
+        # at scene time, minus the road and plot geometry, which do not exist
+        # yet — neither is produced until this mesh is. A rule that painted
+        # water relative to a road would therefore not be honoured here; none
+        # does, because standing water is said with Region.
+        water_meshes: list[Any] = []
+        if cover_options is not None:
+            from . import cover as cover_module
+
+            if cover_module.paints_water(cover_options):
+                painted = cover_module.classify(heightmap, cover_options)
+                water = cover_module.flatten_water(heightmap, painted)
+                water_meshes = cover_module.water_surface(water)
+                if verbose:
+                    for body in water:
+                        print(f"[build] water: {body.area:.0f} m2 levelled at "
+                              f"{body.level:+.2f} m, its bank at {body.bank:+.2f} m; "
+                              f"the interpolation had it falling {body.fall:.2f} m "
+                              f"across")
+
         mesh, road_union = ground_module.build_mesh(heightmap, surfaces, elevated,
                                                     fill_island=fill_island, drop=ground_drop,
                                                     return_road_union=True)
         groups["Ground"] = [mesh]
+        if water_meshes:
+            groups["Water"] = water_meshes
+            stats["water"] = [body.to_json() for body in water]
 
         # An elevated lanelet is surveyed as a driving surface and nothing
         # else: no slab, no soffit, no columns. Which *parts* of it are a bridge
@@ -219,6 +251,13 @@ def build_city(
         if heightmap is None:
             raise RuntimeError("buildings need the ground; do not pass ground=False with buildings=True")
         keep_clear = buildings_module.exclusion_zone(groups) or road_union
+        if water:
+            # The plot generator reads a pond as open ground with no road
+            # anywhere near it, which is its idea of a good place to build.
+            from shapely.ops import unary_union
+
+            keep_clear = unary_union([keep_clear,
+                                      *(b.polygon for b in water if b.polygon is not None)])
         built = buildings_module.generate(heightmap, keep_clear, building_options)
         if built["Buildings"]:
             groups["Buildings"] = built["Buildings"]
@@ -454,9 +493,15 @@ def _relief_of(g):
 def build_city_from_config(input_path: str, config, *, buildings: bool = False,
                            ref_lat: float | None = None, ref_lon: float | None = None,
                            projector: str = "utm", z_datum: float | None = None,
-                           z_offset: float = 0.0, verbose: bool = True) -> BuildResult:
+                           z_offset: float = 0.0, cover_options=None,
+                           verbose: bool = True) -> BuildResult:
     """:func:`build_city`, with every option group taken from a
-    :class:`city_builder.config.CityConfig`."""
+    :class:`city_builder.config.CityConfig`.
+
+    ``cover_options`` stays an argument rather than a config section because
+    the cover is not in the config file yet — it is authored in Python, and
+    :func:`build_scene` takes it the same way.
+    """
     g = config.ground
     return build_city(
         input_path, ref_lat=ref_lat, ref_lon=ref_lon, projector=projector,
@@ -468,7 +513,8 @@ def build_city_from_config(input_path: str, config, *, buildings: bool = False,
         elevation_model=g.elevation_model, elevation_cache=g.elevation_cache,
         relief=_relief_of(g),
         buildings=buildings, building_options=config.buildings,
-        viaduct_options=config.viaduct, extend_options=config.extend, verbose=verbose,
+        viaduct_options=config.viaduct, extend_options=config.extend,
+        cover_options=cover_options, verbose=verbose,
     )
 
 
@@ -620,6 +666,10 @@ def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | Non
     into a single image anchored to the scene. It takes precedence over
     ``ground_texture``, which then serves only as the ``grass`` fallback tile a
     palette may not have supplied.
+
+    Water is the exception, and it is not handled here at all: it is geometry
+    rather than colour, so :func:`build_city` levelled the ground under it and
+    gave it a surface of its own, which keeps its own material.
 
     The carriageway gets its own metric scale. Paving slabs and road aggregate
     are not the same size: one tile spanning the twelve metres that suits a

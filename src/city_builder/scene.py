@@ -56,6 +56,11 @@ def build_materials() -> dict[str, object]:
         "ground": _material("CityGround", (0.20, 0.19, 0.17), 1.00),
         "facade": _material("CityFacade", (0.52, 0.50, 0.47), 0.65),
         "roof": _material("CityRoof", (0.26, 0.26, 0.28), 0.80),
+        # Standing water, and the only material here that is mostly not its own
+        # colour: a pond is dark and smooth, and what you see in it is the sky
+        # and the bank. So the base is nearly black and the roughness is far
+        # below anything else in this list, which is what makes it reflect.
+        "water": _material("CityWater", (0.02, 0.04, 0.05), 0.06, 0.7),
     }
 
 

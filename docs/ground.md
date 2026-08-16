@@ -201,10 +201,10 @@ corridor, which is exactly the artefact this is trying to avoid.
 
 ### 4. The mesh reads the classes
 
-Water cells are flattened and get a separate surface. Class boundaries that are
-real discontinuities — a kerb, a retaining wall, a shoreline — become **hard
-breaklines** in the triangulation rather than being smoothed across. Everything
-else stays soft.
+Water cells are flattened and get a separate surface — **built**, see *Water*
+below. Class boundaries that are real discontinuities — a kerb, a retaining
+wall, a shoreline — become **hard breaklines** in the triangulation rather than
+being smoothed across. Everything else stays soft.
 
 ### 5. Texture, in the pipeline that already exists
 
@@ -298,6 +298,47 @@ of its own, so handing it the whole ground region would span each city block
 with a handful of long triangles and never sample the height map between the
 roads. Clipping cell by cell and constraining each piece keeps the grid lines
 as constraints too, which is what holds the 10 m resolution away from the kerb.
+
+### Water
+
+The first half of stage 4 is built: `cover.flatten_water` levels each connected
+body of `water` cells before the mesh is triangulated, and `cover.water_surface`
+gives it a sheet of its own under a `Water` surface class.
+
+**The level is the lowest ground on the shoreline**, less 5 cm of freeboard,
+because a basin fills until it spills over the lowest point of its rim — the
+pour point *is* the water level. Measured with a 28 m square of water painted
+into the steepest open block on the map (2.07 m of fall over 30 m): the
+interpolated ground dropped 1.62 m from one shore of the pond to the other, and
+0.00 m afterwards. The two alternatives both stand proud of the bank. The
+**mean** of the region lands 0.87 m above the lowest shore — a lake bulging over
+the brow of a hill. The **minimum of the region** is the defensible one and
+still leaks 0.07 m, because the interpolation keeps falling past the shoreline.
+There is no percentile of the shore to tune between them: anything above the
+shore's minimum is above some part of the bank by construction.
+
+Two things had to be measured rather than assumed. A node is levelled when the
+water comes within **half a height cell** of it, not when the water covers the
+node — at 10 m against a 2 m class grid the pond above touches four nodes, and
+the node-centre rule leaves 13 % of the painted water standing on the hillside
+once the shoreline is cut back to the ground that is genuinely under the level.
+And levelling a node pulls the ground around it down too, so the shore ring ends
+up 14 mm below the level it was measured at; nothing is drawn there, so it is a
+dry hair's breadth below the waterline rather than a leak.
+
+The sheet is a separate object rather than the ground faces re-materialised,
+because every other class in this scene is an object — that is what carries the
+label, the mask colour and the pass index a segmentation render reads — and
+because the bed does not stop being ground when it is wet.
+
+**A painted pond is a maximum extent, not a result.** The shoreline is cut back
+to the ground that is genuinely under the level, so a square of water painted
+across a slope comes out smaller than it was painted — measured on the steepest
+open block of this map, 37 % of a 14 m square survived, 58 % of a 28 m one and
+66 % of a 50 m one. That is what a pond does on a hillside, and the water that
+is drawn is exactly flat: the sheet's vertices span 0.0000 m in every case. But
+it means the `Region` a caller writes says where water *may* stand, and the
+terrain decides how much of it does.
 
 ## The order to do it in
 

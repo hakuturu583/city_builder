@@ -2,8 +2,9 @@
 
 The height map says where the ground is. This says what it is made of, on a
 grid of its own, and everything downstream reads from it: the texture that gets
-painted, and eventually the mesh, since water is flat and a kerb is a
-discontinuity where a lawn edge is not.
+painted, and the ground surface itself, since water is flat — see
+:func:`flatten_water`, which is the one place a class overrules the
+interpolation rather than merely colouring it.
 
 **Assigned by rule, not by classifier.** The obvious source is a land-cover
 raster, and for a real site it is the right one — but three things argue
@@ -32,11 +33,13 @@ import math
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 
 DEFAULT_CELL = 2.0  # m; finer than the height grid, because a verge is 2 m wide
+
+WATER = "water"  # the one class the mesh has to obey, not merely paint
 
 # The ground materials this package knows how to name, after OSM2World's
 # surface map. Not every one needs a texture — an unpainted class falls back to
@@ -386,6 +389,216 @@ def classify(heightmap, options: CoverOptions, *, roads=None,
             raise KeyError(f"rule paints {rule.name!r}, which is not in the palette")
         index = np.where(rule.mask(board), names.index(rule.name), index)
     return CoverMap(x0, y0, options.cell, index, names)
+
+
+# ---------------------------------------------------------------------------
+# Water, which is the one class the surface has to obey
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class WaterBody:
+    """One connected body of standing water, and the height it was given."""
+
+    level: float                 # the water surface, in scene metres
+    bank: float                  # the lowest ground around it: what set the level
+    area: float                  # m2 of surface left after the shoreline was cut
+    cells: int                   # cover cells that survived that cut
+    fall: float                  # relief the interpolation had put across it
+    polygon: Any = None          # the shoreline in plan, shapely
+
+    def to_json(self) -> dict[str, Any]:
+        return {"level": round(self.level, 3), "bank": round(self.bank, 3),
+                "area": round(self.area, 1), "cells": self.cells,
+                "fall": round(self.fall, 3)}
+
+
+class _Plan(NamedTuple):
+    """One body, measured but not yet levelled."""
+
+    cells: np.ndarray            # cover cells it claims
+    nodes: np.ndarray            # height-grid nodes to be levelled
+    level: float
+    bank: float
+    fall: float
+
+
+def paints_water(options: CoverOptions, *, name: str = WATER) -> bool:
+    """Whether this cover can put standing water anywhere at all.
+
+    Asked *before* the class grid is built, not after. Classifying is the
+    expensive half of the cover, and a palette with no water rule in it cannot
+    change a single height — so a scene without water pays nothing for the
+    check and, more to the point, comes out of the build identical to what it
+    was before any of this existed.
+    """
+    return any(rule.name == name for rule in options.rules)
+
+
+def flatten_water(heightmap, cover: CoverMap, *, name: str = WATER,
+                  freeboard: float = 0.05, smallest: float = 8.0) -> list[WaterBody]:
+    """Level the ground under each body of standing water. Edits ``heightmap``.
+
+    The interpolation has no idea what it is drawing: it runs the same smooth
+    surface through a pond that it runs through a car park, so a pond on a
+    slope comes out as a slope. Measured with a 28 m square of water painted
+    into the steepest open block of the Kashiwanoha map — 2.07 m of fall across
+    30 m — the ground under it dropped **1.62 m from one shore to the other**
+    before this ran, and 0.00 m after.
+
+    **Each body takes the height of the lowest ground around it**, less
+    ``freeboard``. That is not caution, it is where the water is: a basin fills
+    until it spills over the lowest point of its rim, so the pour point *is* the
+    level. The alternatives were run on that pond and both stand proud of the
+    bank. The **mean** of the region lands 0.87 m above the lowest shore — a
+    lake bulging over the brow of a hill, which is the worst of the three
+    because it reads as broken geometry rather than as bad water. The
+    **minimum of the region** is the defensible one and still leaks 0.07 m: the
+    interpolated surface goes on falling past the shoreline, so the lowest point
+    *inside* the water is above the lowest point just outside it. Nor is there a
+    percentile of the shore to tune, because anything above the shore's minimum
+    is above some part of the bank by construction.
+
+    Connectivity is taken on the cover grid rather than the height grid, at 2 m
+    against 10 m: two ponds 4 m apart are two ponds with two levels, and the
+    coarser grid would give them one. A shared corner does not join them either
+    — four-connectivity, because a corner is not a channel.
+
+    ``freeboard`` holds the sheet that far under the bank. Without it the
+    shoreline is coplanar with the ground it meets and z-fights along its whole
+    length; 5 cm is the allowance the ground already keeps under the kerb.
+
+    Bodies under ``smallest`` are left alone, and so is any body the height grid
+    cannot be bent around — a pond a few metres across that falls in the middle
+    of a 10 m cell reaches no node. Nothing is invented for those: the shoreline
+    below cuts them back to the ground that is genuinely under the level, which
+    for such a body is usually nothing at all. An honest absence beats a sheet
+    of water lying on a hillside.
+
+    **What this does not fix.** Levelling a node pulls the ground around it down
+    too, so the shore ring ends up a little under the level it was measured at —
+    14 mm on the pond above, against the 0.87 m the mean would have left, and
+    inside the freeboard. Nothing is drawn there, because the sheet is cut to
+    the cells the ground is actually under; it is a dry hair's breadth below the
+    waterline, not a leak.
+    """
+    from scipy.ndimage import binary_dilation, label
+    from shapely.geometry import Point
+    from shapely.prepared import prep
+
+    if heightmap is None or name not in cover.names:
+        return []
+    wet = cover.index == cover.names.index(name)
+    if not wet.any():
+        return []
+
+    cross = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
+    tags, count = label(wet, structure=cross)
+
+    xs = cover.x0 + (np.arange(cover.nx) + 0.5) * cover.cell
+    ys = cover.y0 + (np.arange(cover.ny) + 0.5) * cover.cell
+    node_x = heightmap.x0 + np.arange(heightmap.nx) * heightmap.cell
+    node_y = heightmap.y0 + np.arange(heightmap.ny) * heightmap.cell
+
+    def sample(mask: np.ndarray) -> np.ndarray:
+        rows, cols = np.nonzero(mask)
+        return np.array([heightmap.sample(xs[i], ys[j]) for j, i in zip(rows, cols)])
+
+    # Every level is decided against the ground as the solve left it, in one
+    # pass, before any of them is applied. Otherwise the first pond levelled
+    # would become the bank of the next one along, and two ponds that share a
+    # slope would drag each other down it.
+    plans: list[_Plan] = []
+    for tag in range(1, count + 1):
+        cells = tags == tag
+        if float(cells.sum()) * cover.cell ** 2 < smallest:
+            continue
+        shore = binary_dilation(cells, structure=cross) & ~wet
+        inside = sample(cells)
+        bank = float(sample(shore).min()) if shore.any() else float(inside.min())
+        outline = _cells_to_polygon(cells, cover)
+        # A node is under the water when the body reaches within half a height
+        # cell of it, rather than when the water covers the node itself. That is
+        # the difference between a pond and an eighth of one: the 784 m2 pond
+        # above covers four nodes of the 10 m grid, so the node-centre test
+        # levels the 100 m2 between them and the shoreline cut below throws away
+        # everything else — 13 % of the water survives. Reaching half a cell
+        # claims sixteen nodes and keeps all of it, and the price is a levelled
+        # shelf reaching up to 5 m past the shoreline.
+        reach = prep(outline.buffer(heightmap.cell / 2.0))
+        plans.append(_Plan(
+            cells=cells,
+            nodes=np.array([[reach.contains(Point(x, y)) for x in node_x]
+                            for y in node_y]),
+            level=bank - freeboard, bank=bank,
+            fall=float(inside.max() - inside.min())))
+
+    for plan in plans:
+        heightmap.z[plan.nodes] = plan.level
+
+    bodies: list[WaterBody] = []
+    for cells, _nodes, level, bank, fall in plans:
+        # The shoreline is where the ground reaches the water, not where the
+        # class grid stops. A cover cell whose ground is still above the level —
+        # the fringe of a pond too small for the height grid to be bent around —
+        # is bank, and painting water over it would leave a sheet in mid-air.
+        keep = np.zeros_like(cells)
+        rows, cols = np.nonzero(cells)
+        keep[rows, cols] = [heightmap.sample(xs[i], ys[j]) <= level + 1e-6
+                            for j, i in zip(rows, cols)]
+        if not keep.any():
+            continue
+        outline = _cells_to_polygon(keep, cover)
+        bodies.append(WaterBody(level=level, bank=bank, area=float(outline.area),
+                                cells=int(keep.sum()), fall=fall, polygon=outline))
+    return bodies
+
+
+def _cells_to_polygon(cells: np.ndarray, cover: CoverMap):
+    """The plan outline of a set of cover cells, as one shapely geometry."""
+    from shapely.geometry import box
+    from shapely.ops import unary_union
+
+    rows, cols = np.nonzero(cells)
+    return unary_union([box(cover.x0 + i * cover.cell, cover.y0 + j * cover.cell,
+                            cover.x0 + (i + 1) * cover.cell,
+                            cover.y0 + (j + 1) * cover.cell)
+                        for j, i in zip(rows, cols)])
+
+
+def water_surface(bodies: Sequence[WaterBody], *, lift: float = 0.02) -> list[Any]:
+    """The water itself: one flat sheet per body, as meshes.
+
+    A surface of its own rather than the ground faces under it re-materialised,
+    for three reasons that all point the same way. Every other material in this
+    package belongs to an object — :mod:`city_builder.classes` tags a *group*
+    with its label, its paint policy, its mask colour and its Cycles pass
+    index, and a consumer segmenting a render reads objects, so water that is a
+    slice of the Ground object would be the only class in the scene that cannot
+    be selected. The bed does not stop being ground when it is wet: drain the
+    pond and the terrain under it is still there, still carrying the painted
+    cover, which is what the baked texture already gives it. And a sheet is
+    cheap: 54 triangles for the 784 m2 pond above, against a wetness lookup on
+    every one of the 1724 faces of that map's ground.
+
+    ``lift`` holds it clear of the bed it was levelled onto. The bed is at the
+    water level exactly, so without it the two surfaces are coplanar and the
+    shoreline z-fights; 2 cm is under the freeboard and invisible at any
+    camera height this package renders from.
+    """
+    from .geometry import triangulate_polygon
+
+    meshes = []
+    for body in bodies:
+        if body.polygon is None or body.polygon.is_empty:
+            continue
+        for part in getattr(body.polygon, "geoms", [body.polygon]):
+            if part.geom_type != "Polygon" or part.area <= 0:
+                continue
+            mesh = triangulate_polygon(part, lambda x, y, z=body.level: z, offset=lift)
+            if mesh.faces:
+                meshes.append(mesh)
+    return meshes
 
 
 # ---------------------------------------------------------------------------

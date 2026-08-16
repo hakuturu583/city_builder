@@ -11,12 +11,19 @@ import pytest
 from PIL import Image
 from shapely.geometry import Polygon as ShapelyPolygon
 
+from city_builder import classes
 from city_builder import cover as cv
 from city_builder.ground import HeightMap
 
 
 def _flat(nx=11, ny=11, cell=10.0, z=0.0):
     return HeightMap(0.0, 0.0, cell, np.full((ny, nx), z), np.zeros((ny, nx)))
+
+
+def _slope(nx=11, ny=11, cell=10.0, grade=0.05):
+    """Ground falling to the east, so a pond in it is a pond on a hill."""
+    z = np.tile(np.arange(nx) * cell * -grade, (ny, 1))
+    return HeightMap(0.0, 0.0, cell, z, np.zeros((ny, nx)))
 
 
 def _palette(*names):
@@ -136,6 +143,146 @@ def test_the_map_round_trips_through_json():
     back = cv.CoverMap.from_json(got.to_json())
     assert back.names == got.names and np.array_equal(back.index, got.index)
     assert back.at(70.0, 43.0) == got.at(70.0, 43.0)
+
+
+# ---------------------------------------------------------------------------
+# Water
+# ---------------------------------------------------------------------------
+
+
+def _square(x0, y0, side):
+    return [(x0, y0), (x0 + side, y0), (x0 + side, y0 + side), (x0, y0 + side)]
+
+
+def _wet(hm, *polygons):
+    options = cv.CoverOptions(
+        surfaces=_palette("grass", "water"),
+        rules=[cv.Everywhere("grass"),
+               *(cv.Region("water", polygon=p) for p in polygons)])
+    return options, cv.classify(hm, options)
+
+
+def _ground_under(hm, cover, mask):
+    xs = cover.x0 + (np.arange(cover.nx) + 0.5) * cover.cell
+    ys = cover.y0 + (np.arange(cover.ny) + 0.5) * cover.cell
+    rows, cols = np.nonzero(mask)
+    return np.array([hm.sample(xs[i], ys[j]) for j, i in zip(rows, cols)])
+
+
+def _mask(cover, name="water"):
+    return cover.index == cover.names.index(name)
+
+
+def test_a_pond_on_a_slope_comes_out_level():
+    """The interpolation runs the same smooth surface through a pond that it
+    runs through a car park, so without this the lake is on a hill."""
+    hm = _slope()
+    _options, cover = _wet(hm, _square(30.0, 30.0, 40.0))
+    wet = _mask(cover)
+    before = _ground_under(hm, cover, wet)
+
+    bodies = cv.flatten_water(hm, cover)
+    after = _ground_under(hm, cover, wet)
+
+    assert before.max() - before.min() == pytest.approx(2.0, abs=0.1)
+    assert after.max() - after.min() == pytest.approx(0.0, abs=1e-9)
+    assert len(bodies) == 1
+
+
+def test_the_water_takes_the_lowest_ground_around_it_and_not_its_middle():
+    """The mean of the region is the tempting choice and the broken one: on a
+    2 m fall it puts the sheet a metre over the downhill bank, which reads as a
+    modelling error rather than as bad water."""
+    from scipy.ndimage import binary_dilation
+
+    hm = _slope()
+    _options, cover = _wet(hm, _square(30.0, 30.0, 40.0))
+    wet = _mask(cover)
+    inside = _ground_under(hm, cover, wet)
+    cross = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
+    shore = _ground_under(hm, cover, binary_dilation(wet, structure=cross) & ~wet)
+
+    level = cv.flatten_water(hm, cover)[0].level
+    assert level <= shore.min(), "the water is above the lowest point of its bank"
+    assert inside.mean() - shore.min() > 0.9, "this pond is not on a slope at all"
+    assert inside.min() > shore.min(), "nor does its own minimum contain it"
+
+
+def test_two_ponds_that_do_not_touch_get_a_level_each():
+    hm = _slope()
+    _options, cover = _wet(hm, _square(10.0, 40.0, 20.0), _square(60.0, 40.0, 20.0))
+    bodies = cv.flatten_water(hm, cover)
+    assert len(bodies) == 2
+    uphill, downhill = sorted(bodies, key=lambda b: -b.level)
+    assert uphill.level - downhill.level > 2.0
+
+
+def test_no_water_is_drawn_where_the_ground_is_above_it():
+    """The shoreline is where the ground meets the level, not where the class
+    grid stops: a sheet hanging over the bank is worse than a smaller pond."""
+    hm = _slope()
+    _options, cover = _wet(hm, _square(30.0, 30.0, 40.0))
+    bodies = cv.flatten_water(hm, cover)
+
+    for mesh in cv.water_surface(bodies):
+        for x, y, z in mesh.vertices:
+            assert hm.sample(x, y) <= z + 1e-6
+
+
+def test_the_water_surface_is_one_flat_sheet_a_hair_above_its_bed():
+    hm = _slope()
+    _options, cover = _wet(hm, _square(30.0, 30.0, 40.0))
+    body = cv.flatten_water(hm, cover)[0]
+    meshes = cv.water_surface(bodies=[body], lift=0.02)
+
+    zs = {round(v[2], 9) for mesh in meshes for v in mesh.vertices}
+    assert zs == {round(body.level + 0.02, 9)}
+    assert body.area == pytest.approx(40.0 * 40.0, rel=0.01)
+
+
+def test_a_puddle_smaller_than_the_rule_says_is_not_a_lake():
+    """One stray cell of a 2 m class grid is noise, and levelling the height
+    grid around it would flatten a 10 m square for it."""
+    hm = _slope()
+    _options, cover = _wet(hm, _square(30.0, 30.0, 2.0))
+    before = hm.z.copy()
+    assert cv.flatten_water(hm, cover) == []
+    assert np.array_equal(hm.z, before)
+
+
+def test_a_cover_with_no_water_in_it_leaves_the_ground_exactly_as_it_was():
+    """The whole feature is opt-in, and this is the check that says so."""
+    hm = _slope()
+    options = cv.CoverOptions(surfaces=_palette("grass", "gravel"),
+                              rules=[cv.Everywhere("grass"),
+                                     cv.NearRoad("gravel", metres=3.0)])
+    cover = cv.classify(hm, options, roads=_road())
+    before = hm.z.copy()
+
+    assert not cv.paints_water(options), "and the build never even classifies it"
+    assert cv.flatten_water(hm, cover) == []
+    assert np.array_equal(hm.z, before)
+
+
+def test_a_palette_that_names_water_but_never_paints_it_still_counts():
+    """``paints_water`` reads the rules, not the palette: a surface nobody
+    paints cannot move a height, and the build must not pay to find out."""
+    surfaces = _palette("grass", "water")
+    assert not cv.paints_water(cv.CoverOptions(surfaces=surfaces,
+                                               rules=[cv.Everywhere("grass")]))
+    assert cv.paints_water(cv.CoverOptions(
+        surfaces=surfaces,
+        rules=[cv.Everywhere("grass"), cv.Region("water", polygon=_square(0, 0, 10))]))
+
+
+def test_water_is_a_surface_class_of_its_own():
+    """It is a separate object so a consumer can select it; that only works if
+    it has its own label, mask colour and pass index."""
+    water = classes.get("Water")
+    assert water.label == "water" and water.material == "water"
+    others = [c for name, c in classes.CLASSES.items() if name != "Water"]
+    assert water.pass_index not in {c.pass_index for c in others}
+    assert water.mask_colour not in {c.mask_colour for c in others}
 
 
 # ---------------------------------------------------------------------------

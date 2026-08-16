@@ -122,6 +122,11 @@ CLASSES: dict[str, SurfaceClass] = {
             note="the slivers between lanelets: a hole to the street on a deck, "
                  "and a 5 cm drop into the terrain at grade",
         ),
+        SurfaceClass(
+            "Water", "water", GENERATE, "water", (0.00, 0.85, 0.85), 16,
+            note="the flat top of a body of standing water; the bed a few "
+                 "centimetres under it is still Ground",
+        ),
     )
 }
 
