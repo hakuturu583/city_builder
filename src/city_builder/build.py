@@ -183,10 +183,17 @@ def build_city(
         # water relative to a road would therefore not be honoured here; none
         # does, because standing water is said with Region.
         water_meshes: list[Any] = []
+        # The class grid is wanted for two things — where the water is and
+        # where the ground steps — so it is built once here and read twice
+        # rather than by each pass that needs it.
+        painted = None
+        road_plan = None
+        steps: list[tuple[Any, float]] = []
         if cover_options is not None:
             from . import cover as cover_module
 
-            if cover_module.paints_water(cover_options):
+            if cover_module.paints_water(cover_options) or any(
+                    surface.step for surface in cover_options.surfaces):
                 # The carriageway, dissolved here rather than waiting for
                 # build_mesh to do it: the water has to be settled before the
                 # ground is triangulated, and it must not flood a street.
@@ -194,9 +201,10 @@ def build_city(
                                                        close_gap=0.5)
                 painted = cover_module.classify(heightmap, cover_options,
                                                 roads=road_plan)
-                water = cover_module.flatten_water(heightmap, painted,
-                                                   roads=road_plan)
-                water_meshes = cover_module.water_surface(water)
+                if cover_module.paints_water(cover_options):
+                    water = cover_module.flatten_water(heightmap, painted,
+                                                       roads=road_plan)
+                    water_meshes = cover_module.water_surface(water)
                 if verbose:
                     for body in water:
                         report = body.to_json()
@@ -209,14 +217,53 @@ def build_city(
                                   f"ground grid is {cell:g} m and cannot cut a bank inside "
                                   f"one cell. Try ground.cell of about a tenth of the pond.")
 
-        # The shoreline goes into the triangulation as a breakline. Without it
-        # the bank is cut at whatever angle the grid crosses it, and the water
-        # meets a rim of triangles that belong to the grid rather than to the
-        # pond.
+            if painted is not None:
+                steps += [(outline, rise) for outline, rise
+                          in cover_module.terraces(painted, cover_options)]
+
+        # The buildings before the ground they stand on, which is the order the
+        # work actually has: a plot is cut and filled level behind a retaining
+        # wall *before* anything is built on it, so the ground has to be told
+        # where those platforms are. Nothing here needs the ground *mesh* —
+        # only the height map and where the carriageway is — so the dependency
+        # was the other way round all along.
+        plots = []
+        if buildings:
+            keep_clear = buildings_module.exclusion_zone(groups) or road_plan \
+                or ground_module.road_outline(surfaces, elevated, close_gap=0.5)
+            if water:
+                # The plot generator reads a pond as open ground with no road
+                # anywhere near it, which is its idea of a good place to build.
+                # What is kept clear is what was *painted*, not the sheet that
+                # ended up on it: the dry margin of a pond the grid could not
+                # cut is the inside of an excavation, and a house belongs there
+                # even less than one in the water.
+                from shapely.ops import unary_union
+
+                keep_clear = unary_union([keep_clear,
+                                          *(b.painted if b.painted is not None
+                                            else b.polygon for b in water)])
+            built = buildings_module.generate(heightmap, keep_clear, building_options)
+            if built["Buildings"]:
+                groups["Buildings"] = built["Buildings"]
+                groups["Roofs"] = built["Roofs"]
+            plots = built["plots"]
+            stats["buildings"] = len(built["Buildings"])
+            steps += [(ring, building_options.terrace if building_options else
+                       buildings_module.BuildingOptions().terrace)
+                      for ring in built.get("terraces", ())]
+            if steps and verbose:
+                print(f"[build] terraces: {len(steps)} platform(s), the ground "
+                      f"stepped and walled round each")
+
+        # The shoreline and the retaining walls go into the triangulation as
+        # breaklines. Without them the bank is cut at whatever angle the grid
+        # crosses it, and the water meets a rim of triangles that belong to the
+        # grid rather than to the pond.
         mesh, road_union = ground_module.build_mesh(
             heightmap, surfaces, elevated, fill_island=fill_island, drop=ground_drop,
             breaklines=[b.polygon for b in water if b.polygon is not None],
-            return_road_union=True)
+            terraces=steps, return_road_union=True)
         groups["Ground"] = [mesh]
         if water_meshes:
             groups["Water"] = water_meshes
@@ -263,28 +310,6 @@ def build_city(
         print(f"[build] road infill: {patched} patch(es), {patched_area:.0f} m2 of gap "
               f"between lanelets closed")
 
-    plots: list[dict[str, Any]] = []
-    if buildings:
-        if heightmap is None:
-            raise RuntimeError("buildings need the ground; do not pass ground=False with buildings=True")
-        keep_clear = buildings_module.exclusion_zone(groups) or road_union
-        if water:
-            # The plot generator reads a pond as open ground with no road
-            # anywhere near it, which is its idea of a good place to build.
-            # What is kept clear is what was *painted*, not the sheet that
-            # ended up on it: the dry margin of a pond the grid could not cut
-            # is the inside of an excavation, and a house belongs there even
-            # less than one in the water.
-            from shapely.ops import unary_union
-
-            keep_clear = unary_union([keep_clear, *(b.painted if b.painted is not None
-                                                    else b.polygon for b in water)])
-        built = buildings_module.generate(heightmap, keep_clear, building_options)
-        if built["Buildings"]:
-            groups["Buildings"] = built["Buildings"]
-            groups["Roofs"] = built["Roofs"]
-        plots = built["plots"]
-        stats["buildings"] = len(built["Buildings"])
         if verbose:
             heights = [p["height"] for p in plots]
             span = f"{min(heights):.0f}-{max(heights):.0f} m" if heights else "none"

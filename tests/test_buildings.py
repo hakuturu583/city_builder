@@ -163,10 +163,12 @@ def test_generate_stands_every_building_on_the_ground():
     result = B.generate(hm, _cross_roads(), B.BuildingOptions(seed=5), bounds=(0, 0, 200, 200))
     assert result["Buildings"] and len(result["Buildings"]) == len(result["Roofs"])
 
+    # Every plot is cut level a step above the ground it stands on.
+    ground = 12.0 + B.BuildingOptions().terrace
     for walls, record in zip(result["Buildings"], result["plots"]):
         wall_z = [v[2] for v in walls.vertices]
-        assert min(wall_z) == pytest.approx(12.0 - 1.0)  # ground minus the skirt
-        top = 12.0 + record["height"]
+        assert min(wall_z) == pytest.approx(ground - 1.0)  # platform minus the skirt
+        top = ground + record["height"]
         if record["roof"] in ("gable", "mono"):
             # A gable end and a mono-pitch's high side are wall, and they climb
             # with the roof: the extrusion's top is the *eaves*, not the top.

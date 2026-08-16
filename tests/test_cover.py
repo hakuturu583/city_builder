@@ -362,3 +362,53 @@ def test_the_report_says_what_the_ground_turned_out_to_be(tmp_path):
     _image, report = _painted(tmp_path, options, roads=_road())
     assert set(report["surfaces"]) == {"grass", "gravel"}
     assert sum(report["surfaces"].values()) == pytest.approx(1.0, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# Ground that steps
+# ---------------------------------------------------------------------------
+
+
+def _stepped(*names, step=0.3):
+    surfaces = _palette(*names)
+    for surface in surfaces[1:]:
+        surface.step = step
+    return surfaces
+
+
+def test_a_palette_with_no_step_asks_for_no_terraces():
+    options = cv.CoverOptions(surfaces=_palette("grass", "gravel"),
+                              rules=[cv.Everywhere("grass"),
+                                     cv.NearRoad("gravel", metres=3.0)])
+    assert cv.terraces(cv.classify(_flat(), options, roads=_road()), options) == []
+
+
+def test_two_surfaces_that_step_by_the_same_amount_are_one_platform():
+    """A gravel pad inside an earth yard is not a step in somebody's garden."""
+    plot = _plot(20.0, 10.0, 60.0, 50.0)
+    options = cv.CoverOptions(
+        surfaces=_stepped("grass", "ground", "gravel"),
+        rules=[cv.Everywhere("grass"), cv.InPlot("ground"),
+               cv.InPlot("gravel", shrink=6.0)])
+    found = cv.terraces(cv.classify(_flat(), options, plots=[plot]), options)
+    assert len(found) == 1
+    outline, rise = found[0]
+    assert rise == pytest.approx(0.3)
+    assert outline.area == pytest.approx(40.0 * 40.0, rel=0.15)
+
+
+def test_two_plots_that_do_not_touch_are_two_platforms():
+    options = cv.CoverOptions(
+        surfaces=_stepped("grass", "ground"),
+        rules=[cv.Everywhere("grass"), cv.InPlot("ground")])
+    plots = [_plot(10.0, 10.0, 30.0, 30.0), _plot(60.0, 60.0, 85.0, 85.0)]
+    assert len(cv.terraces(cv.classify(_flat(), options, plots=plots), options)) == 2
+
+
+def test_a_platform_too_small_for_the_grid_is_not_built():
+    """A wall round a bump reads as a fault in the terrain, not a retaining wall."""
+    options = cv.CoverOptions(
+        surfaces=_stepped("grass", "ground"),
+        rules=[cv.Everywhere("grass"), cv.InPlot("ground")])
+    tiny = cv.classify(_flat(), options, plots=[_plot(50.0, 50.0, 52.0, 52.0)])
+    assert cv.terraces(tiny, options, smallest=100.0) == []

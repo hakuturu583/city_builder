@@ -421,3 +421,64 @@ def test_the_grid_is_handed_to_a_guidance_source_that_has_to_fetch_it():
                             guidance=source)
     assert asked["nx"] == hm.nx and asked["ny"] == hm.ny
     assert asked["cell"] == 10.0 and asked["x0"] == hm.x0
+
+
+# ---------------------------------------------------------------------------
+# Ground that is meant to break
+#
+# Most class boundaries are not discontinuities — grass does not step down into
+# gravel, it stops being grass. A plot cut and filled level behind a retaining
+# wall is, and a 10 m grid smears it into a ramp unless it is told.
+# ---------------------------------------------------------------------------
+
+
+def _platform(x0=30.0, y0=30.0, side=40.0):
+    from shapely.geometry import box as shapely_box
+
+    return shapely_box(x0, y0, x0 + side, y0 + side)
+
+
+def _stacked(mesh):
+    """Positions carrying two heights: the two sides of a step."""
+    seen, pairs = {}, []
+    for x, y, z in mesh.vertices:
+        key = (round(x, 3), round(y, 3))
+        if key in seen:
+            pairs.append(abs(z - seen[key]))
+        seen[key] = z
+    return pairs
+
+
+def test_ground_with_no_terrace_is_one_continuous_surface():
+    mesh = gr.build_mesh(_flat_heightmap(5.0, nx=12, ny=12), [], elevated=set())
+    assert not _stacked(mesh)
+
+
+def test_a_terrace_stands_its_ground_a_step_above_the_rest():
+    mesh = gr.build_mesh(_flat_heightmap(5.0, nx=12, ny=12), [], elevated=set(),
+                         terraces=[(_platform(), 0.3)])
+    steps = _stacked(mesh)
+    assert steps, "the step was smoothed away, which is what the grid does unaided"
+    assert max(steps) == pytest.approx(0.3, abs=1e-6)
+    assert max(v[2] for v in mesh.vertices) == pytest.approx(5.3, abs=1e-6)
+    assert min(v[2] for v in mesh.vertices) == pytest.approx(5.0, abs=1e-6)
+
+
+def test_the_terrace_is_held_up_by_a_wall():
+    """Otherwise the raised ground ends in mid-air over a hole."""
+    plain = gr.build_mesh(_flat_heightmap(5.0, nx=12, ny=12), [], elevated=set())
+    stepped = gr.build_mesh(_flat_heightmap(5.0, nx=12, ny=12), [], elevated=set(),
+                            terraces=[(_platform(), 0.3)])
+    walls = [face for face in stepped.faces
+             if len({round(stepped.vertices[i][2], 6) for i in face}) == 2]
+    assert walls, "no face spans the two levels"
+    assert len(stepped.faces) > len(plain.faces)
+
+
+def test_the_platform_edge_is_where_it_was_put():
+    mesh = gr.build_mesh(_flat_heightmap(5.0, nx=12, ny=12), [], elevated=set(),
+                         terraces=[(_platform(30.0, 30.0, 40.0), 0.4)])
+    high = [(x, y) for x, y, z in mesh.vertices if z > 5.2]
+    assert high
+    assert min(x for x, _y in high) == pytest.approx(30.0, abs=1e-6)
+    assert max(x for x, _y in high) == pytest.approx(70.0, abs=1e-6)

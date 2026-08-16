@@ -23,6 +23,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Any
 
 import numpy as np
@@ -556,6 +557,7 @@ def build_mesh(
     fill_island: float = 0.0,
     drop: float = 0.05,
     breaklines: Sequence[Any] = (),
+    terraces: Sequence[tuple[Any, float]] = (),
     return_road_union: bool = False,
 ) -> Mesh | tuple[Mesh, Any]:
     """Triangulate the ground *around* the roads, meeting them at their edges.
@@ -627,8 +629,10 @@ def build_mesh(
     vertices: list[tuple[float, float, float]] = []
     lookup: dict[tuple[int, int], int] = {}
 
-    def vertex(x: float, y: float) -> int:
-        key = (round(x / _WELD), round(y / _WELD))
+    def vertex(x: float, y: float, lift: float = 0.0) -> int:
+        # The lift is part of the key, so the two sides of a retaining wall do
+        # not weld into one vertex and pull the step flat again.
+        key = (round(x / _WELD), round(y / _WELD), round(lift / _WELD))
         found = lookup.get(key)
         if found is not None:
             return found
@@ -644,28 +648,39 @@ def build_mesh(
         else:
             z = hm.sample(x, y)
         lookup[key] = len(vertices)
-        vertices.append((x, y, z))
+        vertices.append((x, y, z + lift))
         return lookup[key]
 
     faces: list[list[int]] = []
 
-    def add_face(ring: Sequence[Sequence[float]]) -> None:
+    def add_face(ring: Sequence[Sequence[float]], lift: float = 0.0) -> None:
         area = signed_area_xy(ring)
         if abs(area) < 5e-5:
             return
         ordered = list(ring) if area > 0 else list(reversed(ring))
-        indices = [vertex(p[0], p[1]) for p in ordered]
+        indices = [vertex(p[0], p[1], lift) for p in ordered]
         # Vertices are welded at `_WELD`, so a clipped sliver can collapse
         # onto itself even though its outline had area.
         if len(set(indices)) < 3:
             return
         faces.append(indices)
 
+    def lift_of(piece) -> float:
+        """How far this piece of ground stands above the surface around it."""
+        if not steps:
+            return 0.0
+        spot = piece.representative_point()
+        for outline, rise in steps:
+            if outline.contains(spot):
+                return rise
+        return 0.0
+
     def emit(piece) -> None:
         if piece.is_empty or piece.area < 1e-6:
             return
+        lift = lift_of(piece)
         for tri in cover_with_triangles(piece):
-            add_face(list(tri.exterior.coords)[:-1])
+            add_face(list(tri.exterior.coords)[:-1], lift)
 
     # A shoreline, a retaining wall, the toe of an embankment: a line the
     # ground is *meant* to break along. Splitting each cell by it puts it in
@@ -677,6 +692,14 @@ def build_mesh(
             continue
         line = getattr(shape, "boundary", None)
         edges.append(line if line is not None and not line.is_empty else shape)
+    # A terrace is a breakline that also carries a level: its outline is forced
+    # into the triangulation *and* the ground inside it stands `rise` higher, so
+    # the two sides of the line are two vertices at two heights rather than one
+    # smeared between them. That is the difference between a retaining wall and
+    # a ramp, and on a 10 m grid it is the only way to have the first.
+    steps = [(outline, rise) for outline, rise in terraces
+             if outline is not None and not outline.is_empty and rise]
+    edges = edges + [outline.boundary for outline, _rise in steps]
     edge_tree = STRtree(edges) if edges else None
 
     def split(piece):
@@ -711,6 +734,22 @@ def build_mesh(
                 if piece.geom_type == "Polygon":
                     for part in split(piece):
                         emit(part)
+
+    # And the wall that holds the terrace up. Without it the raised ground ends
+    # in mid-air and the scene has a shelf floating over a hole.
+    for outline, rise in steps:
+        for part in (outline.geoms if hasattr(outline, "geoms") else [outline]):
+            if part.geom_type != "Polygon":
+                continue
+            for ring in (part.exterior, *part.interiors):
+                for (x0, y0), (x1, y1) in pairwise(list(ring.coords)):
+                    if math.dist((x0, y0), (x1, y1)) < _WELD:
+                        continue
+                    low = [vertex(x0, y0), vertex(x1, y1)]
+                    high = [vertex(x1, y1, rise), vertex(x0, y0, rise)]
+                    face = low + high if rise > 0 else high + low
+                    if len(set(face)) == 4:
+                        faces.append(face)
 
     mesh = Mesh(vertices, faces)
     # The dissolved outline is expensive to build and the building layer needs

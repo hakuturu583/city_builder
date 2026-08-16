@@ -34,6 +34,18 @@ class BuildingOptions:
     """Everything that shapes the generated blocks."""
 
     setback: float = 3.0  # gap between the kerb line and any wall
+    # A plot is cut and filled level behind a low retaining wall before
+    # anything is built on it, so its ground stands a step above the footway.
+    # 0.3 m is a two-course concrete block, which is what most of them are.
+    # Zero lays the plots on the terrain like a decal, which is what this did
+    # before and what reads as a housing estate printed on a hillside.
+    #
+    # It is not free: the ground has to carry an edge round every lot and a
+    # wall under it. On Kashiwanoha the ground mesh goes from 1744 faces to
+    # 6251 at a 10 m grid and from 8827 to 17560 at 2.5 m, and the build from
+    # 2.5 s to 4.0 s and 3.6 s to 10.3 s. Set it to zero for a scene that is
+    # about the roads.
+    terrace: float = 0.3
     target_lot_area: float = 900.0  # split until a lot is about this big
     min_lot_area: float = 120.0  # anything smaller is left as open ground
     split_jitter: float = 0.15  # 0 = split at the middle, 0.5 = anywhere
@@ -754,7 +766,8 @@ def generate(
 
     walls, roofs, records = [], [], []
     for plot in plots:
-        base = base_height(plot, heightmap)
+        # On its own platform, not on the hillside it was cut out of.
+        base = base_height(plot, heightmap) + options.terrace
         height = pick_height(plot.area, options, rng)
         wall_mesh, roof_mesh = extrude(plot, base, height, skirt=options.skirt,
                                       facade_width=options.facade_width)
@@ -815,4 +828,11 @@ def generate(
                           for x, y in list(plot.exterior.coords)[:-1]],
         })
 
-    return {"Buildings": walls, "Roofs": roofs, "plots": records}
+    from shapely.geometry import Polygon as ShapelyPolygon
+
+    return {"Buildings": walls, "Roofs": roofs, "plots": records,
+            # The platforms, for the ground to step around. The lot's ring, not
+            # the building's: the whole lot is level and the wall runs round
+            # the lot, which is what makes it a plot rather than a plinth.
+            "terraces": [ShapelyPolygon(r["footprint"]) for r in records]
+            if options.terrace else []}

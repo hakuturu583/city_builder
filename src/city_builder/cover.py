@@ -62,6 +62,14 @@ class Surface:
     # How assertively this material wins a boundary. Gravel poking through the
     # edge of a lawn is right; a lawn with a gravel-shaped hole in it is not.
     relief: float = 1.0
+    # Metres this surface's ground stands above whatever it borders. Zero for
+    # almost everything — grass does not step down into gravel, it just stops
+    # being grass — and the ground is a smooth surface that happens to change
+    # colour. A non-zero step is a *terrace*: its outline becomes a forced edge
+    # of the triangulation, the ground inside it is raised, and the wall that
+    # holds it up is built. That is the only way a level change survives a
+    # 10 m height grid, which otherwise smears it into a ramp.
+    step: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -193,13 +201,20 @@ def japanese_suburb(*, textures: dict[str, str] | None = None) -> CoverOptions:
     Gravel and paving where the plots meet the road, packed earth in the yards,
     grass in what is left over, and a scatter of bare ground. It is a starting
     point to edit, not a claim about any real place.
+
+    Nothing here declares a ``step``. The one level change a suburban street
+    genuinely has is the plot standing above the footway, and that belongs to
+    the plot rather than to whatever is painted on it — see
+    ``BuildingOptions.terrace``. Painting it here instead would terrace the
+    scatter of bare earth as well, and a 0.3 m wall round a random blob of soil
+    is not a retaining wall, it is a fault in the ground.
     """
     art = textures or {}
 
     def paint(name: str, colour: tuple[float, float, float], tile: float,
-              relief: float = 1.0) -> Surface:
+              relief: float = 1.0, step: float = 0.0) -> Surface:
         return Surface(name, texture=art.get(name), colour=colour,
-                       tile_metres=tile, relief=relief)
+                       tile_metres=tile, relief=relief, step=step)
 
     return CoverOptions(
         surfaces=[
@@ -626,6 +641,47 @@ def flatten_water(heightmap, cover: CoverMap, *, name: str = WATER, roads=None,
                                 cells=int(keep.sum()), fall=fall, polygon=outline,
                                 painted=_cells_to_polygon(cells, cover)))
     return bodies
+
+
+def terraces(cover: CoverMap, options: CoverOptions, *,
+             smallest: float = 12.0) -> list[tuple[Any, float]]:
+    """The regions that stand above what surrounds them, and by how much.
+
+    One entry per *connected* region of every surface that declares a
+    ``step``, so two plots that touch are one terrace with one wall round the
+    pair and two plots that do not are two — which is what a street of separate
+    lots looks like. Surfaces that step by the same amount are grouped before
+    the regions are found, so a yard of packed earth with a gravel pad in it is
+    one platform and not a step in the middle of somebody's garden.
+
+    Below ``smallest`` a region is dropped. A terrace narrower than the height
+    grid cannot be built anyway: raising it moves the same grid nodes as the
+    ground beside it, so what comes out is a bump rather than a platform, and a
+    wall round a bump reads as a fault in the terrain.
+    """
+    from scipy.ndimage import label
+
+    grouped: dict[float, np.ndarray] = {}
+    for index, surface in enumerate(options.surfaces):
+        if not surface.step:
+            continue
+        here = cover.index == index
+        if here.any():
+            grouped.setdefault(surface.step, np.zeros(here.shape, dtype=bool))
+            grouped[surface.step] |= here
+
+    cross = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
+    out: list[tuple[Any, float]] = []
+    for rise, mask in grouped.items():
+        tags, count = label(mask, structure=cross)
+        for tag in range(1, count + 1):
+            cells = tags == tag
+            if float(cells.sum()) * cover.cell ** 2 < smallest:
+                continue
+            outline = _cells_to_polygon(cells, cover)
+            if not outline.is_empty and outline.area > 0:
+                out.append((outline, rise))
+    return out
 
 
 def _cells_to_polygon(cells: np.ndarray, cover: CoverMap, *, smooth: bool = True):
