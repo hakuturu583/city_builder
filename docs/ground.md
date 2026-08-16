@@ -1,13 +1,15 @@
 # Ground: land cover, and a surface the road belongs to
 
-A design note. What is here now, what the literature says, what this map
-actually measures, and the algorithm those three imply. Nothing in this
-document is implemented yet; each stage names the measurement that will decide
-whether it stays.
+A design note, written before the work and kept as the record of why it is
+shaped the way it is: what was there, what the literature says, what this map
+actually measures, and the algorithm those three imply. Each stage names the
+measurement that decided whether it stayed. **Stages 1-3 are built** — see
+*What was built* below, including the two places the measurements contradicted
+the design. Stages 4-5 are not.
 
-## What exists today
+## What was there before this
 
-`city_builder.ground` interpolates a surface from the only elevation a
+`city_builder.ground` interpolated a surface from the only elevation a
 Lanelet2 map carries — the carriageway:
 
 1. elevated structure is found geometrically and dropped, because these maps
