@@ -126,23 +126,34 @@ def tag_object(obj, surface_class: SurfaceClass) -> None:
         datum.color = colour
 
 
-def uv_from_xy(obj, tile_metres: float, *, name: str = "UVMap") -> None:
+def uv_from_xy(obj, tile_metres: float, *, name: str = "UVMap",
+               origin: tuple[float, float] = (0.0, 0.0)) -> None:
     """Planar UVs at a metric scale, so a tile repeats every ``tile_metres``.
 
     A generated tile is only useful if its size on the ground is known, and a
     real UV layer (rather than a procedural coordinate node) is also the only
     form that survives a glTF export.
+
+    ``origin`` is where UV (0, 0) lands in scene metres. It is irrelevant for a
+    repeating tile and essential for an image that is not one — a ground
+    texture painted once for the whole map has to be anchored to the map.
     """
     mesh = obj.data
     layer = mesh.uv_layers.get(name) or mesh.uv_layers.new(name=name)
     scale = 1.0 / max(tile_metres, 1e-6)
     for loop in mesh.loops:
         x, y, _ = mesh.vertices[loop.vertex_index].co
-        layer.data[loop.index].uv = (x * scale, y * scale)
+        layer.data[loop.index].uv = ((x - origin[0]) * scale, (y - origin[1]) * scale)
 
 
-def tiled_material(name: str, image_path: str, *, roughness: float = 0.95):
-    """A material that repeats an image across the UVs it is given."""
+def tiled_material(name: str, image_path: str, *, roughness: float = 0.95,
+                   extend: bool = False):
+    """A material that repeats an image across the UVs it is given.
+
+    ``extend`` clamps at the edge instead, for an image that is a map rather
+    than a tile: a UV a hair past the border should take the border pixel, not
+    wrap round to the far side of the town.
+    """
     import bpy
 
     mat, nodes, links, bsdf = _material_nodes(name)
@@ -151,7 +162,7 @@ def tiled_material(name: str, image_path: str, *, roughness: float = 0.95):
     texture = nodes.new("ShaderNodeTexImage")
     texture.location = (-400, 0)
     texture.image = bpy.data.images.load(os.path.abspath(image_path))
-    texture.extension = "REPEAT"
+    texture.extension = "EXTEND" if extend else "REPEAT"
     links.new(texture.outputs["Color"], bsdf.inputs["Base Color"])
     return mat
 
@@ -191,12 +202,18 @@ def add_object(name: str, mesh: Mesh, material=None, surface_class: SurfaceClass
     return obj
 
 
-def apply_tiled_texture(obj, image_path: str, tile_metres: float, *, name: str | None = None):
-    """Give an object a repeating image material at a known metric scale."""
-    material = tiled_material(name or f"{obj.name}Tiled", image_path)
+def apply_tiled_texture(obj, image_path: str, tile_metres: float, *, name: str | None = None,
+                        origin: tuple[float, float] = (0.0, 0.0), extend: bool = False):
+    """Give an object a repeating image material at a known metric scale.
+
+    ``extend`` clamps at the image edge instead of repeating, which is what a
+    once-painted map-sized texture wants: a UV a hair outside it should take
+    the border pixel, not wrap round to the other side of the town.
+    """
+    material = tiled_material(name or f"{obj.name}Tiled", image_path, extend=extend)
     obj.data.materials.clear()
     obj.data.materials.append(material)
-    uv_from_xy(obj, tile_metres)
+    uv_from_xy(obj, tile_metres, origin=origin)
     return material
 
 

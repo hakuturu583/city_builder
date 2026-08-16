@@ -35,6 +35,9 @@ class BuildResult:
     # One record per generated building, in the order of ``groups["Buildings"]``.
     # Carries the floor count, which decides which facade sheet it may wear.
     plots: list[dict[str, Any]] = field(default_factory=list)
+    # The dissolved carriageway. Expensive to build and wanted again by the
+    # ground cover, which measures its verges from it.
+    road_union: Any = None
 
 
 def build_city(
@@ -120,6 +123,7 @@ def build_city(
 
     elevated: set[int] = set()
     heightmap = None
+    road_union = None
     if ground:
         surfaces = list(groups.get("Roads", [])) + list(groups.get("Junctions", []))
         adjacency = lanelet.build_adjacency(lanelet.lanelet_end_keys(lmap))
@@ -233,7 +237,8 @@ def build_city(
                   f"atlas page(s); the marking geometry is gone")
 
     return BuildResult(frame, groups, heightmap, elevated, datum, stats=stats, plots=plots,
-                       marking_pages=pages, marking_page_of_shape=page_of_shape)
+                       marking_pages=pages, marking_page_of_shape=page_of_shape,
+                       road_union=road_union)
 
 
 def clip_crosswalks(groups: dict[str, list], lift_by: float) -> int:
@@ -577,12 +582,20 @@ def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | Non
                 roof_texture: str | None = None, roof_tile_metres: float = 3.0,
                 facade_dir: str | None = None, road_texture: str | None = None,
                 marking_options: MarkingOptions | None = None,
+                cover_options=None, cover_path: str | None = None,
+                cover_texels_per_metre: float = 8.0,
                 markings_dir: str | None = None, verbose: bool = True) -> None:
     """Build the result into Blender and export it.
 
     ``ground_texture`` is a tile image to repeat across the ground. Only the
     ground: every lanelet-derived surface keeps the material it was built with,
     because the map already says what those look like.
+
+    ``cover_options`` replaces that one tile with a painted map — grass, gravel,
+    yards and paving where :mod:`city_builder.cover` says they are — baked once
+    into a single image anchored to the scene. It takes precedence over
+    ``ground_texture``, which then serves only as the ``grass`` fallback tile a
+    palette may not have supplied.
 
     The carriageway gets its own metric scale. Paving slabs and road aggregate
     are not the same size: one tile spanning the twelve metres that suits a
@@ -644,7 +657,32 @@ def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | Non
             print(f"[scene] Roofs: tiled {os.path.basename(roof_texture)} every "
                   f"{roof_tile_metres:g} m")
 
-    if ground_texture:
+    if cover_options is not None:
+        from . import cover as cover_module
+
+        ground = objects.get("Ground")
+        if ground is None:
+            raise RuntimeError("no Ground object to texture; build with ground=True")
+        if result.heightmap is None:
+            raise RuntimeError("the ground cover needs the height map")
+        painted = cover_module.classify(
+            result.heightmap, cover_options, roads=result.road_union,
+            plots=[plot["footprint"] for plot in result.plots if plot.get("footprint")])
+        anchor = blend or glb or fbx
+        target = cover_path or (
+            os.path.splitext(os.path.abspath(anchor))[0] + "_ground.png" if anchor
+            else os.path.abspath("ground_cover.png"))
+        report = cover_module.paint(painted, cover_options, target,
+                                    texels_per_metre=cover_texels_per_metre)
+        # One image over the whole map, so the UV spans it once and is anchored
+        # to it — and clamps at the edge rather than wrapping the town round.
+        scene.apply_tiled_texture(ground, target, report["metres"][0],
+                                  origin=tuple(report["origin"]), extend=True)
+        if verbose:
+            spread = ", ".join(f"{k} {v * 100:.0f}%" for k, v in report["surfaces"].items())
+            print(f"[scene] Ground: painted {report['size'][0]}x{report['size'][1]} at "
+                  f"{report['texels_per_metre']:.1f} texels/m — {spread}")
+    elif ground_texture:
         ground = objects.get("Ground")
         if ground is None:
             raise RuntimeError("no Ground object to texture; build with ground=True")
