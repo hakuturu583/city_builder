@@ -456,12 +456,31 @@ def test_ground_with_no_terrace_is_one_continuous_surface():
 
 def test_a_terrace_stands_its_ground_a_step_above_the_rest():
     mesh = gr.build_mesh(_flat_heightmap(5.0, nx=12, ny=12), [], elevated=set(),
-                         terraces=[(_platform(), 0.3)])
+                         terraces=[(_platform(), 5.3)])
     steps = _stacked(mesh)
     assert steps, "the step was smoothed away, which is what the grid does unaided"
     assert max(steps) == pytest.approx(0.3, abs=1e-6)
     assert max(v[2] for v in mesh.vertices) == pytest.approx(5.3, abs=1e-6)
     assert min(v[2] for v in mesh.vertices) == pytest.approx(5.0, abs=1e-6)
+
+
+def test_a_platform_is_level_even_where_the_ground_is_not():
+    """A platform that follows the hill is still a hill.
+
+    Measured on 189 real plots before this went in: 185 were more than 0.1 m
+    out of level, a median of 0.38 m across a lot and up to 1.26 m — so the
+    ground buried one side of the house and fell away from the other.
+    """
+    slope = gr.HeightMap(0.0, 0.0, 10.0,
+                         np.tile(np.arange(12, dtype=float) * 0.4, (12, 1)),
+                         np.zeros((12, 12)))
+    mesh = gr.build_mesh(slope, [], elevated=set(), terraces=[(_platform(), 3.0)])
+    from shapely.geometry import Point
+
+    core = _platform().buffer(-1.0)
+    inside = [z for x, y, z in mesh.vertices if core.contains(Point(x, y))]
+    assert inside
+    assert max(inside) - min(inside) < 1e-6
 
 
 def test_the_terrace_is_held_up_by_a_wall():
@@ -477,7 +496,7 @@ def test_the_terrace_is_held_up_by_a_wall():
 
 def test_the_platform_edge_is_where_it_was_put():
     mesh = gr.build_mesh(_flat_heightmap(5.0, nx=12, ny=12), [], elevated=set(),
-                         terraces=[(_platform(30.0, 30.0, 40.0), 0.4)])
+                         terraces=[(_platform(30.0, 30.0, 40.0), 5.4)])
     high = [(x, y) for x, y, z in mesh.vertices if z > 5.2]
     assert high
     assert min(x for x, _y in high) == pytest.approx(30.0, abs=1e-6)

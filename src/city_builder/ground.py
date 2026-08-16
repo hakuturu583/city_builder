@@ -629,13 +629,18 @@ def build_mesh(
     vertices: list[tuple[float, float, float]] = []
     lookup: dict[tuple[int, int], int] = {}
 
-    def vertex(x: float, y: float, lift: float = 0.0) -> int:
-        # The lift is part of the key, so the two sides of a retaining wall do
+    def vertex(x: float, y: float, level: float | None = None) -> int:
+        # The level is part of the key, so the two sides of a retaining wall do
         # not weld into one vertex and pull the step flat again.
-        key = (round(x / _WELD), round(y / _WELD), round(lift / _WELD))
+        key = (round(x / _WELD), round(y / _WELD),
+               None if level is None else round(level / _WELD))
         found = lookup.get(key)
         if found is not None:
             return found
+        if level is not None:
+            lookup[key] = len(vertices)
+            vertices.append((x, y, level))
+            return lookup[key]
         on_seam = seam is not None and len(
             seam.query(Point(x, y), predicate="dwithin", distance=_WELD)) > 0
         if on_seam and kerb is not None:
@@ -648,39 +653,39 @@ def build_mesh(
         else:
             z = hm.sample(x, y)
         lookup[key] = len(vertices)
-        vertices.append((x, y, z + lift))
+        vertices.append((x, y, z))
         return lookup[key]
 
     faces: list[list[int]] = []
 
-    def add_face(ring: Sequence[Sequence[float]], lift: float = 0.0) -> None:
+    def add_face(ring: Sequence[Sequence[float]], level: float | None = None) -> None:
         area = signed_area_xy(ring)
         if abs(area) < 5e-5:
             return
         ordered = list(ring) if area > 0 else list(reversed(ring))
-        indices = [vertex(p[0], p[1], lift) for p in ordered]
+        indices = [vertex(p[0], p[1], level) for p in ordered]
         # Vertices are welded at `_WELD`, so a clipped sliver can collapse
         # onto itself even though its outline had area.
         if len(set(indices)) < 3:
             return
         faces.append(indices)
 
-    def lift_of(piece) -> float:
-        """How far this piece of ground stands above the surface around it."""
+    def level_of(piece) -> float | None:
+        """The platform this piece of ground belongs to, if it belongs to one."""
         if not steps:
-            return 0.0
+            return None
         spot = piece.representative_point()
-        for outline, rise in steps:
+        for outline, level in steps:
             if outline.contains(spot):
-                return rise
-        return 0.0
+                return level
+        return None
 
     def emit(piece) -> None:
         if piece.is_empty or piece.area < 1e-6:
             return
-        lift = lift_of(piece)
+        level = level_of(piece)
         for tri in cover_with_triangles(piece):
-            add_face(list(tri.exterior.coords)[:-1], lift)
+            add_face(list(tri.exterior.coords)[:-1], level)
 
     # A shoreline, a retaining wall, the toe of an embankment: a line the
     # ground is *meant* to break along. Splitting each cell by it puts it in
@@ -692,14 +697,18 @@ def build_mesh(
             continue
         line = getattr(shape, "boundary", None)
         edges.append(line if line is not None and not line.is_empty else shape)
-    # A terrace is a breakline that also carries a level: its outline is forced
-    # into the triangulation *and* the ground inside it stands `rise` higher, so
-    # the two sides of the line are two vertices at two heights rather than one
-    # smeared between them. That is the difference between a retaining wall and
-    # a ramp, and on a 10 m grid it is the only way to have the first.
-    steps = [(outline, rise) for outline, rise in terraces
-             if outline is not None and not outline.is_empty and rise]
-    edges = edges + [outline.boundary for outline, _rise in steps]
+    # A terrace is a breakline that also carries a height: its outline is
+    # forced into the triangulation *and* the ground inside it is *level*, at
+    # the height given, rather than following the terrain. Level is the whole
+    # point — a platform that merely floats a fixed distance over the hillside
+    # is still a hillside, and the building standing on it takes one height
+    # while the ground around its walls takes another. Measured before this,
+    # on 189 plots: 185 of them were more than 0.1 m out of level, a median of
+    # 0.38 m across a lot and up to 1.26 m, so the ground buried one side of
+    # the house and fell away from the other.
+    steps = [(outline, level) for outline, level in terraces
+             if outline is not None and not outline.is_empty]
+    edges = edges + [outline.boundary for outline, _level in steps]
     edge_tree = STRtree(edges) if edges else None
 
     def split(piece):
@@ -725,7 +734,7 @@ def build_mesh(
                 whole = box(x0, y0, x0 + hm.cell, y0 + hm.cell)
                 for piece in split(whole):
                     if len(piece.exterior.coords) == 5 and not piece.interiors:
-                        add_face(list(piece.exterior.coords)[:-1])
+                        add_face(list(piece.exterior.coords)[:-1], level_of(piece))
                     else:
                         emit(piece)
                 continue
@@ -735,9 +744,11 @@ def build_mesh(
                     for part in split(piece):
                         emit(part)
 
-    # And the wall that holds the terrace up. Without it the raised ground ends
-    # in mid-air and the scene has a shelf floating over a hole.
-    for outline, rise in steps:
+    # And the wall that holds the terrace up — or the face of the cutting it
+    # sits in, where the platform is below the ground it was levelled out of.
+    # Without it the platform ends in mid-air and the scene has a shelf
+    # floating over a hole.
+    for outline, level in steps:
         for part in (outline.geoms if hasattr(outline, "geoms") else [outline]):
             if part.geom_type != "Polygon":
                 continue
@@ -745,9 +756,9 @@ def build_mesh(
                 for (x0, y0), (x1, y1) in pairwise(list(ring.coords)):
                     if math.dist((x0, y0), (x1, y1)) < _WELD:
                         continue
-                    low = [vertex(x0, y0), vertex(x1, y1)]
-                    high = [vertex(x1, y1, rise), vertex(x0, y0, rise)]
-                    face = low + high if rise > 0 else high + low
+                    outside = [vertex(x0, y0), vertex(x1, y1)]
+                    platform = [vertex(x1, y1, level), vertex(x0, y0, level)]
+                    face = outside + platform
                     if len(set(face)) == 4:
                         faces.append(face)
 

@@ -249,9 +249,7 @@ def build_city(
                 groups["Roofs"] = built["Roofs"]
             plots = built["plots"]
             stats["buildings"] = len(built["Buildings"])
-            steps += [(ring, building_options.terrace if building_options else
-                       buildings_module.BuildingOptions().terrace)
-                      for ring in built.get("terraces", ())]
+            steps += list(built.get("terraces", ()))
             if steps and verbose:
                 print(f"[build] terraces: {len(steps)} platform(s), the ground "
                       f"stepped and walled round each")

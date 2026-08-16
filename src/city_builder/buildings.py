@@ -831,8 +831,10 @@ def generate(
     from shapely.geometry import Polygon as ShapelyPolygon
 
     return {"Buildings": walls, "Roofs": roofs, "plots": records,
-            # The platforms, for the ground to step around. The lot's ring, not
-            # the building's: the whole lot is level and the wall runs round
-            # the lot, which is what makes it a plot rather than a plinth.
-            "terraces": [ShapelyPolygon(r["footprint"]) for r in records]
+            # The platforms, for the ground to be levelled onto. The lot's
+            # ring and the lot's own height: the whole lot is level and the
+            # wall runs round the lot, which is what makes it a plot rather
+            # than a plinth — and the height is the one the building is
+            # standing on, so the two cannot drift apart.
+            "terraces": [(ShapelyPolygon(r["footprint"]), r["base_z"]) for r in records]
             if options.terrace else []}
