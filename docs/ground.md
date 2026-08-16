@@ -3,9 +3,9 @@
 A design note, written before the work and kept as the record of why it is
 shaped the way it is: what was there, what the literature says, what this map
 actually measures, and the algorithm those three imply. Each stage names the
-measurement that decided whether it stayed. **Stages 1-3 are built** — see
-*What was built* below, including the two places the measurements contradicted
-the design. Stages 4-5 are not.
+measurement that decided whether it stayed. **Stages 1-4 are built** — see
+*What was built* below, including the places the measurements contradicted the
+design. Stage 5 is not.
 
 ## What was there before this
 
@@ -237,7 +237,7 @@ classes and decals.
 
 ## What was built
 
-Stages 1-3 are implemented on `feat/ground-cover`, and two things changed
+Stages 1-4 are implemented on `feat/ground-cover`, and several things changed
 against the design above once they were measured.
 
 **The elevation model's *values* are not used, only its curvature.** Screening
@@ -269,6 +269,35 @@ block are cancelled by the roads.** Measured on Kashiwanoha, the relief left in
 the block interiors was 0.18 m for 200 m features and 0.45 m for 60 m ones at
 the same amplitude, because the roads pin the low frequencies and only what
 fits between them survives.
+
+**The seam's error was not where the tolerance was.** Stage 4 was written as
+"the snap is approximate where it could be exact", and the snap turned out to
+be the harmless half of it: on Kashiwanoha the 50 mm test and an exact
+on-the-outline test classify the same 1219 of the ground's 1714 vertices, and
+the vertices it classifies do lie on the outline — to 6e-15 m, because the clip
+computes them from it. What was wrong was the *height* it then looked up: the
+lowest road boundary **sample** within a metre, where a lanelet's boundary is
+only sampled at its own vertices. A straight lanelet has two of them, so the
+ball is usually empty and the fallback took the nearest boundary vertex
+anywhere on the map. Reading the carriageway edge where the vertex actually
+sits takes the worst seam gap from **0.21 m to 9e-16 m**, and the drop that
+used to absorb the residual is now only a kerb.
+
+**The forced edges pay for something else, and not on this map.** With the
+seam heights fixed, the constrained triangulation buys the guarantee that the
+ground tiles its region — the unconstrained Delaunay that came before kept
+whichever triangles had their representative point inside the clipped piece,
+one point per triangle. On Kashiwanoha both tile it exactly and neither puts
+any ground over the carriageway; the failure only shows on synthetic junctions,
+where two lanelets meeting obliquely left 15.7 m2 of ground lying on the road,
+13.2 of it in one triangle. So this half is insurance, bought at 0.246 s to
+0.289 s of mesh build and 1724 faces to 1744.
+
+**Constrain each cell, not the region.** A constrained Delaunay adds no points
+of its own, so handing it the whole ground region would span each city block
+with a handful of long triangles and never sample the height map between the
+roads. Clipping cell by cell and constraining each piece keeps the grid lines
+as constraints too, which is what holds the 10 m resolution away from the kerb.
 
 ## The order to do it in
 

@@ -161,11 +161,14 @@ def test_ground_mesh_meets_the_road_edge_at_its_height():
 
 
 def test_ground_mesh_holds_the_seam_below_the_carriageway():
-    """The clip only places a seam vertex where the outline crosses a cell edge.
+    """The drop is a kerb, not a fudge.
 
-    A seam segment can therefore be metres long, and its linear interpolation
-    rides above a sloping carriageway in between — 3 cm on a real map. The drop
-    absorbs that, and a few centimetres at the kerb is what a kerb looks like.
+    It used to be both: the seam only had a vertex where the outline crossed a
+    cell edge, so its linear interpolation rode up to 3 cm above a sloping
+    carriageway in between, and the drop absorbed that. The seam now follows
+    the kerb to floating point and there is nothing left to absorb — the drop
+    stays because ground that meets asphalt dead level reads as a painted edge
+    rather than an edge of the road.
     """
     road = _ribbon(1, -5.0, 55.0, 25.0, 1.0, width=8.0)
     mesh = gr.build_mesh(_flat_heightmap(), [road], elevated=set(), drop=0.05)
@@ -179,6 +182,121 @@ def test_ground_mesh_runs_under_a_viaduct():
     hm = _flat_heightmap()
     mesh = gr.build_mesh(hm, [deck], elevated={7})
     assert len(mesh.faces) == (hm.nx - 1) * (hm.ny - 1), "nothing is cut away"
+
+
+def _sloping_road(rid=1, x0=-5.0, x1=55.0, y=25.0, z0=1.0, z1=2.0, width=8.0):
+    """One lanelet climbing along its length, so every seam vertex wants a
+    different height and no single sample can stand in for the edge."""
+    half = width / 2
+    left = [(x0, y + half, z0), (x1, y + half, z1)]
+    right = [(x0, y - half, z0), (x1, y - half, z1)]
+    return Ribbon(rid, left, right)
+
+
+def test_the_ground_meets_the_road_at_its_own_height():
+    """The seam takes the carriageway's height *at that point*, exactly.
+
+    The rule this replaces looked up the lowest road boundary sample within a
+    metre of the vertex, which on a climbing road is a sample belonging to a
+    different part of it. Measured on Kashiwanoha, that put the seam up to
+    0.21 m away from the carriageway it touches; reading the edge where the
+    vertex actually sits leaves 9e-16 m.
+    """
+    road = _sloping_road()
+    mesh = gr.build_mesh(_flat_heightmap(), [road], elevated=set(), drop=0.0)
+    verts = np.array(mesh.vertices)
+
+    on_edge = (np.abs(np.abs(verts[:, 1] - 25.0) - 4.0) < 1e-9) & (verts[:, 0] > 1.0) & (verts[:, 0] < 49.0)
+    assert on_edge.sum() > 4
+    want = 1.0 + (verts[on_edge, 0] + 5.0) / 60.0
+    assert verts[on_edge, 2] == pytest.approx(want, abs=1e-9)
+
+
+def test_the_seam_ignores_a_carriageway_it_does_not_touch():
+    """A road nearby is not the road this vertex is on.
+
+    The rule this replaces searched a metre for a road boundary *sample*, and a
+    lanelet's boundary is only sampled where it has a vertex — so on a long
+    straight lanelet the ball was usually empty and the fallback took the
+    nearest boundary vertex anywhere on the map. Here that is the side road's,
+    ten metres off and 20 cm lower, and the ground dropped to meet a road it
+    does not touch.
+    """
+    through = _ribbon(1, -5.0, 55.0, 25.0, 1.0, width=8.0)  # edges at y = 21 and 29
+    side = Ribbon(2, [(20.5, 29.0, 0.8), (20.5, 45.0, 0.8)],
+                  [(24.5, 29.0, 0.8), (24.5, 45.0, 0.8)])  # joins the top edge
+    mesh = gr.build_mesh(_flat_heightmap(), [through, side], elevated=set(), drop=0.0)
+    verts = np.array(mesh.vertices)
+
+    approach = (np.abs(verts[:, 1] - 29.0) < 1e-9) & (verts[:, 0] < 20.0)
+    assert approach.sum() >= 2
+    assert verts[approach, 2] == pytest.approx(1.0, abs=1e-9)
+
+
+def _oblique_junction():
+    """Two lanelets meeting at an angle, leaving a wedge of ground between them.
+
+    The wedge is narrow, sits inside one grid cell and is what a clip has to
+    get right; the coordinates are a case found by sweeping random lanelet
+    pairs for the one that broke the triangulation hardest.
+    """
+    return [
+        Ribbon(1, [(17.15, 21.95, 1.0), (26.15, 49.95, 1.0)],
+               [(22.85, 20.05, 1.0), (31.85, 48.05, 1.0)]),
+        Ribbon(2, [(26.35, 22.20, 1.0), (50.35, 15.20, 1.0)],
+               [(25.65, 19.80, 1.0), (49.65, 12.80, 1.0)]),
+    ]
+
+
+def _plan_area(mesh):
+    from shapely.geometry import Polygon as ShapelyPolygon
+
+    verts = np.array(mesh.vertices)
+    return sum(abs(ShapelyPolygon(verts[face][:, :2]).area) for face in mesh.faces)
+
+
+def test_the_ground_tiles_its_region_exactly():
+    """Forced edges, for the reason beyond the seam heights.
+
+    The unconstrained Delaunay this replaces triangulated the clipped cell's
+    vertices and then kept the triangles whose representative point landed
+    inside it — a test of one point per triangle. A triangle straddling a
+    concave clip can pass that test with a third of itself outside, or fail it
+    with most of itself inside; either way the ground stops tiling the region
+    it was cut to. On this junction it laid 15.7 m2 of ground over the
+    carriageway, 13.2 of it in a single triangle.
+    """
+    from shapely.geometry import box
+
+    hm = _flat_heightmap()
+    mesh, roads = gr.build_mesh(hm, _oblique_junction(), elevated=set(), return_road_union=True)
+    extent = box(hm.x0, hm.y0, hm.x0 + (hm.nx - 1) * hm.cell, hm.y0 + (hm.ny - 1) * hm.cell)
+    assert _plan_area(mesh) == pytest.approx(extent.difference(roads).area, abs=1e-6)
+
+
+def test_no_ground_triangle_reaches_over_the_carriageway():
+    """The same 15.7 m2, seen as what it looks like in the scene.
+
+    Ground lying on the road is not a small error: it is opaque, it is at the
+    height of the kerb rather than the asphalt, and it z-fights the road
+    surface it covers.
+    """
+    from shapely.geometry import Polygon as ShapelyPolygon
+
+    mesh, roads = gr.build_mesh(_flat_heightmap(), _oblique_junction(), elevated=set(),
+                                return_road_union=True)
+    verts = np.array(mesh.vertices)
+    for face in mesh.faces:
+        assert ShapelyPolygon(verts[face][:, :2]).intersection(roads).area < 1e-9
+
+
+def test_build_mesh_no_longer_accepts_the_snapping_options():
+    """Retired with the heuristic, rather than left to be silently ignored."""
+    road = _ribbon(1, -5.0, 55.0, 25.0, 1.0, width=8.0)
+    with pytest.raises(TypeError):
+        gr.build_mesh(_flat_heightmap(), [road], elevated=set(), snap_tolerance=0.05)
+    with pytest.raises(TypeError):
+        gr.build_mesh(_flat_heightmap(), [road], elevated=set(), seam_radius=1.0)
 
 
 def test_ground_mesh_faces_are_upward_and_non_degenerate():
