@@ -61,6 +61,7 @@ def build_materials() -> dict[str, object]:
         # and the bank. So the base is nearly black and the roughness is far
         # below anything else in this list, which is what makes it reflect.
         "water": _material("CityWater", (0.02, 0.04, 0.05), 0.06, 0.7),
+        "fence": _material("CityFence", (0.30, 0.31, 0.30), 0.45, 0.4),
     }
 
 

@@ -67,6 +67,7 @@ def build_city(
     marking_options: MarkingOptions | None = None,
     extend_options: ExtendOptions | None = None,
     cover_options=None,
+    fence_options=None,
     verbose: bool = True,
 ) -> BuildResult:
     """Read a map and produce every surface, without touching Blender.
@@ -266,6 +267,26 @@ def build_city(
         if water_meshes:
             groups["Water"] = water_meshes
             stats["water"] = [body.to_json() for body in water]
+
+        # The railings go on the same lines the ground was told to break
+        # along, because those are the lines a person cannot walk over: the
+        # shoreline, and a retaining wall high enough to fall off. The
+        # carriageway is cut out of them — a road beside a pond gets a
+        # guardrail, which is road furniture and a different profile.
+        if water or steps:
+            from . import fences as fences_module
+
+            plot_rings = unary_union_of([ring for ring, _level in steps])
+            railings = fences_module.build(heightmap, water=water, terraces=steps,
+                                           roads=road_union, keep_clear=plot_rings,
+                                           options=fence_options)
+            if railings["mesh"].faces:
+                groups["Fences"] = [railings["mesh"]]
+                stats["fences"] = {k: v for k, v in railings.items() if k != "mesh"}
+                if verbose:
+                    print(f"[build] fences: {railings['metres']:.0f} m in "
+                          f"{railings['runs']} run(s), {railings['posts']} post(s) — "
+                          f"{railings['shoreline_runs']} along water")
 
         # An elevated lanelet is surveyed as a driving surface and nothing
         # else: no slab, no soffit, no columns. Which *parts* of it are a bridge
@@ -523,6 +544,14 @@ def infill_roads(groups: dict[str, list], options, elevated: set[int] | None = N
     return len(meshes), area
 
 
+def unary_union_of(shapes):
+    """One geometry from many, or None. Saves four lines at three call sites."""
+    from shapely.ops import unary_union
+
+    kept = [s for s in shapes if s is not None and not s.is_empty]
+    return unary_union(kept) if kept else None
+
+
 def _relief_of(g):
     """The invented-terrain settings, as the dataclass that generates it."""
     if not getattr(g, "relief", False):
@@ -538,7 +567,7 @@ def build_city_from_config(input_path: str, config, *, buildings: bool = False,
                            ref_lat: float | None = None, ref_lon: float | None = None,
                            projector: str = "utm", z_datum: float | None = None,
                            z_offset: float = 0.0, cover_options=None,
-                           verbose: bool = True) -> BuildResult:
+                           fence_options=None, verbose: bool = True) -> BuildResult:
     """:func:`build_city`, with every option group taken from a
     :class:`city_builder.config.CityConfig`.
 
@@ -558,7 +587,7 @@ def build_city_from_config(input_path: str, config, *, buildings: bool = False,
         relief=_relief_of(g),
         buildings=buildings, building_options=config.buildings,
         viaduct_options=config.viaduct, extend_options=config.extend,
-        cover_options=cover_options, verbose=verbose,
+        cover_options=cover_options, fence_options=fence_options, verbose=verbose,
     )
 
 
