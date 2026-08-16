@@ -203,6 +203,37 @@ Three pictures, three meshes, on the same plot: footprint IoU 0.878, 0.884,
 0.884. The envelope owns the plan, so the picture only decides whether the
 result is a *building* or a slab.
 
+## The model does not fill its envelope, and that is a height bug
+
+The clearest defect the first whole-map run turned up, and it is only visible
+at district scale: every building was short. Over 185 reconstructions the
+height came to **0.81 of the block height they were given**, 174 of them more
+than a tenth short, against **1.25** for the image-to-3D path — which invents
+its own massing and puts a roof on top of it.
+
+Two things are going on and only one is a surprise. A roof rises, so a building
+*should* stand above its block; `eave_room` had already given the roof somewhere
+to overhang in plan and nothing gave it anywhere to rise. But the shape model
+also does not reach the top of what it is handed: on a 6 m block with no
+headroom it returned 4.8 m.
+
+The allowance is a **fraction** of the block, not metres — a metre of ridge on
+a shed is a different building and on an office block is nothing. One plot per
+storey count:
+
+| block | headroom | result | vs block | IoU |
+|---|---|---|---|---|
+| 3 m (1 storey) | 0 | 2.8 m | 0.92 | 0.888 |
+| 3 m | 40 % | 3.7 m | **1.23** | 0.874 |
+| 6 m (2 storeys) | 0 | 4.8 m | 0.81 | 0.920 |
+| 6 m | 40 % | 7.5 m | **1.26** | 0.926 |
+| 9 m (3 storeys) | 0 | 7.7 m | 0.86 | 0.929 |
+
+0.4 lands on the other path's 1.25 at every storey count and the footprint is
+unmoved. It buys a hip line as well, though only a slight one: the envelope is
+a box and what is generated inside it stays boxy, which is the trade this route
+makes and not a defect in it.
+
 ## A finer grid is worse, and it was not a mismatch
 
 The earlier table showed grid 64 losing to grid 32, and the obvious explanation
@@ -232,3 +263,34 @@ on the shipped path too.
 | mesh → texture | the map's, exactly | invented | exact | 26 s |
 | envelope → 3D, from a render | invented inside the map's | invented | 0.882 | 9 s |
 | **envelope → 3D, from a photograph** | invented inside the map's | **photographed** | 0.85–0.97 | 9 s |
+
+## Both routes over the whole map, 189 plots
+
+| | used | mean IoU | median | **max stretch** | median time |
+|---|---|---|---|---|---|
+| image → 3D | 184/189 | 0.912 | 0.916 | **1.15** | 16 s |
+| envelope → 3D | 185/189 | 0.904 | 0.908 | **1.00** | 31 s |
+
+The IoU is a wash and the stretch column is the point: the image-to-3D path
+reaches 0.912 by squeezing meshes up to 15 % along the plot's long axis, and
+the envelope reaches 0.904 with no distortion at all, because there is nothing
+to correct. It is slower per building here rather than faster — the 9 s figure
+was one plot at 512 with a warm pipeline, and a real run pays for the mesher
+and the GLB as well.
+
+Side by side at district scale the trade is plain, and it is not the one the
+IoU measures. The envelope street has actual materials — dark timber lattice,
+corrugated metal, kawara, cream stucco, weathering — where the image-to-3D
+street is a uniform grey-blue with windows painted on. The image-to-3D street
+has crisper geometry: real hips and gables, where a box envelope filled in
+gives a shallow hip at best.
+
+## Still open
+
+- **Memory.** The mesher wants a large contiguous allocation and does not
+  always get one: 7 buildings in 61 were lost before `district._release_the_card`
+  made the retry give the allocator its blocks back, and 1 in 128 after.
+- **`texture_mesh`'s GLB placement**, from the first half of this document.
+- **Subdividing the envelope.** Nothing here has tried giving the prism a
+  pitched top rather than a flat one, which is the obvious way to get a roof
+  form as well as a roof material out of it.
