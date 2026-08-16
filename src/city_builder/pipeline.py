@@ -112,6 +112,14 @@ class Recipe:
     facade_variants: int = 4
     facade_count: int = 4
     facade_keep_below: float | None = 0.45
+    house_floors: int = 3        # at or below this a building is a house
+    # How hard the line drawing holds the windows on the storeys. 1.2 rather
+    # than the library's 0.9: on this map's 1-3 storey controls, the share of
+    # sheets scoring at least 0.45 goes 47 % -> 64 %, and pushing on to 1.5 or
+    # 1.8 buys nothing more (61 %, 64 %) while the mean keeps drifting up on
+    # sheets that were already good. Diversity is unmoved at 0.28-0.29
+    # throughout, so this is not bought by making every wall the same.
+    control_scale: float = 1.2
 
     # --- reconstruction -------------------------------------------------
     resolution: str = "512"
@@ -269,7 +277,7 @@ def _facades(map_path, out_dir, config, recipe, state, *, force, verbose):
     puts six rows of windows on three storeys.
     """
     from .facade_layout import draw_family
-    from .texture import FacadeOptions, paint_family
+    from .texture import FacadeOptions, paint_family, styles_named
 
     floors = state.get("floors") or [1, 2, 3]
     layouts = os.path.join(out_dir, "layouts")
@@ -282,10 +290,21 @@ def _facades(map_path, out_dir, config, recipe, state, *, force, verbose):
     if verbose:
         print(f"[pipeline] {len(drawn['sheets'])} layout(s), "
               f"floor alignment {drawn['floor_alignment']:.2f}")
+    # What a wall is faced with depends on how tall the building is. Below
+    # `recipe.house_floors` it is a house and gets the residential half of the
+    # set; above it, the commercial mid-rise half. Handed the whole set for a
+    # street of two-storey houses, the model returns an office block on every
+    # plot — which is what the first run through this pipeline produced.
+    def styles_for(count: int):
+        from .texture import RESIDENTIAL_STYLES
+
+        return styles_named(RESIDENTIAL_STYLES) if count <= recipe.house_floors else None
+
     painted = paint_family(drawn["control_dir"], sheets, floors=floors,
-                           keep_below=recipe.facade_keep_below,
+                           keep_below=recipe.facade_keep_below, styles=styles_for,
                            options=FacadeOptions(count=recipe.facade_count,
-                                                 seed=recipe.seed))
+                                                 seed=recipe.seed,
+                                                 control_scale=recipe.control_scale))
     if verbose:
         print(f"[pipeline] {painted['written']} sheet(s) in {painted['seconds']:.0f}s, "
               f"floor alignment {painted['floor_alignment']:.2f}, "

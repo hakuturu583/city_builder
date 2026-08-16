@@ -579,7 +579,7 @@ def seam_error_axis(tile: np.ndarray, axis: int) -> float:
 
 def paint_family(control_dir: str, output_dir: str, *, prompt=None,
                  negative_prompt: str = "", floors: Sequence[int] | None = None,
-                 keep_below: float | None = None,
+                 keep_below: float | None = None, styles=None,
                  options: FacadeOptions | None = None) -> dict[str, Any]:
     """Diffusion sheets for a family of control drawings, scored as they are made.
 
@@ -591,6 +591,11 @@ def paint_family(control_dir: str, output_dir: str, *, prompt=None,
     ``prompt`` defaults to a spread across :data:`FACADE_STYLES`. Leaving it
     fixed quietly produces a city of one material, because the alignment score
     cannot see colour and will not complain.
+
+    ``styles`` narrows that spread, and may be a callable taking the floor
+    count — which is the useful form, because what a building is faced with
+    depends on how tall it is. A two-storey building on a Japanese street is a
+    house, and the commercial half of the set puts an office block on it.
     """
     import os
     import time
@@ -618,8 +623,10 @@ def paint_family(control_dir: str, output_dir: str, *, prompt=None,
     written, dropped, scores, kept = 0, 0, [], []
     for index, (count, path) in enumerate(controls):
         control = np.asarray(Image.open(path).convert("RGB"))
-        prompts = prompt or styled_prompts(options.count,
-                                           seed=options.seed + index * options.count)
+        here = styles(count) if callable(styles) else styles
+        prompts = prompt or styled_prompts(
+            options.count, seed=options.seed + index * options.count,
+            styles=here if here is not None else FACADE_STYLES)
         for sheet in facade_sheets(prompts, control, options,
                                    negative_prompt=negative_prompt, pipeline=pipeline):
             floor_score = alignment(sheet, control, axis=0)
