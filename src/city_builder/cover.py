@@ -406,11 +406,14 @@ class WaterBody:
     cells: int                   # cover cells that survived that cut
     fall: float                  # relief the interpolation had put across it
     polygon: Any = None          # the shoreline in plan, shapely
+    painted: Any = None          # what was asked for, before the grid had its say
 
     def to_json(self) -> dict[str, Any]:
+        asked = float(self.painted.area) if self.painted is not None else self.area
         return {"level": round(self.level, 3), "bank": round(self.bank, 3),
-                "area": round(self.area, 1), "cells": self.cells,
-                "fall": round(self.fall, 3)}
+                "area": round(self.area, 1), "asked_for": round(asked, 1),
+                "held": round(self.area / asked, 3) if asked else None,
+                "cells": self.cells, "fall": round(self.fall, 3)}
 
 
 class _Plan(NamedTuple):
@@ -436,7 +439,8 @@ def paints_water(options: CoverOptions, *, name: str = WATER) -> bool:
 
 
 def flatten_water(heightmap, cover: CoverMap, *, name: str = WATER,
-                  freeboard: float = 0.05, smallest: float = 8.0) -> list[WaterBody]:
+                  freeboard: float = 0.05, smallest: float = 8.0,
+                  bank: float = 20.0, depth: float = 0.6) -> list[WaterBody]:
     """Level the ground under each body of standing water. Edits ``heightmap``.
 
     The interpolation has no idea what it is drawing: it runs the same smooth
@@ -446,8 +450,15 @@ def flatten_water(heightmap, cover: CoverMap, *, name: str = WATER,
     30 m — the ground under it dropped **1.62 m from one shore to the other**
     before this ran, and 0.00 m after.
 
-    **Each body takes the height of the lowest ground around it**, less
-    ``freeboard``. That is not caution, it is where the water is: a basin fills
+    **A painted body of water is an excavation, not a discovery.** It is said
+    with :class:`Region` — somebody decided there is a pond here — so the
+    ground is made to hold one: the bed is cut ``depth`` below the water line
+    across the whole body. Without that, only the part of the region that
+    happened to be under the level held water, and on a slope that was 37 % of
+    a 14 m square and 58 % of a 28 m one; the rest was quietly discarded, so a
+    caller got back a smaller pond than they drew and no word about it.
+
+    **The level is the lowest ground within ``bank`` metres**, less That is not caution, it is where the water is: a basin fills
     until it spills over the lowest point of its rim, so the pour point *is* the
     level. The alternatives were run on that pond and both stand proud of the
     bank. The **mean** of the region lands 0.87 m above the lowest shore — a
@@ -458,6 +469,36 @@ def flatten_water(heightmap, cover: CoverMap, *, name: str = WATER,
     *inside* the water is above the lowest point just outside it. Nor is there a
     percentile of the shore to tune, because anything above the shore's minimum
     is above some part of the bank by construction.
+
+    **A pond smaller than a few height cells cannot be built, and says so.**
+    The bed is dug by moving height-grid *nodes*, so the sharpest edge the
+    ground can take is one cell wide, and a shoreline that falls between nodes
+    is a ramp rather than a bank. What is above the water line is then cut out
+    of the sheet, and a caller who painted a small pond gets a smaller one.
+    Measured with a 28 m square on this map:
+
+    ======================  ==================
+    ``ground.cell``         of the pond held
+    ======================  ==================
+    10 m (the default)      40 %
+    6 m                     49 %
+    4 m                     46 %
+    2.5 m                   **100 %**
+    ======================  ==================
+
+    So a scene with water in it wants a height grid of roughly a tenth of its
+    smallest pond, and :func:`city_builder.build.build_city` says so at build
+    time rather than leaving a caller to wonder where their water went.
+
+    ``bank`` is 20 m and not one cell of shoreline, and that is the correction
+    this made after the first version shipped. Taking the rim as the ring of
+    cover cells touching the water asks whether the ground rises over 2 m, and
+    on a hillside it does — measured on the steepest open block here, the ring
+    2 m out sat 0.03 m above the water line and the ground went on falling to
+    0.98 m below it by 40 m out. So the pond stood on a rise with the land
+    dropping away on every side, which water does not do, and from a low camera
+    the sheet occluded the streets behind it and read as a flood. Asking over a
+    real distance is asking whether there is a basin.
 
     Connectivity is taken on the cover grid rather than the height grid, at 2 m
     against 10 m: two ponds 4 m apart are two ponds with two levels, and the
@@ -513,10 +554,15 @@ def flatten_water(heightmap, cover: CoverMap, *, name: str = WATER,
         cells = tags == tag
         if float(cells.sum()) * cover.cell ** 2 < smallest:
             continue
-        shore = binary_dilation(cells, structure=cross) & ~wet
         inside = sample(cells)
-        bank = float(sample(shore).min()) if shore.any() else float(inside.min())
         outline = _cells_to_polygon(cells, cover)
+        # The rim, at a distance that can tell a basin from a hummock: every
+        # cover cell within `bank` of the water and not water itself.
+        rim = prep(outline.buffer(bank))
+        around = np.array([[rim.contains(Point(x, y)) for x in xs]
+                           for y in ys]) & ~wet
+        shore = around if around.any() else (binary_dilation(cells, structure=cross) & ~wet)
+        rim_z = float(sample(shore).min()) if shore.any() else float(inside.min())
         # A node is under the water when the body reaches within half a height
         # cell of it, rather than when the water covers the node itself. That is
         # the difference between a pond and an eighth of one: the 784 m2 pond
@@ -530,18 +576,25 @@ def flatten_water(heightmap, cover: CoverMap, *, name: str = WATER,
             cells=cells,
             nodes=np.array([[reach.contains(Point(x, y)) for x in node_x]
                             for y in node_y]),
-            level=bank - freeboard, bank=bank,
+            level=rim_z - freeboard, bank=rim_z,
             fall=float(inside.max() - inside.min())))
 
     for plan in plans:
-        heightmap.z[plan.nodes] = plan.level
+        # Dug, not merely levelled: every node the body reaches goes to the bed,
+        # which is `depth` under the water line. Levelling to the line itself
+        # left the bed and the sheet coplanar, and left any node that was
+        # already lower standing proud of nothing.
+        heightmap.z[plan.nodes] = np.minimum(heightmap.z[plan.nodes],
+                                             plan.level - depth)
 
     bodies: list[WaterBody] = []
-    for cells, _nodes, level, bank, fall in plans:
-        # The shoreline is where the ground reaches the water, not where the
-        # class grid stops. A cover cell whose ground is still above the level —
-        # the fringe of a pond too small for the height grid to be bent around —
-        # is bank, and painting water over it would leave a sheet in mid-air.
+    for cells, _nodes, level, rim_z, fall in plans:
+        # The shoreline is still where the ground reaches the water rather than
+        # where the class grid stops — a cell the height grid could not be bent
+        # far enough under is bank, and a sheet over it would hang in mid-air.
+        # With the bed dug rather than levelled this now keeps everything on
+        # all the ponds measured, but the check is cheap and the failure it
+        # catches is a sheet of water standing on a hillside.
         keep = np.zeros_like(cells)
         rows, cols = np.nonzero(cells)
         keep[rows, cols] = [heightmap.sample(xs[i], ys[j]) <= level + 1e-6
@@ -549,8 +602,9 @@ def flatten_water(heightmap, cover: CoverMap, *, name: str = WATER,
         if not keep.any():
             continue
         outline = _cells_to_polygon(keep, cover)
-        bodies.append(WaterBody(level=level, bank=bank, area=float(outline.area),
-                                cells=int(keep.sum()), fall=fall, polygon=outline))
+        bodies.append(WaterBody(level=level, bank=rim_z, area=float(outline.area),
+                                cells=int(keep.sum()), fall=fall, polygon=outline,
+                                painted=_cells_to_polygon(cells, cover)))
     return bodies
 
 

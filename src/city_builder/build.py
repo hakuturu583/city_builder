@@ -192,10 +192,15 @@ def build_city(
                 water_meshes = cover_module.water_surface(water)
                 if verbose:
                     for body in water:
-                        print(f"[build] water: {body.area:.0f} m2 levelled at "
-                              f"{body.level:+.2f} m, its bank at {body.bank:+.2f} m; "
-                              f"the interpolation had it falling {body.fall:.2f} m "
-                              f"across")
+                        report = body.to_json()
+                        print(f"[build] water: {body.area:.0f} m2 at {body.level:+.2f} m, "
+                              f"its bank at {body.bank:+.2f} m; the interpolation had it "
+                              f"falling {body.fall:.2f} m across")
+                        if report["held"] is not None and report["held"] < 0.9:
+                            print(f"[build] water: only {report['held'] * 100:.0f}% of the "
+                                  f"{report['asked_for']:.0f} m2 painted holds water — the "
+                                  f"ground grid is {cell:g} m and cannot cut a bank inside "
+                                  f"one cell. Try ground.cell of about a tenth of the pond.")
 
         mesh, road_union = ground_module.build_mesh(heightmap, surfaces, elevated,
                                                     fill_island=fill_island, drop=ground_drop,
@@ -254,10 +259,14 @@ def build_city(
         if water:
             # The plot generator reads a pond as open ground with no road
             # anywhere near it, which is its idea of a good place to build.
+            # What is kept clear is what was *painted*, not the sheet that
+            # ended up on it: the dry margin of a pond the grid could not cut
+            # is the inside of an excavation, and a house belongs there even
+            # less than one in the water.
             from shapely.ops import unary_union
 
-            keep_clear = unary_union([keep_clear,
-                                      *(b.polygon for b in water if b.polygon is not None)])
+            keep_clear = unary_union([keep_clear, *(b.painted if b.painted is not None
+                                                    else b.polygon for b in water)])
         built = buildings_module.generate(heightmap, keep_clear, building_options)
         if built["Buildings"]:
             groups["Buildings"] = built["Buildings"]
