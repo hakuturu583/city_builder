@@ -57,9 +57,13 @@ COVER_PROMPTS: dict[str, str] = {
                      "narrow joints, overcast daylight, seamless texture",
     "concrete": "top-down photograph of a plain grey concrete slab, faint stains, "
                 "overcast daylight, seamless texture",
-    "asphalt": "top-down photograph of worn dark asphalt road surface, fine aggregate, "
-               "overcast daylight, seamless texture",
 }
+# The carriageway is deliberately absent. The ground cover is what lies
+# *between* the roads; the road surface is the map's own, it already carries
+# its paint baked into an atlas at its own texel density, and a tile generated
+# from the same "seamless ground texture" prompt as a lawn came out as a field
+# of speckle with lane lines through it. A road wants a road texture, given to
+# `build_scene` as `road_texture`, not a ground cover class.
 
 ROOF_PROMPT = ("top-down photograph of grey Japanese kawara roof tiles in even courses, "
                "overcast daylight, seamless texture")
@@ -325,7 +329,6 @@ def _scene(map_path, out_dir, config, recipe, state, *, force, verbose):
             handle, ledger, facade_dir=_dir(out_dir, "facades"),
             roof_texture=_file(out_dir, "tiles", "kawara.png"),
             roof_tile_metres=recipe.roof_tile_metres,
-            road_texture=_file(out_dir, "tiles", "asphalt.png"),
             cover_options=_cover(out_dir, config),
             cover_path=os.path.join(out_dir, "ground.png"),
             cover_texels_per_metre=recipe.cover_texels_per_metre,
@@ -334,7 +337,6 @@ def _scene(map_path, out_dir, config, recipe, state, *, force, verbose):
         build_scene(result, facade_dir=_dir(out_dir, "facades"),
                     roof_texture=_file(out_dir, "tiles", "kawara.png"),
                     roof_tile_metres=recipe.roof_tile_metres,
-                    road_texture=_file(out_dir, "tiles", "asphalt.png"),
                     cover_options=_cover(out_dir, config),
                     cover_path=os.path.join(out_dir, "ground.png"),
                     cover_texels_per_metre=recipe.cover_texels_per_metre,

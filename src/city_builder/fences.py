@@ -131,7 +131,8 @@ def along(lines: Sequence[Sequence[Sequence[float]]], height_at,
 
 
 def water_edges(bodies: Sequence[Any], height_at=None, roads=None,
-                options: FenceOptions | None = None) -> list[list[tuple[float, float]]]:
+                options: FenceOptions | None = None,
+                within=None) -> list[list[tuple[float, float]]]:
     """The bank of every body, less whatever the carriageway covers.
 
     The *bank*, not the waterline, and the bank is found rather than guessed. A
@@ -156,7 +157,7 @@ def water_edges(bodies: Sequence[Any], height_at=None, roads=None,
         if height_at is not None and level is not None:
             rim = _walk_to_the_bank(rim, level, height_at, options)
         rims.append(rim)
-    return _edges(rims, roads, options)
+    return _edges(rims, roads, options, within=within)
 
 
 def _walk_to_the_bank(rim, level: float, height_at, options: FenceOptions,
@@ -188,7 +189,8 @@ def _walk_to_the_bank(rim, level: float, height_at, options: FenceOptions,
 
 
 def terrace_edges(terraces: Sequence[tuple[Any, float]], height_at, roads=None,
-                  options: FenceOptions | None = None) -> list[list[tuple[float, float]]]:
+                  options: FenceOptions | None = None,
+                  within=None) -> list[list[tuple[float, float]]]:
     """The edges of a platform that are a real drop, and only those.
 
     Measured a step outside the edge, against the platform's own level, because
@@ -230,10 +232,11 @@ def terrace_edges(terraces: Sequence[tuple[Any, float]], height_at, roads=None,
                         run = []
                 if run:
                     steep.append(LineString(run))
-    return _edges(steep, roads, options, already_lines=True)
+    return _edges(steep, roads, options, already_lines=True, within=within)
 
 
-def _edges(shapes, roads, options: FenceOptions, *, already_lines: bool = False):
+def _edges(shapes, roads, options: FenceOptions, *, already_lines: bool = False,
+           within=None):
     """Shapes to plan polylines, set back from the edge and off the carriageway."""
     from shapely.ops import unary_union
 
@@ -248,6 +251,12 @@ def _edges(shapes, roads, options: FenceOptions, *, already_lines: bool = False)
         line = shape if already_lines else shape.buffer(options.setback).boundary
         if roads is not None and not roads.is_empty:
             line = line.difference(roads)
+        # And inside the ground. A railing is set back from what it fences, so
+        # a pond near the edge of a map pushes its own railing off the end of
+        # the terrain — measured on a pond at the corner of Kashiwanoha, 9 m of
+        # it hanging in the air, which is exactly what a floating fence is.
+        if within is not None and not within.is_empty:
+            line = line.intersection(within)
         if line.is_empty:
             continue
         lines.append(line)
@@ -279,9 +288,18 @@ def build(heightmap, *, water: Sequence[Any] = (), terraces: Sequence = (),
         from shapely.ops import unary_union
 
         blocked = unary_union([g for g in (roads, keep_clear) if g is not None])
-    lines = water_edges(water, heightmap.sample, blocked, options)
+    # The ground the railing may stand on: the height map's own extent, less
+    # the outermost cell, because the mesh is built between grid nodes and the
+    # last row of nodes has no cell beyond it.
+    from shapely.geometry import box as shapely_box
+
+    ground = shapely_box(heightmap.x0 + heightmap.cell,
+                         heightmap.y0 + heightmap.cell,
+                         heightmap.x0 + (heightmap.nx - 2) * heightmap.cell,
+                         heightmap.y0 + (heightmap.ny - 2) * heightmap.cell)
+    lines = water_edges(water, heightmap.sample, blocked, options, within=ground)
     shore = len(lines)
-    lines += terrace_edges(terraces, heightmap.sample, blocked, options)
+    lines += terrace_edges(terraces, heightmap.sample, blocked, options, within=ground)
     mesh = along(lines, heightmap.sample, options)
     return {
         "mesh": mesh,
