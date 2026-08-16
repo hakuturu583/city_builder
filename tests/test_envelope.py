@@ -172,3 +172,40 @@ def test_the_frame_is_asked_for_and_not_only_the_building():
         assert wanted in prompt
     for unwanted in ("street scene", "sky", "adjacent buildings", "cropped"):
         assert unwanted in R.ISOLATED_NEGATIVE
+
+
+# ---------------------------------------------------------------------------
+# The card, before anything has claimed it
+# ---------------------------------------------------------------------------
+
+
+def test_the_allocator_is_configured_before_torch_can_read_it():
+    """`PYTORCH_CUDA_ALLOC_CONF` is read once, when the CUDA caching allocator
+    is first built, and ignored ever after. Setting it on the way into TRELLIS
+    is too late in a pipeline run — SDXL has already drawn the tiles and the
+    photographs — and what that costs is buildings: the mesher wants one large
+    contiguous block, and five plots in sixty died for want of one with 25 GB
+    of the card free."""
+    import os
+    import subprocess
+    import sys
+
+    got = subprocess.run(
+        [sys.executable, "-c",
+         "import city_builder, os; print(os.environ.get('PYTORCH_CUDA_ALLOC_CONF'))"],
+        capture_output=True, text=True, check=True,
+        env={k: v for k, v in os.environ.items() if k != "PYTORCH_CUDA_ALLOC_CONF"})
+    assert "expandable_segments:True" in got.stdout
+
+
+def test_an_allocator_setting_the_caller_chose_is_left_alone():
+    import os
+    import subprocess
+    import sys
+
+    got = subprocess.run(
+        [sys.executable, "-c",
+         "import city_builder, os; print(os.environ['PYTORCH_CUDA_ALLOC_CONF'])"],
+        capture_output=True, text=True, check=True,
+        env={**os.environ, "PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:128"})
+    assert got.stdout.strip() == "max_split_size_mb:128"

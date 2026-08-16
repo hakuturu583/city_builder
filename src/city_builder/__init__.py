@@ -12,6 +12,18 @@ at all, so the ground is reconstructed from the road elevations and clipped to
 the kerb line (see :mod:`city_builder.ground`).
 """
 
+import os as _os
+
+# Before anything imports torch, because this is read once — when the CUDA
+# caching allocator is first initialised — and ignored ever after. Two places
+# in this package set it on the way into a model, and both are too late in a
+# pipeline run: SDXL draws the ground tiles and the building photographs first,
+# and by the time TRELLIS.2 asks for expandable segments the allocator has
+# already been built without them. What that costs is buildings: the mesher
+# wants one large contiguous block and a fragmented arena cannot give it one,
+# and five plots in sixty died of it with 25 GB of the card free.
+_os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 from .build import BuildResult, build_city, build_scene, write_heightmap, write_manifest
 from .buildings import BuildingOptions
 from .classes import CLASSES, GENERATE, PRESERVE, SurfaceClass
