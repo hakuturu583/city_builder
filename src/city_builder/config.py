@@ -41,6 +41,12 @@ class GroundOptions:
     clearance: float = ground_module.DEFAULT_CLEARANCE  # above the street before a ramp is elevated
     drop: float = 0.05  # hold the ground this far under the road
     fill_island: float = 0.0  # absorb junction scraps below this area (m2)
+    order: int = ground_module.DEFAULT_ORDER  # 2 = thin plate, 1 = the old harmonic fill
+    # Take the *shape* of a published elevation model where one covers the map.
+    # Its heights are not used and its datum does not matter; see
+    # city_builder.elevation for why, and for the measurement behind it.
+    elevation_model: bool = False
+    elevation_cache: str | None = None
 
 
 @dataclass

@@ -190,3 +190,116 @@ def test_ground_mesh_faces_are_upward_and_non_degenerate():
         n = np.cross(pts[1] - pts[0], pts[2] - pts[0])
         assert np.linalg.norm(n) > 1e-9
         assert n[2] > 0
+
+
+# ---------------------------------------------------------------------------
+# Which energy the gaps are filled with
+#
+# The block interiors have no samples in them, so what fills them is entirely
+# decided by the operator. Two properties separate the two choices, and both
+# are visible in the result rather than only in the theory.
+# ---------------------------------------------------------------------------
+
+
+def _two_streets(z_low=0.0, z_high=0.0, span=90.0, step=6.0):
+    """Samples along two parallel streets with an empty block between them."""
+    points = []
+    for x in np.arange(0.0, span + step, step):
+        points.append((x, 0.0, z_low))
+        points.append((x, span, z_high))
+    return points
+
+
+def _slope(step=6.0, span=90.0, rise=3.0):
+    """Two streets, one higher than the other, with ground beyond both."""
+    points = []
+    for x in np.arange(0.0, span + step, step):
+        points.append((x, 30.0, 0.0))
+        points.append((x, 60.0, rise))
+    return points
+
+
+def test_a_harmonic_fill_is_trapped_inside_the_range_of_its_samples():
+    """The maximum principle, which is why order 1 is not the default.
+
+    A harmonic function never leaves the range of its constraints. Ground
+    beyond the last street therefore goes *flat* at that street's height
+    however steadily the streets were climbing, and no block interior can rise
+    above the roads around it — not unlikely under this operator, impossible.
+    """
+    hm = gr.build_heightmap(_slope(), cell=10.0, margin=30.0, smooth=0.0, drop=0.0,
+                            order=1)
+    assert hm.z.max() <= 3.0 + 1e-6 and hm.z.min() >= -1e-6
+
+
+def test_a_thin_plate_carries_the_grade_past_the_last_street():
+    """Same samples: the hill goes on rising instead of stopping at the kerb."""
+    hm = gr.build_heightmap(_slope(), cell=10.0, margin=30.0, smooth=0.0, drop=0.0,
+                            order=2)
+    assert hm.z.max() > 3.5, "the thin plate went flat at the last sample"
+    assert hm.z.min() < -0.5
+
+
+def test_both_orders_still_honour_the_samples_they_were_given():
+    points = _two_streets(z_low=0.0, z_high=4.0)
+    for order in (1, 2):
+        hm = gr.build_heightmap(points, cell=10.0, margin=0.0, smooth=0.0, drop=0.0,
+                                order=order)
+        for x, y, z in points:
+            assert hm.sample(x, y) == pytest.approx(z, abs=0.35)
+
+
+def test_the_solve_is_not_iterative_and_converges_exactly():
+    """400 Jacobi sweeps left a residual; a direct solve does not."""
+    points = _two_streets(z_low=0.0, z_high=5.0)
+    hm = gr.build_heightmap(points, cell=10.0, margin=0.0, smooth=0.0, drop=0.0, order=1)
+    z, known = hm.z, hm.support == 0
+    padded = np.pad(z, 1, mode="edge")
+    mean = (padded[:-2, 1:-1] + padded[2:, 1:-1] + padded[1:-1, :-2] + padded[1:-1, 2:]) * 0.25
+    assert np.abs((mean - z)[~known]).max() < 1e-8
+
+
+# ---------------------------------------------------------------------------
+# Taking the shape of an elevation model without taking its heights
+# ---------------------------------------------------------------------------
+
+
+def test_guidance_puts_the_models_relief_into_the_empty_block():
+    points = _two_streets(z_low=0.0, z_high=0.0)
+    plain = gr.build_heightmap(points, cell=10.0, margin=0.0, smooth=0.0, drop=0.0)
+    # A model with a mound in the middle, and an absurd datum: neither its
+    # offset nor its overall tilt should reach the answer.
+    ys, xs = np.mgrid[0:plain.ny, 0:plain.nx]
+    mound = 2.0 * np.exp(-(((xs - plain.nx / 2) ** 2 + (ys - plain.ny / 2) ** 2) / 6.0))
+    model = mound + 137.0 + 0.4 * xs
+
+    guided = gr.build_heightmap(points, cell=10.0, margin=0.0, smooth=0.0, drop=0.0,
+                                guidance=model)
+    middle = (plain.ny // 2, plain.nx // 2)
+    assert guided.z[middle] > plain.z[middle] + 0.5, "the mound did not come through"
+    assert abs(guided.z[middle]) < 10.0, "the model's datum came through with it"
+
+
+def test_guidance_does_not_move_the_measured_cells():
+    points = _two_streets(z_low=0.0, z_high=3.0)
+    ys, xs = np.mgrid[0:20, 0:20]
+    model = 55.0 + 3.0 * np.sin(xs / 2.0) + 2.0 * np.cos(ys / 3.0)
+    plain = gr.build_heightmap(points, cell=10.0, margin=0.0, smooth=0.0, drop=0.0)
+    model = model[: plain.ny, : plain.nx]
+    guided = gr.build_heightmap(points, cell=10.0, margin=0.0, smooth=0.0, drop=0.0,
+                                guidance=model)
+    measured = plain.support == 0
+    assert np.abs(guided.z[measured] - plain.z[measured]).max() < 1e-6
+
+
+def test_the_grid_is_handed_to_a_guidance_source_that_has_to_fetch_it():
+    """A model has to be fetched for an extent nobody knows until the solve."""
+    asked = {}
+
+    def source(x0, y0, nx, ny, cell):
+        asked.update(x0=x0, y0=y0, nx=nx, ny=ny, cell=cell)
+
+    hm = gr.build_heightmap(_two_streets(), cell=10.0, margin=0.0, smooth=0.0,
+                            guidance=source)
+    assert asked["nx"] == hm.nx and asked["ny"] == hm.ny
+    assert asked["cell"] == 10.0 and asked["x0"] == hm.x0

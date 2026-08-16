@@ -21,7 +21,7 @@ is measured and where it is invented.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -30,6 +30,7 @@ import numpy as np
 from .geometry import Mesh, Ribbon, signed_area_xy
 
 DEFAULT_CELL = 10.0
+DEFAULT_ORDER = 2  # thin plate; see _solve for why 1 creases at every kerb
 DEFAULT_SMOOTH = 1.0
 DEFAULT_Z_GAP = 2.0  # m of separation before an overlap counts as stacked
 DEFAULT_MIN_OVERLAP = 5.0  # m2, ignores slivers where two lanelets merely touch
@@ -99,7 +100,10 @@ def build_heightmap(
     margin: float = 30.0,
     bounds: Sequence[float] | None = None,
     smooth: float = DEFAULT_SMOOTH,
-    relax_iterations: int = 400,
+    order: int = DEFAULT_ORDER,
+    guidance: np.ndarray | Callable[..., np.ndarray | None] | None = None,
+    prior: np.ndarray | None = None,
+    prior_weight: float = 0.0,
     percentile: float = 10.0,
     drop: float = 0.05,
 ) -> HeightMap | None:
@@ -136,8 +140,8 @@ def build_heightmap(
     iy = np.clip(((arr[:, 1] - y0) / cell).astype(int), 0, ny - 1)
     flat = iy * nx + ix
 
-    order = np.argsort(flat, kind="stable")
-    flat_sorted, z_sorted = flat[order], arr[order, 2]
+    by_cell = np.argsort(flat, kind="stable")
+    flat_sorted, z_sorted = flat[by_cell], arr[by_cell, 2]
     cells = np.split(np.arange(len(flat_sorted)), np.flatnonzero(np.diff(flat_sorted)) + 1)
 
     z = np.full(nx * ny, np.nan)
@@ -154,16 +158,24 @@ def build_heightmap(
     if not known.any():
         return None
 
+    # The grid is only settled here, so a guidance source that has to be
+    # fetched for this extent is given the extent rather than guessing it.
+    if callable(guidance):
+        guidance = guidance(x0, y0, nx, ny, cell)
+
     support = _support_distance(known)
-    filled = _relax(np.minimum(z, floor), known, relax_iterations)
+    filled = _solve(np.minimum(z, floor), known, order=order, guidance=guidance,
+                    prior=prior, prior_weight=prior_weight)
     if smooth > 0:
         filled = _smooth(filled, smooth)
 
-    # Relaxation and smoothing both average, and averaging can lift the surface
-    # back over a sample. Clamp, let only the free cells re-settle, clamp again.
+    # The solve honours its constraints exactly, but smoothing averages and
+    # averaging can lift the surface back over a sample. Clamp, let only the
+    # free cells re-settle, clamp again.
     constrained = known & ~np.isnan(floor)
     filled = np.where(constrained, np.minimum(filled, floor), filled)
-    filled = _relax(filled, constrained, relax_iterations // 4)
+    filled = _solve(filled, constrained, order=order, guidance=guidance,
+                    prior=prior, prior_weight=prior_weight)
     filled = np.where(constrained, np.minimum(filled, floor), filled)
 
     return HeightMap(x0, y0, cell, filled, support)
@@ -175,23 +187,111 @@ def _support_distance(known: np.ndarray) -> np.ndarray:
     return distance_transform_edt(~known)
 
 
-def _relax(z: np.ndarray, known: np.ndarray, iterations: int) -> np.ndarray:
-    """Solve the unknown cells by averaging their neighbours (Laplace).
+def _laplacian(ny: int, nx: int):
+    """Five-point Laplacian on the grid, ``mean(neighbours) - self``.
 
-    Nearest-neighbour fill would step; this gives the gently varying surface a
-    city block actually has between its bounding streets.
+    Out-of-grid neighbours are taken as the cell itself, which is the discrete
+    Neumann condition — and the same thing ``np.pad(..., mode="edge")`` did in
+    the Jacobi loop this replaces, so the edges behave as they always have.
     """
+    from scipy.sparse import coo_matrix
+
+    index = np.arange(ny * nx).reshape(ny, nx)
+    rows, cols, data = [], [], []
+    for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        ys = np.clip(np.arange(ny) + dy, 0, ny - 1)
+        xs = np.clip(np.arange(nx) + dx, 0, nx - 1)
+        rows.append(index.ravel())
+        cols.append(index[np.ix_(ys, xs)].ravel())
+        data.append(np.full(ny * nx, 0.25))
+    rows.append(index.ravel())
+    cols.append(index.ravel())
+    data.append(np.full(ny * nx, -1.0))
+    return coo_matrix((np.concatenate(data), (np.concatenate(rows), np.concatenate(cols))),
+                      shape=(ny * nx, ny * nx)).tocsr()
+
+
+def _solve(z: np.ndarray, known: np.ndarray, *, order: int = DEFAULT_ORDER,
+           prior: np.ndarray | None = None, prior_weight: float = 0.0,
+           guidance: np.ndarray | None = None) -> np.ndarray:
+    """Fill the unknown cells by minimising a surface energy under constraints.
+
+    ``order`` is which energy:
+
+    * ``1`` — the membrane, :math:`\\|\\nabla z\\|^2`, whose solution is the
+      harmonic one: every free cell is the average of its neighbours.
+    * ``2`` — the thin plate, :math:`\\|\\Delta z\\|^2`. **This is the default,
+      and the difference is not cosmetic.** A harmonic surface is only C⁰ at its
+      constraints, so it *creases along every kerb* by construction; a thin
+      plate is C¹ there and rolls off the shoulder the way an embankment does.
+      And harmonic functions obey the maximum principle — an interior value can
+      never exceed its boundary — which makes relief inside a city block not
+      merely unlikely but impossible: every block is a saddle between the
+      streets around it. The thin plate has no such rule.
+
+    ``guidance`` is a surface whose *shape* is copied while its heights are
+    ignored — the flat energy :math:`\\|\\Delta z\\|^2` becomes
+    :math:`\\|\\Delta z - \\Delta p\\|^2`, which is Poisson editing. This is how
+    a published elevation model is used, and it is deliberately not the obvious
+    way. Measured on Kashiwanoha, that model and the map's own road elevations
+    disagree by p90 3.19 m after their datums are aligned, and the disagreement
+    is a smooth tilt rather than noise. Screening against its *values* therefore
+    fights the roads, and does: on held-out road samples it takes the error from
+    0.32 m to 0.50 m at a weight of 0.1 and 0.88 m at 10. Matching its
+    *curvature* does not — the roads keep their heights, the ground between them
+    inherits the mound, the ditch and the fall the model measured, and the
+    constant offset and the tilt both cancel because neither survives a
+    Laplacian.
+
+    ``prior`` and ``prior_weight`` add the value-screening term
+    :math:`w\\|z - p\\|^2` anyway, for the case where the model *is* trusted
+    over the map. It defaults off, on the measurement above.
+
+    Solved once, sparsely, rather than iterated: a city map is tens of
+    thousands of cells, which is small for a direct sparse solve and was four
+    hundred Jacobi sweeps before.
+    """
+    from scipy.sparse import identity
+    from scipy.sparse.linalg import spsolve
+
+    ny, nx = z.shape
     filled = np.array(z, dtype=float)
-    if np.isnan(filled).any():
-        filled = np.where(np.isnan(filled), np.nanmean(filled[known]), filled)
-    for _ in range(iterations):
-        padded = np.pad(filled, 1, mode="edge")
-        neighbours = (padded[:-2, 1:-1] + padded[2:, 1:-1] + padded[1:-1, :-2] + padded[1:-1, 2:]) * 0.25
-        updated = np.where(known, filled, neighbours)
-        if np.max(np.abs(updated - filled)) < 1e-4:
-            return updated
-        filled = updated
-    return filled
+    if not known.any():
+        return filled
+    filled[~known] = float(np.nanmean(filled[known]))
+    if known.all():
+        return filled
+
+    laplace = _laplacian(ny, nx)
+    # Positive semi-definite either way, so the reduced system is too.
+    system = (laplace.T @ laplace) if order >= 2 else -laplace
+    rhs = np.zeros(ny * nx)
+
+    if guidance is not None:
+        # Only the curvature is wanted, so gaps in the model are gaps in the
+        # guidance — filled flat, which asks for no curvature there and leaves
+        # those cells to the plain interpolation.
+        shape = np.asarray(guidance, dtype=float)
+        shape = np.where(np.isfinite(shape), shape, np.nanmean(shape) if
+                         np.isfinite(shape).any() else 0.0)
+        wanted = laplace @ shape.ravel()
+        rhs = rhs + ((laplace.T @ wanted) if order >= 2 else -wanted)
+
+    if prior is not None and prior_weight > 0:
+        usable = np.isfinite(prior)
+        weights = np.where(usable, prior_weight, 0.0).ravel()
+        system = system + identity(ny * nx, format="csr").multiply(weights[:, None]).tocsr()
+        rhs = rhs + weights * np.where(usable, prior, 0.0).ravel()
+
+    free = ~known.ravel()
+    fixed_values = filled.ravel()[~free]
+    reduced = system[free][:, free]
+    coupling = system[free][:, ~free]
+    answer = spsolve(reduced.tocsc(), rhs[free] - coupling @ fixed_values)
+
+    out = filled.ravel().copy()
+    out[free] = answer
+    return out.reshape(ny, nx)
 
 
 def _smooth(z: np.ndarray, sigma: float) -> np.ndarray:
@@ -333,6 +433,8 @@ def classify(
     clearance: float = DEFAULT_CLEARANCE,
     smooth: float = DEFAULT_SMOOTH,
     drop: float = 0.05,
+    order: int = DEFAULT_ORDER,
+    guidance: np.ndarray | Callable[..., np.ndarray | None] | None = None,
     bounds: Sequence[float] | None = None,
 ) -> tuple[set[int], HeightMap | None]:
     """Split lanelets into ground and elevated, and build the ground heightmap."""
@@ -345,7 +447,7 @@ def classify(
 
     ground_points = [tuple(p) for r in ribbons if r.id not in elevated for p in (*r.left, *r.right)]
     return elevated, build_heightmap(ground_points, cell=cell, smooth=smooth, drop=drop,
-                                     bounds=bounds)
+                                     order=order, guidance=guidance, bounds=bounds)
 
 
 # ---------------------------------------------------------------------------
