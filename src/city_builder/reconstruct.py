@@ -754,16 +754,18 @@ _ENVELOPE_GRID = {"512": 32, "1024": 64, "1024_cascade": 32, "1536_cascade": 32}
 # from 0.822 to 0.882 at the same nine seconds. Worth more than resolution.
 EAVE_ROOM = 0.6
 
-# And a roof rises. The same allowance in section, and it is not a refinement:
-# without it the shape model does not fill the top of its envelope and every
-# building comes out short. Over 185 buildings the reconstructions measured
-# 0.81 of the block height they were given — 174 of them more than a tenth
-# short — against 1.25 for the path that invents its own massing and puts a
-# roof on top of it. A fraction rather than metres, because a metre of ridge on
-# a shed is a different building and on an office block is nothing: at 0.4 the
-# result lands at 1.23-1.26 of the block on one, two and three storeys alike,
-# which is the ratio the other path arrives at, and the footprint is unmoved.
-ROOF_ROOM = 0.4
+# And a roof rises: the same allowance in section, so the building stands above
+# its block the way the path that invents its own massing does — 1.25 of the
+# block height, measured over 184 of them.
+#
+# A fraction rather than metres, because a metre of ridge on a shed is a
+# different building and on an office block is nothing. 0.3 because a shell
+# envelope is filled to 0.97 of its height (1.37, 1.32 and 1.39 of the block at
+# an allowance of 0.4), so the allowance is very nearly the overshoot. It was
+# 0.4 while the envelope was solid, when the model reached only 0.81 of what it
+# was given — that was not modesty, it was being handed an object unlike
+# anything it was trained on. See :func:`envelope_coords`.
+ROOF_ROOM = 0.3
 
 
 def envelope_coords(footprint: Sequence[Sequence[float]], height: float, *,
@@ -791,8 +793,17 @@ def envelope_coords(footprint: Sequence[Sequence[float]], height: float, *,
 
     ``height`` is the block height from the map, and the prism is drawn taller
     than it by ``roof_room`` — see :data:`ROOF_ROOM` — because a roof stands
-    above the walls and because the shape model does not reach the top of what
-    it is given.
+    above the walls.
+
+    **The prism is a shell.** What comes back from ``sample_sparse_structure``
+    is a surface, not a solid, and handing the shape model a solid instead is
+    handing it a kind of object it has never seen. Measured on this map's own
+    conditioning photograph its occupancy was 4905 cells of 32768, each column
+    filling 0.62 of the levels between its own top and bottom; solid prisms for
+    these plots ran to 11 000 at the median and 29 600 at the worst. The
+    nineteen buildings that would not generate at all — six attempts each,
+    across two processes, every one out of memory — were exactly the densest,
+    and as shells they generate in nineteen seconds. A building is hollow.
     """
     from shapely.geometry import Point, Polygon
 
@@ -814,7 +825,22 @@ def envelope_coords(footprint: Sequence[Sequence[float]], height: float, *,
     if not columns or not levels:
         raise ValueError(f"the plot is too small to voxelise at {grid}: "
                          f"{len(columns)} columns, {len(levels)} levels")
-    return np.array([(i, j, k) for i, j in columns for k in levels], dtype=np.int32)
+
+    # The surface of the prism, not its inside. What `sample_sparse_structure`
+    # hands the shape model is a *shell* — measured on this map's own
+    # conditioning photograph, 4905 cells of 32768, with each column occupying
+    # 0.62 of the levels between its own top and bottom. A solid prism is a
+    # different kind of object: the plots here came to 11 000 cells at the
+    # median and 29 600 at the worst, up to six times denser than anything the
+    # model has seen, and the nineteen buildings that would not generate at all
+    # were exactly the densest. A building is hollow anyway.
+    solid = {(i, j, k) for i, j in columns for k in levels}
+    return np.array(
+        sorted(cell for cell in solid
+               if any((cell[0] + di, cell[1] + dj, cell[2] + dk) not in solid
+                      for di, dj, dk in ((1, 0, 0), (-1, 0, 0), (0, 1, 0),
+                                         (0, -1, 0), (0, 0, 1), (0, 0, -1)))),
+        dtype=np.int32)
 
 
 def to_mesh_in_envelope(image_path: str, out_path: str, *,

@@ -81,13 +81,57 @@ def test_room_for_the_roof_grows_the_height_and_not_the_plan():
 
 def test_the_headroom_is_a_fraction_because_a_metre_means_different_things():
     """A metre of ridge on a shed is a different building and on an office
-    block is nothing. At 0.4 the result lands at 1.23-1.26 of the block on
-    one, two and three storeys alike."""
-    assert R.ROOF_ROOM == 0.4
+    block is nothing. A shell envelope is filled to 0.97 of its height, so the
+    allowance is very nearly the overshoot: 0.3 lands on the 1.25 of the block
+    that the path inventing its own massing arrives at."""
+    assert R.ROOF_ROOM == 0.3
     tall = R.envelope_coords(_footprint(60.0, 60.0), 30.0, grid=32,
                              eave_room=0.0, roof_room=0.4)
     # 30 m of block plus 12 m of roof, against 60 m of plan: 42/60 of the cube.
     assert _extent(tall, 2) / _extent(tall, 0) == pytest.approx(0.7, abs=0.05)
+
+
+# ---------------------------------------------------------------------------
+# A building is hollow
+# ---------------------------------------------------------------------------
+
+
+def test_the_envelope_is_a_shell_and_not_a_solid():
+    """`sample_sparse_structure` returns a surface. Handing the shape model a
+    solid is handing it a kind of object it has never seen: measured, its own
+    occupancy was 4905 cells of 32768 and solid prisms for these plots ran to
+    29 600 — and the buildings that would not generate at all were exactly the
+    densest."""
+    coords = R.envelope_coords(_footprint(20.0, 20.0), 20.0, grid=32,
+                               eave_room=0.0, roof_room=0.0)
+    cells = {tuple(c) for c in coords}
+    lo = coords.min(axis=0)
+    hi = coords.max(axis=0)
+    inside = tuple((lo + hi) // 2)
+    assert inside not in cells, "the middle of the building is occupied"
+    # And every face of the box is, or it is not an envelope.
+    for axis in range(3):
+        for face in (lo[axis], hi[axis]):
+            assert any(c[axis] == face for c in cells)
+
+
+def test_a_shell_is_a_fraction_of_the_solid_it_encloses():
+    coords = R.envelope_coords(_footprint(20.0, 20.0), 20.0, grid=32,
+                               eave_room=0.0, roof_room=0.0)
+    lo, hi = coords.min(axis=0), coords.max(axis=0)
+    solid = int(np.prod(hi - lo + 1))
+    assert len(coords) < solid * 0.45
+    # In the range the model itself produces, which measured 4905 of 32768.
+    assert len(coords) < 8000
+
+
+def test_a_prism_too_thin_to_have_an_inside_keeps_every_cell():
+    """A low building on a wide plot is two levels deep; both are surface."""
+    coords = R.envelope_coords(_footprint(60.0, 60.0), 3.5, grid=32,
+                               eave_room=0.0, roof_room=0.0)
+    assert _extent(coords, 2) == 2
+    lo, hi = coords.min(axis=0), coords.max(axis=0)
+    assert len(coords) == int(np.prod(hi - lo + 1))
 
 
 def test_the_prism_is_centred_in_the_cube_the_mesh_comes_back_in():
