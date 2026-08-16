@@ -157,6 +157,17 @@ def test_an_exception_is_a_miss_and_not_the_end_of_the_building(monkeypatch, tmp
     assert "error" not in summary["buildings"][0]
 
 
+def test_the_card_is_handed_back_before_the_next_try(monkeypatch, tmp_path):
+    """Two buildings were lost to `[CuMesh] out of memory` with all three tries
+    throwing the identical error seconds apart: the retry ran against the
+    allocator the failed attempt left behind."""
+    released = []
+    _stub(monkeypatch, [RuntimeError("[CuMesh] out of memory"), 0.9])
+    monkeypatch.setattr(D, "_release_the_card", lambda: released.append(1))
+    D.rebuild(_Scene([_plot()]), str(tmp_path), attempts=3, verbose=False)
+    assert released == [1]
+
+
 def test_a_building_that_only_ever_fails_is_recorded_and_left_alone(monkeypatch, tmp_path):
     _stub(monkeypatch, [RuntimeError("boom")] * 3)
     summary = D.rebuild(_Scene([_plot()]), str(tmp_path), attempts=3, verbose=False)

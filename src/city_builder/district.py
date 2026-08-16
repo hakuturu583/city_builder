@@ -330,6 +330,7 @@ def rebuild(scene, out_dir: str, *, buildings: list[int] | None = None,
                 # again, and if that is the last try leave the massing alone
                 # and carry on. What matters is that the ledger says so.
                 got = {"error": f"{type(error).__name__}: {error}"}
+                _release_the_card()
             if best is None or got.get("footprint_iou", 0.0) > best.get("footprint_iou", 0.0):
                 best = got
             if best.get("footprint_iou", 0.0) >= keep_below:
@@ -351,6 +352,24 @@ def rebuild(scene, out_dir: str, *, buildings: list[int] | None = None,
         ledger.write(ledger_path)
 
     return ledger.write(ledger_path)
+
+
+def _release_the_card() -> None:
+    """Hand back whatever the failed try was holding, before the next one.
+
+    Most of what goes wrong here is memory, and a retry that starts against the
+    allocator the last attempt left behind fails the same way: two buildings in
+    a run were lost to ``[CuMesh] out of memory`` with all three tries throwing
+    the identical error within seconds of each other. The exception unwinds the
+    Python references but nothing returns the caching allocator's blocks, and
+    the meshing stage wants a large contiguous one.
+    """
+    try:
+        import torch
+    except ImportError:  # a run with no model stack cannot have run out of its memory
+        return
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def _turn(radians: float):
