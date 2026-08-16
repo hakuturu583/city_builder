@@ -187,8 +187,15 @@ def build_city(
             from . import cover as cover_module
 
             if cover_module.paints_water(cover_options):
-                painted = cover_module.classify(heightmap, cover_options)
-                water = cover_module.flatten_water(heightmap, painted)
+                # The carriageway, dissolved here rather than waiting for
+                # build_mesh to do it: the water has to be settled before the
+                # ground is triangulated, and it must not flood a street.
+                road_plan = ground_module.road_outline(surfaces, elevated,
+                                                       close_gap=0.5)
+                painted = cover_module.classify(heightmap, cover_options,
+                                                roads=road_plan)
+                water = cover_module.flatten_water(heightmap, painted,
+                                                   roads=road_plan)
                 water_meshes = cover_module.water_surface(water)
                 if verbose:
                     for body in water:
@@ -202,9 +209,14 @@ def build_city(
                                   f"ground grid is {cell:g} m and cannot cut a bank inside "
                                   f"one cell. Try ground.cell of about a tenth of the pond.")
 
-        mesh, road_union = ground_module.build_mesh(heightmap, surfaces, elevated,
-                                                    fill_island=fill_island, drop=ground_drop,
-                                                    return_road_union=True)
+        # The shoreline goes into the triangulation as a breakline. Without it
+        # the bank is cut at whatever angle the grid crosses it, and the water
+        # meets a rim of triangles that belong to the grid rather than to the
+        # pond.
+        mesh, road_union = ground_module.build_mesh(
+            heightmap, surfaces, elevated, fill_island=fill_island, drop=ground_drop,
+            breaklines=[b.polygon for b in water if b.polygon is not None],
+            return_road_union=True)
         groups["Ground"] = [mesh]
         if water_meshes:
             groups["Water"] = water_meshes

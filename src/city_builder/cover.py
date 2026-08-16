@@ -438,7 +438,7 @@ def paints_water(options: CoverOptions, *, name: str = WATER) -> bool:
     return any(rule.name == name for rule in options.rules)
 
 
-def flatten_water(heightmap, cover: CoverMap, *, name: str = WATER,
+def flatten_water(heightmap, cover: CoverMap, *, name: str = WATER, roads=None,
                   freeboard: float = 0.05, smallest: float = 8.0,
                   bank: float = 20.0, depth: float = 0.6) -> list[WaterBody]:
     """Level the ground under each body of standing water. Edits ``heightmap``.
@@ -533,6 +533,26 @@ def flatten_water(heightmap, cover: CoverMap, *, name: str = WATER,
     if not wet.any():
         return []
 
+    # The carriageway is not flooded, whatever the palette says. A Region is
+    # drawn in plan by somebody who cannot see where every lanelet runs, and
+    # the map can: a pond painted across a street would otherwise dig the
+    # ground out from under it and leave the road bridging a hole. This is the
+    # one place the class grid is overruled by the map rather than by a rule,
+    # and it is why the water pass has to know about the roads at all.
+    if roads is not None and not roads.is_empty:
+        from shapely.geometry import Point
+        from shapely.prepared import prep
+
+        on_road = prep(roads)
+        xs_all = cover.x0 + (np.arange(cover.nx) + 0.5) * cover.cell
+        ys_all = cover.y0 + (np.arange(cover.ny) + 0.5) * cover.cell
+        rows, cols = np.nonzero(wet)
+        for j, i in zip(rows, cols):
+            if on_road.contains(Point(xs_all[i], ys_all[j])):
+                wet[j, i] = False
+        if not wet.any():
+            return []
+
     cross = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
     tags, count = label(wet, structure=cross)
 
@@ -608,16 +628,35 @@ def flatten_water(heightmap, cover: CoverMap, *, name: str = WATER,
     return bodies
 
 
-def _cells_to_polygon(cells: np.ndarray, cover: CoverMap):
-    """The plan outline of a set of cover cells, as one shapely geometry."""
+def _cells_to_polygon(cells: np.ndarray, cover: CoverMap, *, smooth: bool = True):
+    """The plan outline of a set of cover cells, as one shapely geometry.
+
+    Rounded off, because the union of a set of squares is a staircase and a
+    staircase is not a shoreline. Every step is one cell — 2 m by default — and
+    at that size the eye reads the grid rather than the pond: closing and
+    opening by three quarters of a cell takes the corners off, and simplifying
+    by half a cell drops the ladder of collinear vertices that survives.
+
+    Pass ``smooth=False`` for a mask that has to line up with the cells it came
+    from rather than with the world.
+    """
     from shapely.geometry import box
     from shapely.ops import unary_union
 
     rows, cols = np.nonzero(cells)
-    return unary_union([box(cover.x0 + i * cover.cell, cover.y0 + j * cover.cell,
-                            cover.x0 + (i + 1) * cover.cell,
-                            cover.y0 + (j + 1) * cover.cell)
-                        for j, i in zip(rows, cols)])
+    merged = unary_union([box(cover.x0 + i * cover.cell, cover.y0 + j * cover.cell,
+                              cover.x0 + (i + 1) * cover.cell,
+                              cover.y0 + (j + 1) * cover.cell)
+                          for j, i in zip(rows, cols)])
+    if not smooth or merged.is_empty:
+        return merged
+    reach = cover.cell * 0.75
+    rounded = merged.buffer(reach, join_style=1).buffer(-2 * reach, join_style=1) \
+                    .buffer(reach, join_style=1)
+    rounded = rounded.simplify(cover.cell * 0.5)
+    # A pond that rounding erases was never a pond; keep the squares instead of
+    # returning nothing.
+    return rounded if not rounded.is_empty and rounded.area > merged.area * 0.5 else merged
 
 
 def water_surface(bodies: Sequence[WaterBody], *, lift: float = 0.02) -> list[Any]:

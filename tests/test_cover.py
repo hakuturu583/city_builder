@@ -237,7 +237,10 @@ def test_the_water_surface_is_one_flat_sheet_a_hair_above_its_bed():
 
     zs = {round(v[2], 9) for mesh in meshes for v in mesh.vertices}
     assert zs == {round(body.level + 0.02, 9)}
-    assert body.area == pytest.approx(40.0 * 40.0, rel=0.01)
+    # A little under the square that was painted: the shoreline is rounded off
+    # the cell grid, which takes the corners with it.
+    assert body.area == pytest.approx(40.0 * 40.0, rel=0.06)
+    assert body.area < 40.0 * 40.0
 
 
 def test_a_puddle_smaller_than_the_rule_says_is_not_a_lake():

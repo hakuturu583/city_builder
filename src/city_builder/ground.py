@@ -521,6 +521,48 @@ def _rings_of(geometry) -> list[list[tuple[float, float]]]:
             for ring in (part.exterior, *part.interiors)]
 
 
+def road_outline(ribbons: Sequence[Ribbon], elevated: set[int], *,
+                 close_gap: float = 0.5, fill_island: float = 0.0):
+    """The carriageway of the ground-level lanelets, dissolved into one shape.
+
+    Dissolved rather than left as a list: clipping against the lanelets one by
+    one leaves the hairline gaps between neighbouring lanes as ground, and
+    those slivers surface in the middle of the carriageway. Closing by
+    ``close_gap`` and opening again is what shuts them.
+
+    Split out of :func:`build_mesh` because the water pass needs it *before*
+    the ground is triangulated — a pond must not flood a street — and building
+    it twice on a city-sized map is not free.
+    """
+    from shapely.geometry import Polygon as ShapelyPolygon
+    from shapely.ops import unary_union
+
+    footprints = []
+    for ribbon in ribbons:
+        if ribbon.id in elevated or len(ribbon.left) < 2 or len(ribbon.right) < 2:
+            continue
+        poly = ShapelyPolygon([(p[0], p[1]) for p in ribbon.ring()])
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        if not poly.is_empty and poly.area > 1e-6:
+            footprints.append(poly)
+    if not footprints:
+        return None
+
+    roads = unary_union([p.buffer(close_gap) for p in footprints]).buffer(-close_gap)
+    if fill_island > 0:
+        # Turning lanelets do not tile a junction exactly. Their scraps can be
+        # absorbed into the carriageway, but only where the road mesh actually
+        # covers them — otherwise this trades a sliver for a hole in the scene.
+        parts = list(roads.geoms) if hasattr(roads, "geoms") else [roads]
+        patched = [ShapelyPolygon(part.exterior,
+                                  [r for r in part.interiors
+                                   if ShapelyPolygon(r).area >= fill_island])
+                   for part in parts if part.geom_type == "Polygon"]
+        roads = unary_union(patched) if patched else roads
+    return roads
+
+
 def build_mesh(
     hm: HeightMap,
     ribbons: Sequence[Ribbon],
@@ -529,6 +571,7 @@ def build_mesh(
     close_gap: float = 0.5,
     fill_island: float = 0.0,
     drop: float = 0.05,
+    breaklines: Sequence[Any] = (),
     return_road_union: bool = False,
 ) -> Mesh | tuple[Mesh, Any]:
     """Triangulate the ground *around* the roads, meeting them at their edges.
@@ -576,38 +619,15 @@ def build_mesh(
     """
     import shapely
     from shapely.geometry import LineString, Point, box
-    from shapely.geometry import Polygon as ShapelyPolygon
-    from shapely.ops import unary_union
+    from shapely.ops import polygonize, unary_union
     from shapely.prepared import prep
     from shapely.strtree import STRtree
 
-    footprints, rings = [], []
-    for ribbon in ribbons:
-        if ribbon.id in elevated or len(ribbon.left) < 2 or len(ribbon.right) < 2:
-            continue
-        ring = ribbon.ring()
-        rings.append(ring)
-        poly = ShapelyPolygon([(p[0], p[1]) for p in ring])
-        if not poly.is_valid:
-            poly = poly.buffer(0)
-        if not poly.is_empty and poly.area > 1e-6:
-            footprints.append(poly)
-
-    # Dissolve first: clipping against the lanelets one by one leaves the
-    # hairline gaps between neighbouring lanes as ground, and those slivers
-    # surface in the middle of the carriageway.
-    roads = unary_union([p.buffer(close_gap) for p in footprints]).buffer(-close_gap) if footprints else None
-    if roads is not None and fill_island > 0:
-        # Turning lanelets do not tile a junction exactly. Their scraps can be
-        # absorbed into the carriageway, but only where the road mesh actually
-        # covers them — otherwise this trades a sliver for a hole in the scene.
-        parts = list(roads.geoms) if hasattr(roads, "geoms") else [roads]
-        patched = [
-            ShapelyPolygon(part.exterior, [r for r in part.interiors if ShapelyPolygon(r).area >= fill_island])
-            for part in parts
-            if part.geom_type == "Polygon"
-        ]
-        roads = unary_union(patched) if patched else roads
+    rings = [ribbon.ring() for ribbon in ribbons
+             if ribbon.id not in elevated
+             and len(ribbon.left) >= 2 and len(ribbon.right) >= 2]
+    roads = road_outline(ribbons, elevated, close_gap=close_gap,
+                         fill_island=fill_island)
 
     road_test = prep(roads) if roads is not None else None
     kerb = _Kerb(rings) if rings else None
@@ -664,6 +684,30 @@ def build_mesh(
         for tri in shapely.constrained_delaunay_triangles(piece).geoms:
             add_face(list(tri.exterior.coords)[:-1])
 
+    # A shoreline, a retaining wall, the toe of an embankment: a line the
+    # ground is *meant* to break along. Splitting each cell by it puts it in
+    # the triangulation as forced edges, exactly as the kerb is, so the bank
+    # is a rim rather than whatever angle the grid happened to cut across it.
+    edges = []
+    for shape in breaklines:
+        if shape is None or shape.is_empty:
+            continue
+        line = getattr(shape, "boundary", None)
+        edges.append(line if line is not None and not line.is_empty else shape)
+    edge_tree = STRtree(edges) if edges else None
+
+    def split(piece):
+        """``piece`` cut along every breakline that crosses it."""
+        if edge_tree is None:
+            return [piece]
+        near = [edges[int(i)] for i in edge_tree.query(piece)]
+        near = [line for line in near if piece.intersects(line)]
+        if not near:
+            return [piece]
+        cut = unary_union([piece.boundary, *near])
+        return [part for part in polygonize(cut)
+                if part.representative_point().within(piece)]
+
     for iy in range(hm.ny - 1):
         for ix in range(hm.nx - 1):
             x0 = hm.x0 + ix * hm.cell
@@ -672,12 +716,18 @@ def build_mesh(
             if road_test is not None and road_test.contains(cell):
                 continue  # entirely carriageway
             if road_test is None or not road_test.intersects(cell):
-                add_face([(x0, y0), (x0 + hm.cell, y0), (x0 + hm.cell, y0 + hm.cell), (x0, y0 + hm.cell)])
+                whole = box(x0, y0, x0 + hm.cell, y0 + hm.cell)
+                for piece in split(whole):
+                    if len(piece.exterior.coords) == 5 and not piece.interiors:
+                        add_face(list(piece.exterior.coords)[:-1])
+                    else:
+                        emit(piece)
                 continue
             clipped = cell.difference(roads)
             for piece in (clipped.geoms if hasattr(clipped, "geoms") else [clipped]):
                 if piece.geom_type == "Polygon":
-                    emit(piece)
+                    for part in split(piece):
+                        emit(part)
 
     mesh = Mesh(vertices, faces)
     # The dissolved outline is expensive to build and the building layer needs
