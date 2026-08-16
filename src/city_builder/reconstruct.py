@@ -754,9 +754,21 @@ _ENVELOPE_GRID = {"512": 32, "1024": 64, "1024_cascade": 32, "1536_cascade": 32}
 # from 0.822 to 0.882 at the same nine seconds. Worth more than resolution.
 EAVE_ROOM = 0.6
 
+# And a roof rises. The same allowance in section, and it is not a refinement:
+# without it the shape model does not fill the top of its envelope and every
+# building comes out short. Over 185 buildings the reconstructions measured
+# 0.81 of the block height they were given — 174 of them more than a tenth
+# short — against 1.25 for the path that invents its own massing and puts a
+# roof on top of it. A fraction rather than metres, because a metre of ridge on
+# a shed is a different building and on an office block is nothing: at 0.4 the
+# result lands at 1.23-1.26 of the block on one, two and three storeys alike,
+# which is the ratio the other path arrives at, and the footprint is unmoved.
+ROOF_ROOM = 0.4
+
 
 def envelope_coords(footprint: Sequence[Sequence[float]], height: float, *,
-                    grid: int = 32, eave_room: float = EAVE_ROOM) -> np.ndarray:
+                    grid: int = 32, eave_room: float = EAVE_ROOM,
+                    roof_room: float = ROOF_ROOM) -> np.ndarray:
     """The plot's own prism, voxelised into the cube TRELLIS samples in.
 
     TRELLIS.2 generates in three stages, and the first one is only a *choice of
@@ -776,12 +788,18 @@ def envelope_coords(footprint: Sequence[Sequence[float]], height: float, *,
     the Y-up convention :func:`texture_mesh` needs for its *mesh* input. Checked
     by extents: identity puts the height on the height axis and every other
     mapping tried put a plan dimension there.
+
+    ``height`` is the block height from the map, and the prism is drawn taller
+    than it by ``roof_room`` — see :data:`ROOF_ROOM` — because a roof stands
+    above the walls and because the shape model does not reach the top of what
+    it is given.
     """
     from shapely.geometry import Point, Polygon
 
     ring = Polygon(footprint)
+    top = float(height) * (1.0 + roof_room)
     lo = np.array([*ring.bounds[:2], 0.0])
-    hi = np.array([*ring.bounds[2:], float(height)])
+    hi = np.array([*ring.bounds[2:], top])
     span = float((hi - lo).max())
     centre = (lo + hi) / 2.0
     step = span / grid
@@ -792,7 +810,7 @@ def envelope_coords(footprint: Sequence[Sequence[float]], height: float, *,
                if grown.contains(Point(centre[0] + (i + 0.5 - half) * step,
                                        centre[1] + (j + 0.5 - half) * step))]
     levels = [k for k in range(grid)
-              if 0.0 <= centre[2] + (k + 0.5 - half) * step <= float(height)]
+              if 0.0 <= centre[2] + (k + 0.5 - half) * step <= top]
     if not columns or not levels:
         raise ValueError(f"the plot is too small to voxelise at {grid}: "
                          f"{len(columns)} columns, {len(levels)} levels")
@@ -802,7 +820,8 @@ def envelope_coords(footprint: Sequence[Sequence[float]], height: float, *,
 def to_mesh_in_envelope(image_path: str, out_path: str, *,
                         footprint: Sequence[Sequence[float]], height: float,
                         options: MeshOptions | None = None,
-                        eave_room: float = EAVE_ROOM) -> dict[str, Any]:
+                        eave_room: float = EAVE_ROOM,
+                        roof_room: float = ROOF_ROOM) -> dict[str, Any]:
     """A textured GLB whose *plan is the plot's* and whose surface is the picture's.
 
     The same model and the same call sequence as :func:`to_mesh`, with the one
@@ -839,7 +858,8 @@ def to_mesh_in_envelope(image_path: str, out_path: str, *,
     resolution = int(options.pipeline_type)
 
     pipeline = _pipeline(options)
-    coords = envelope_coords(footprint, height, grid=grid, eave_room=eave_room)
+    coords = envelope_coords(footprint, height, grid=grid, eave_room=eave_room,
+                             roof_room=roof_room)
 
     def tuned(defaults: dict, guidance: float | None) -> dict:
         params = dict(defaults or {})
@@ -884,7 +904,7 @@ def to_mesh_in_envelope(image_path: str, out_path: str, *,
     torch.cuda.empty_cache()
     return {"glb": out_path, "took_seconds": round(time.time() - started, 1),
             "bytes": os.path.getsize(out_path), "voxels": len(coords),
-            "grid": grid, "eave_room": eave_room}
+            "grid": grid, "eave_room": eave_room, "roof_room": roof_room}
 
 
 # ---------------------------------------------------------------------------
@@ -1280,6 +1300,7 @@ def reconstruct(plot: dict[str, Any], out_dir: str, *, image: str | None = None,
 def reconstruct_in_envelope(plot: dict[str, Any], out_dir: str, *, image: str,
                             mesh_options: MeshOptions | None = None,
                             eave_room: float = EAVE_ROOM,
+                            roof_room: float = ROOF_ROOM,
                             name: str = "building") -> dict[str, Any]:
     """One plot to one placed building, with the plot holding the massing.
 
@@ -1301,7 +1322,7 @@ def reconstruct_in_envelope(plot: dict[str, Any], out_dir: str, *, image: str,
     made = to_mesh_in_envelope(
         image, os.path.join(out_dir, f"{name}.glb"),
         footprint=plot["footprint"], height=float(plot["height"]),
-        options=mesh_options, eave_room=eave_room)
+        options=mesh_options, eave_room=eave_room, roof_room=roof_room)
     # No stretch: the plan came from this plot, so a mesh that does not fit it
     # is a mesh that departed from its envelope, and squeezing it would hide
     # exactly the thing the IoU is there to report.

@@ -219,7 +219,8 @@ def rebuild(scene, out_dir: str, *, buildings: list[int] | None = None,
             negative: str = DEFAULT_NEGATIVE,
             keep_below: float = 0.80, attempts: int = 3, resume: bool = True,
             marking_options=None, photos: list[str] | None = None,
-            eave_room: float | None = None, verbose: bool = True) -> dict[str, Any]:
+            eave_room: float | None = None, roof_room: float | None = None,
+            verbose: bool = True) -> dict[str, Any]:
     """Reconstruct a scene's buildings and write the models and the ledger.
 
     Writes ``<name>.png`` (the massing photographed), ``<name>_styled.png``
@@ -308,7 +309,8 @@ def rebuild(scene, out_dir: str, *, buildings: list[int] | None = None,
                     report = reconstruct_module.reconstruct_in_envelope(
                         plots[index], out_dir, image=photos[count % len(photos)],
                         name=mesh_name, mesh_options=mesh_options,
-                        **({} if eave_room is None else {"eave_room": eave_room}))
+                        **({} if eave_room is None else {"eave_room": eave_room}),
+                        **({} if roof_room is None else {"roof_room": roof_room}))
                 else:
                     if shot is None:
                         shot = portrait_module.render_portrait(

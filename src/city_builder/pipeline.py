@@ -134,6 +134,7 @@ class Recipe:
     envelope: bool = False
     envelope_subjects: int = 10   # how many photographs the street shares
     eave_room: float = 0.6
+    roof_room: float = 0.4
     resolution: str = "512"
     brush_up: float = 0.55
     keep_below: float = 0.80
@@ -357,7 +358,7 @@ def _reconstruct(map_path, out_dir, config, recipe, state, *, force, verbose):
         resolution=recipe.resolution, seed=recipe.seed, keep_below=recipe.keep_below,
         attempts=recipe.attempts, limit=recipe.limit, min_area=recipe.min_area,
         photos=_photographs(out_dir, recipe, state, force=force, verbose=verbose),
-        eave_room=recipe.eave_room,
+        eave_room=recipe.eave_room, roof_room=recipe.roof_room,
         marking_options=config.markings, verbose=verbose)
     state["ledger"] = ledger
     return {k: v for k, v in summary.items() if k != "buildings"}

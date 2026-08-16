@@ -40,9 +40,12 @@ def test_the_prism_has_the_plans_proportions():
 
 def test_the_height_is_on_the_height_axis():
     """The axes are the identity, and every other mapping stands it on end."""
-    tall = R.envelope_coords(_footprint(20.0, 20.0), 20.0, grid=32, eave_room=0.0)
-    short = R.envelope_coords(_footprint(20.0, 20.0), 5.0, grid=32, eave_room=0.0)
+    at = {"grid": 32, "eave_room": 0.0, "roof_room": 0.0}
+    tall = R.envelope_coords(_footprint(20.0, 20.0), 20.0, **at)
+    short = R.envelope_coords(_footprint(20.0, 20.0), 5.0, **at)
     assert _extent(tall, 2) > _extent(short, 2) * 2
+    # The plan is the same either way: the cube is sized by the largest
+    # dimension, and at 20 m square that is the plan in both.
     assert _extent(tall, 0) == _extent(short, 0)
 
 
@@ -57,10 +60,34 @@ def test_a_turned_plot_turns_the_prism_rather_than_its_bounding_box():
 
 def test_room_for_the_eaves_grows_the_plan_and_not_the_height():
     """Measured: 0.6 m of room took the footprint IoU from 0.822 to 0.882."""
-    tight = R.envelope_coords(_footprint(), 6.0, grid=32, eave_room=0.0)
-    roomy = R.envelope_coords(_footprint(), 6.0, grid=32, eave_room=1.5)
+    at = {"grid": 32, "roof_room": 0.0}
+    tight = R.envelope_coords(_footprint(), 6.0, eave_room=0.0, **at)
+    roomy = R.envelope_coords(_footprint(), 6.0, eave_room=1.5, **at)
     assert len({(i, j) for i, j, _k in roomy}) > len({(i, j) for i, j, _k in tight})
     assert _extent(roomy, 2) == _extent(tight, 2)
+
+
+def test_room_for_the_roof_grows_the_height_and_not_the_plan():
+    """The other half of the same idea, and not a refinement: without it the
+    shape model does not reach the top of its envelope and the buildings come
+    out short — 0.81 of the block height over 185 of them, 174 more than a
+    tenth short, against 1.25 for the path that invents its own massing."""
+    at = {"grid": 32, "eave_room": 0.0}
+    flat = R.envelope_coords(_footprint(20.0, 12.0), 6.0, roof_room=0.0, **at)
+    pitched = R.envelope_coords(_footprint(20.0, 12.0), 6.0, roof_room=0.4, **at)
+    assert _extent(pitched, 2) > _extent(flat, 2)
+    assert len({(i, j) for i, j, _k in pitched}) == len({(i, j) for i, j, _k in flat})
+
+
+def test_the_headroom_is_a_fraction_because_a_metre_means_different_things():
+    """A metre of ridge on a shed is a different building and on an office
+    block is nothing. At 0.4 the result lands at 1.23-1.26 of the block on
+    one, two and three storeys alike."""
+    assert R.ROOF_ROOM == 0.4
+    tall = R.envelope_coords(_footprint(60.0, 60.0), 30.0, grid=32,
+                             eave_room=0.0, roof_room=0.4)
+    # 30 m of block plus 12 m of roof, against 60 m of plan: 42/60 of the cube.
+    assert _extent(tall, 2) / _extent(tall, 0) == pytest.approx(0.7, abs=0.05)
 
 
 def test_the_prism_is_centred_in_the_cube_the_mesh_comes_back_in():

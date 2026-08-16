@@ -729,6 +729,9 @@ def make_command(input_path, out_dir, config_path, facade_dir, road_texture, gro
               help="How many building photographs the street shares")
 @click.option("--eave-room", type=float, default=None,
               help="Room in plan beyond the walls for the roof to overhang (m)")
+@click.option("--roof-room", type=float, default=None,
+              help="Room in section above the block height for the roof to rise, "
+                   "as a fraction of it")
 @click.option("--brush-up", type=float, default=None)
 @click.option("--keep-below", type=float, default=None,
               help="Footprint IoU under which a reconstruction is not used")
