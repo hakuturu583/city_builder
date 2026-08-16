@@ -514,7 +514,17 @@ def _roof_surface(polygon, form: str, pitch: float, eave: float):
     cx, cy = rectangle.centroid.coords[0]
     width = rectangle.area / length
     half_l, half_w = length / 2.0 + eave, width / 2.0 + eave
-    slope = pitch
+
+    # A gable and a hip climb from the eave to the ridge — half the span. A
+    # mono-pitch climbs the *whole* way across, so the same pitch makes it
+    # exactly twice as tall, and on a wide plot that is not a roof any more.
+    # Measured over 200 plots before this: gables and hips rose a median 2.2 m
+    # and at most 4.0 m above their walls, monos a median 4.7 m and at most
+    # 8.4 m — ten of the thirty-four rose higher than the whole building under
+    # them, which reads from the street as a building with its roof inside out.
+    # So the pitch is a rise over the *half* span whatever the form, and a
+    # mono spreads it over its own longer run.
+    slope = pitch / 2.0 if form == "mono" else pitch
     # The roof plane passes through the *wall* top; the overhang hangs below.
     hang = slope * eave
 

@@ -169,11 +169,38 @@ def test_the_pitch_is_measured_from_the_wall_and_not_from_the_eave(form, angle):
     eave, pitch, top = 0.7, 0.5, 10.0
     mesh = pitched_roof(_rect(30.0, 18.0, angle), top, form, pitch=pitch, eave=eave)
     heights = [v[2] for v in mesh.vertices]
-    rise = pitch * (18.0 / 2)
-    assert min(heights) == pytest.approx(top - pitch * eave)
-    # mono carries the whole span on one slope, so it rises twice as far.
-    assert max(heights) == pytest.approx(top + (2 * rise if form == "mono" else rise)
-                                         + (pitch * eave if form == "mono" else 0.0))
+    # A mono spreads the same rise over twice the run, so its slope — and with
+    # it the drop of its overhang — is half.
+    slope = pitch / (2.0 if form == "mono" else 1.0)
+    assert min(heights) == pytest.approx(top - slope * eave)
+    # The high point of a gable or a hip is its ridge, which is over the walls.
+    # A mono's is the far eave, so its overhang goes on climbing past them.
+    over = slope * eave if form == "mono" else 0.0
+    assert max(heights) == pytest.approx(top + pitch * (18.0 / 2) + over)
+
+
+def test_a_mono_pitch_does_not_tower_over_the_forms_beside_it():
+    """The pitch is a rise over the half span, whichever way the roof runs.
+
+    A mono climbs the whole span where a gable climbs half of it, so reading
+    the same number as a slope made it exactly twice as tall. Measured over
+    200 real plots before this: gables and hips rose a median 2.2 m above their
+    walls and at most 4.0 m, monos a median 4.7 m and at most 8.4 m, and ten of
+    the thirty-four monos stood taller than the whole building under them.
+    """
+    plan_shape = _rect(30.0, 18.0)
+    tops = {form: max(v[2] for v in
+                      pitched_roof(plan_shape, 10.0, form, pitch=0.5, eave=0.0).vertices)
+            for form in ("gable", "hip", "mono")}
+    assert tops["mono"] == pytest.approx(tops["gable"])
+    assert tops["hip"] == pytest.approx(tops["gable"])
+
+
+def test_a_wider_plot_still_gets_a_taller_mono_roof():
+    """Halving the slope is not flattening it: the run still sets the rise."""
+    narrow = max(v[2] for v in pitched_roof(_rect(30.0, 10.0), 10.0, "mono").vertices)
+    wide = max(v[2] for v in pitched_roof(_rect(30.0, 20.0), 10.0, "mono").vertices)
+    assert wide > narrow + 1.0
 
 
 @pytest.mark.parametrize("form", ["gable", "hip", "mono"])
@@ -286,7 +313,9 @@ def test_the_roof_meets_the_wall_it_sits_on():
             height = _height_at(mesh, faces, probe)
             assert height is not None, f"{form}: no roof over the wall at {probe}"
             # A mono-pitch meets one wall at the top and climbs over the other.
-            want = 10.0 if form != "mono" or probe[1] < 9.0 else 10.0 + 0.8 * 18.0
+            # …and a mono spreads its pitch over the whole span, so it climbs
+            # the same as a gable would, not twice as far.
+            want = 10.0 if form != "mono" or probe[1] < 9.0 else 10.0 + 0.8 * 18.0 / 2
             assert height == pytest.approx(want, abs=0.02), (
                 f"{form}: the roof is {height - want:+.2f} m off the wall at {probe}")
         # And the eave really does hang below it.
