@@ -218,7 +218,8 @@ def rebuild(scene, out_dir: str, *, buildings: list[int] | None = None,
             brush_up: float = 0.55, resolution: str = "512", seed: int = 0,
             negative: str = DEFAULT_NEGATIVE,
             keep_below: float = 0.80, attempts: int = 3, resume: bool = True,
-            marking_options=None, verbose: bool = True) -> dict[str, Any]:
+            marking_options=None, photos: list[str] | None = None,
+            eave_room: float | None = None, verbose: bool = True) -> dict[str, Any]:
     """Reconstruct a scene's buildings and write the models and the ledger.
 
     Writes ``<name>.png`` (the massing photographed), ``<name>_styled.png``
@@ -237,6 +238,16 @@ def rebuild(scene, out_dir: str, *, buildings: list[int] | None = None,
     is the one kept. It also covers the other kind of failure — an exception
     out of the pipeline, which on a run this long is usually the card being
     momentarily out of memory rather than anything about this building.
+
+    ``photos`` switches the whole street to the envelope route. Given a list of
+    isolated building photographs — :func:`city_builder.reconstruct.photographs`
+    draws them — each plot's own prism becomes the occupancy grid the mesh is
+    generated in, and the photograph is asked only for the material. Nothing is
+    photographed and nothing is brushed up, so ``facade_dir``, ``roof_texture``,
+    ``style``, ``brush_up`` and ``negative`` are unused; the plots take the
+    photographs in turn, which spreads the materials across the street rather
+    than clustering them, and ``eave_room`` is how much room in plan the roof is
+    allowed beyond the walls.
     """
     # Blender first: it brings its own numpy, and torch is content with that
     # while the reverse can leave one of them unable to load its own C module.
@@ -270,9 +281,13 @@ def rebuild(scene, out_dir: str, *, buildings: list[int] | None = None,
             ledger.buildings.append(done[index])
             continue
         name = f"b{index:04d}"
-        strength = licence(plots[index], brush_up)
+        # Nothing is brushed up on the envelope route — there is no render to
+        # brush up — so the ledger says so rather than recording a licence that
+        # was never spent.
+        strength = 0.0 if photos else licence(plots[index], brush_up)
         row = Rebuilt(building=index, area_m2=plots[index]["area"],
-                      roof=plots[index].get("roof"), brush_up=strength)
+                      roof=plots[index].get("roof"),
+                      brush_up=None if photos else strength)
 
         # The massing render is deterministic, so it is shot once and the tries
         # differ in what the image model and the mesh sampler make of it.
@@ -281,27 +296,33 @@ def rebuild(scene, out_dir: str, *, buildings: list[int] | None = None,
         for attempt in range(max(1, attempts)):
             draw = seed + index + attempt * 10_007  # coprime with anything here
             try:
-                if shot is None:
-                    shot = portrait_module.render_portrait(
-                        scene, index, os.path.join(out_dir, f"{name}.png"), options=options,
-                        facade_dir=facade_dir, roof_texture=roof_texture,
-                        roof_tile_metres=roof_tile_metres,
-                        marking_options=marking_options, verbose=False)
-                report = reconstruct_module.reconstruct(
-                    plots[index], out_dir, image=shot["image"],
-                    # Each try writes its own mesh, and the row that wins
-                    # carries the paths of the one that won. Renaming the
-                    # winner over the loser instead would leave a ledger and a
-                    # directory that disagree if the run is interrupted.
-                    name=name if attempt == 0 else f"{name}_t{attempt}",
-                    mesh_options=reconstruct_module.MeshOptions(
-                        seed=draw, pipeline_type=resolution, texture_size=1024,
-                        decimation_target=80_000, tex_guidance=3.0),
-                    restyle_prompt=style,
-                    restyle_options=(reconstruct_module.RestyleOptions(strength=strength,
-                                                                      seed=draw,
-                                                                      negative=negative)
-                                     if strength > 0 else None))
+                # Each try writes its own mesh, and the row that wins carries
+                # the paths of the one that won. Renaming the winner over the
+                # loser instead would leave a ledger and a directory that
+                # disagree if the run is interrupted.
+                mesh_name = name if attempt == 0 else f"{name}_t{attempt}"
+                mesh_options = reconstruct_module.MeshOptions(
+                    seed=draw, pipeline_type=resolution, texture_size=1024,
+                    decimation_target=80_000, tex_guidance=3.0)
+                if photos:
+                    report = reconstruct_module.reconstruct_in_envelope(
+                        plots[index], out_dir, image=photos[count % len(photos)],
+                        name=mesh_name, mesh_options=mesh_options,
+                        **({} if eave_room is None else {"eave_room": eave_room}))
+                else:
+                    if shot is None:
+                        shot = portrait_module.render_portrait(
+                            scene, index, os.path.join(out_dir, f"{name}.png"),
+                            options=options, facade_dir=facade_dir,
+                            roof_texture=roof_texture,
+                            roof_tile_metres=roof_tile_metres,
+                            marking_options=marking_options, verbose=False)
+                    report = reconstruct_module.reconstruct(
+                        plots[index], out_dir, image=shot["image"], name=mesh_name,
+                        mesh_options=mesh_options, restyle_prompt=style,
+                        restyle_options=(reconstruct_module.RestyleOptions(
+                            strength=strength, seed=draw, negative=negative)
+                            if strength > 0 else None))
                 got = {k: v for k, v in report.items() if k != "source"}
             except Exception as error:  # noqa: BLE001 - one building must not stop a street
                 # A generative model has failure modes a caller cannot

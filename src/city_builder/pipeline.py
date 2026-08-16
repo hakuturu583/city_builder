@@ -122,6 +122,18 @@ class Recipe:
     control_scale: float = 1.2
 
     # --- reconstruction -------------------------------------------------
+    # Where the massing comes from. Left off, the plot's procedural block is
+    # photographed, brushed up by an image model, and the mesh that comes back
+    # is fitted onto the plot — 184 of 189 buildings at a mean footprint IoU of
+    # 0.917, bought with a yaw sweep, an anisotropic stretch and a seating pass.
+    # Turned on, the plot's own prism *is* the occupancy grid TRELLIS generates
+    # in, and the picture is only asked what the building is made of: 0.88
+    # uniform, nothing to stretch, and half the time per building. It is also
+    # the only one of the two where a photograph can be photoreal, because the
+    # picture no longer has to be a render of this particular block.
+    envelope: bool = False
+    envelope_subjects: int = 10   # how many photographs the street shares
+    eave_room: float = 0.6
     resolution: str = "512"
     brush_up: float = 0.55
     keep_below: float = 0.80
@@ -344,9 +356,52 @@ def _reconstruct(map_path, out_dir, config, recipe, state, *, force, verbose):
         roof_tile_metres=recipe.roof_tile_metres, brush_up=recipe.brush_up,
         resolution=recipe.resolution, seed=recipe.seed, keep_below=recipe.keep_below,
         attempts=recipe.attempts, limit=recipe.limit, min_area=recipe.min_area,
+        photos=_photographs(out_dir, recipe, state, force=force, verbose=verbose),
+        eave_room=recipe.eave_room,
         marking_options=config.markings, verbose=verbose)
     state["ledger"] = ledger
     return {k: v for k, v in summary.items() if k != "buildings"}
+
+
+def _photographs(out_dir: str, recipe: Recipe, state, *, force, verbose):
+    """The street's shared photographs, drawn once — or ``None`` for the render path.
+
+    Cheap enough to be a step inside the reconstruction rather than a stage of
+    its own: ten pictures against a hundred and eighty buildings. They are kept
+    on disk because the whole point is that they are shared, and a resumed run
+    that redrew them would change the material of every building it had not got
+    to yet.
+    """
+    if not recipe.envelope:
+        return None
+    from . import reconstruct as reconstruct_module
+
+    # Houses first, because that is what a street of 200 m2 plots is; the
+    # commercial subjects only come in if more are asked for than there are
+    # residential ones.
+    known = dict(reconstruct_module.BUILDING_SUBJECTS)
+    ordered = ([known[name] for name in reconstruct_module.HOUSE_SUBJECTS]
+               + [text for name, text in reconstruct_module.BUILDING_SUBJECTS
+                  if name not in reconstruct_module.HOUSE_SUBJECTS])
+    wanted = ordered[:max(1, recipe.envelope_subjects)]
+
+    where = os.path.join(out_dir, "subjects")
+    paths = [os.path.join(where, f"subject_{i:02d}.png") for i in range(len(wanted))]
+    if all(os.path.exists(path) for path in paths) and not force:
+        if verbose:
+            print(f"[pipeline] {len(paths)} photograph(s) already drawn")
+        return paths
+
+    drawn = reconstruct_module.photographs(
+        wanted, where, options=reconstruct_module.ImageOptions(seed=recipe.seed))
+    if verbose:
+        thin = [row for row in drawn if not row["isolated"]]
+        print(f"[pipeline] {len(drawn)} photograph(s), backdrop "
+              f"{min(r['backdrop'] for r in drawn):.2f}-"
+              f"{max(r['backdrop'] for r in drawn):.2f}"
+              + (f", {len(thin)} still framed too tight" if thin else ""))
+    state["photographs"] = drawn
+    return [row["path"] for row in drawn]
 
 
 # ---------------------------------------------------------------------------

@@ -171,6 +171,57 @@ def test_one_attempt_is_the_old_behaviour(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Generating inside the plot rather than fitting afterwards
+# ---------------------------------------------------------------------------
+
+
+def _stub_envelope(monkeypatch):
+    """Record what the envelope route was asked for, and refuse the other one."""
+    from city_builder import portrait as portrait_module
+    from city_builder import reconstruct as reconstruct_module
+
+    seen = []
+
+    def envelope(plot, out_dir, *, image, name, mesh_options, **kwargs):
+        seen.append({"name": name, "image": image, "seed": mesh_options.seed, **kwargs})
+        return {"footprint_iou": 0.9, "glb": f"{name}.glb", "took_seconds": 1.0,
+                "voxels": 4096, "grid": 32}
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("the massing was photographed on the envelope route")
+
+    monkeypatch.setattr(reconstruct_module, "reconstruct_in_envelope", envelope)
+    monkeypatch.setattr(reconstruct_module, "reconstruct", refuse)
+    monkeypatch.setattr(portrait_module, "render_portrait", refuse)
+    return seen
+
+
+def test_photographs_replace_the_massing_render_entirely(monkeypatch, tmp_path):
+    """Nothing is photographed and nothing is brushed up: the picture is a
+    photograph of a building, and the plot holds the shape."""
+    seen = _stub_envelope(monkeypatch)
+    summary = D.rebuild(_Scene([_plot()]), str(tmp_path), photos=["a.png"],
+                        eave_room=0.9, verbose=False)
+    assert len(seen) == 1 and seen[0]["image"] == "a.png"
+    assert seen[0]["eave_room"] == 0.9
+    assert summary["used"] == 1
+
+
+def test_the_street_takes_the_photographs_in_turn(monkeypatch, tmp_path):
+    """Assigning by area or at random clusters one material along a street."""
+    seen = _stub_envelope(monkeypatch)
+    D.rebuild(_Scene([_plot()] * 6), str(tmp_path), photos=["a.png", "b.png", "c.png"],
+              verbose=False)
+    assert [row["image"] for row in seen] == ["b.png", "c.png", "a.png"] * 2
+
+
+def test_without_photographs_nothing_changes(monkeypatch, tmp_path):
+    seen = _stub(monkeypatch, [0.93])
+    D.rebuild(_Scene([_plot()]), str(tmp_path), verbose=False)
+    assert len(seen) == 1
+
+
+# ---------------------------------------------------------------------------
 # The ledger as a type
 #
 # It is the only statement of how a reconstruction goes back into the world — a

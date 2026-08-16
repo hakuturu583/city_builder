@@ -77,7 +77,8 @@ def stubbed(monkeypatch, tmp_path):
     def rebuild(scene, out, **kwargs):
         calls.append(("reconstruct", {"facade_dir": kwargs.get("facade_dir"),
                                       "roof": kwargs.get("roof_texture"),
-                                      "attempts": kwargs.get("attempts")}))
+                                      "attempts": kwargs.get("attempts"),
+                                      "photos": kwargs.get("photos")}))
         os.makedirs(out, exist_ok=True)
         with open(os.path.join(out, "district.json"), "w", encoding="utf-8") as handle:
             json.dump({"used": 1, "attempted": 1, "buildings": []}, handle)
@@ -87,11 +88,25 @@ def stubbed(monkeypatch, tmp_path):
         calls.append(("place", {"ledger": str(ledger)}))
         return {"placed": 1, "procedural": 0}
 
+    def photographs(subjects, out, **kwargs):
+        calls.append(("photographs", {"subjects": len(subjects)}))
+        os.makedirs(out, exist_ok=True)
+        drawn = []
+        for i, subject in enumerate(subjects):
+            path = os.path.join(out, f"subject_{i:02d}.png")
+            with open(path, "wb") as handle:
+                handle.write(b"x")
+            drawn.append({"path": path, "subject": subject, "backdrop": 0.5,
+                          "tries": 1, "isolated": True})
+        return drawn
+
     import city_builder.build as build_module
     import city_builder.district as district_module
     import city_builder.facade_layout as layout_module
+    import city_builder.reconstruct as reconstruct_module
     import city_builder.texture as texture_module
 
+    monkeypatch.setattr(reconstruct_module, "photographs", photographs)
     monkeypatch.setattr(build_module, "build_city_from_config", build)
     monkeypatch.setattr(build_module, "write_manifest", manifest)
     monkeypatch.setattr(texture_module, "ground_tile", ground_tile)
@@ -142,6 +157,37 @@ def test_the_recipe_reaches_the_stage_that_uses_it(stubbed, tmp_path):
     P.run("map.osm", str(tmp_path), recipe=P.Recipe(attempts=7, renders=False, glb=False),
           stages=("ground", "reconstruct"), verbose=False)
     assert _named(stubbed, "reconstruct")[0]["attempts"] == 7
+
+
+# ---------------------------------------------------------------------------
+# Which of the two routes to the massing
+# ---------------------------------------------------------------------------
+
+
+def test_the_render_route_draws_no_photographs(stubbed, tmp_path):
+    P.run("map.osm", str(tmp_path), recipe=P.Recipe(renders=False, glb=False),
+          stages=("ground", "reconstruct"), verbose=False)
+    assert not _named(stubbed, "photographs")
+    assert _named(stubbed, "reconstruct")[0]["photos"] is None
+
+
+def test_the_envelope_route_draws_a_family_and_hands_it_over(stubbed, tmp_path):
+    P.run("map.osm", str(tmp_path),
+          recipe=P.Recipe(envelope=True, envelope_subjects=4, renders=False, glb=False),
+          stages=("ground", "reconstruct"), verbose=False)
+    assert _named(stubbed, "photographs")[0]["subjects"] == 4
+    assert len(_named(stubbed, "reconstruct")[0]["photos"]) == 4
+
+
+def test_the_photographs_are_drawn_once_and_shared(stubbed, tmp_path):
+    """They are the street's materials, so a resumed run that redrew them
+    would change the material of every building it had not got to yet."""
+    for _ in range(2):
+        P.run("map.osm", str(tmp_path),
+              recipe=P.Recipe(envelope=True, envelope_subjects=3,
+                              renders=False, glb=False),
+              stages=("ground", "reconstruct"), verbose=False)
+    assert len(_named(stubbed, "photographs")) == 1
 
 
 def test_the_ground_settings_land_on_the_config_the_build_reads():

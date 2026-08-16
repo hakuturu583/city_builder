@@ -722,6 +722,13 @@ def make_command(input_path, out_dir, config_path, facade_dir, road_texture, gro
 @click.option("--relief/--no-relief", default=None, help="Invent terrain between the roads")
 @click.option("--elevation-model", is_flag=True, help="Take the terrain's shape from a survey")
 @click.option("--resolution", type=click.Choice(["512", "1024", "1024_cascade"]), default=None)
+@click.option("--envelope", is_flag=True,
+              help="Generate inside each plot's own prism instead of photographing "
+                   "its massing and fitting the result back")
+@click.option("--envelope-subjects", type=int, default=None,
+              help="How many building photographs the street shares")
+@click.option("--eave-room", type=float, default=None,
+              help="Room in plan beyond the walls for the roof to overhang (m)")
 @click.option("--brush-up", type=float, default=None)
 @click.option("--keep-below", type=float, default=None,
               help="Footprint IoU under which a reconstruction is not used")
@@ -754,6 +761,8 @@ def pipeline_command(input_path, out_dir, config_path, stages, force, quiet, **o
         recipe.renders = False
     if overrides.pop("elevation_model", False):
         recipe.elevation_model = True
+    if overrides.pop("envelope", False):
+        recipe.envelope = True
     for name, value in overrides.items():
         if value is not None:
             setattr(recipe, name, value)

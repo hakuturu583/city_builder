@@ -207,30 +207,154 @@ def elevation(prompt: str, path: str, options: ImageOptions | None = None) -> st
     import torch
     from diffusers import AutoPipelineForText2Image
 
-    options = options or ImageOptions()
-    if options.vram_budget_gb > 0 and torch.cuda.is_available():
-        total = torch.cuda.get_device_properties(0).total_memory / 1024**3
-        torch.cuda.set_per_process_memory_fraction(
-            min(1.0, options.vram_budget_gb / total), 0)
+    from .texture import vram_budget
 
+    options = options or ImageOptions()
+    with vram_budget(options.vram_budget_gb):
+        pipeline = AutoPipelineForText2Image.from_pretrained(
+            options.model, torch_dtype=torch.float16, variant="fp16", use_safetensors=True)
+        pipeline.set_progress_bar_config(disable=True)
+        pipeline.enable_model_cpu_offload()
+
+        image = pipeline(
+            prompt=prompt, negative_prompt=options.negative,
+            width=options.size, height=options.size,
+            num_inference_steps=options.steps, guidance_scale=options.guidance,
+            generator=torch.Generator(device="cpu").manual_seed(options.seed),
+        ).images[0]
+
+        del pipeline
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    cut_out(image).save(path)
+    return path
+
+
+# ---------------------------------------------------------------------------
+# A picture with one building in it and nothing else
+# ---------------------------------------------------------------------------
+
+#: What the buildings on a Japanese street are, as whole buildings rather than
+#: as walls. :data:`city_builder.texture.FACADE_STYLES` describes a *surface*,
+#: because a facade sheet is a surface; an envelope wants a subject.
+BUILDING_SUBJECTS: tuple[tuple[str, str], ...] = (
+    ("mortar", ("a small Japanese suburban house, cream mortar rendered walls, "
+                "grey kawara tiled hipped roof with deep eaves, aluminium sliding "
+                "windows, a downpipe, an air-conditioning unit")),
+    ("siding", ("a Japanese suburban house, beige ceramic siding boards with white "
+                "trim, dark grey tiled roof, a carport canopy, a meter box")),
+    ("clapboard", ("a Japanese house with dark stained timber clapboard walls and "
+                   "vertical battens, small square windows, a shallow metal roof")),
+    ("machiya", ("a traditional Japanese machiya townhouse, dark timber lattice "
+                 "front, white plaster panels, black kawara roof tiles, a noren")),
+    ("shopfront", ("a small Japanese shophouse, glazed shopfront at street level, "
+                   "tiled wall above, a vertical sign, an awning")),
+    ("corrugated", ("a Japanese workshop building in painted corrugated metal, "
+                    "rusted seams, a louvred vent, a roller shutter")),
+    ("concrete", ("a small Japanese concrete apartment block, weathered precast "
+                  "panels, punched square windows, exposed stair, roof water tank")),
+    ("tiled", ("a Japanese mid-rise building faced in beige ceramic tile, narrow "
+               "aluminium window frames, a parapet, rooftop plant")),
+    ("brick", ("a red brown brick apartment building with pale stone lintels and "
+               "railed balconies")),
+    ("dark metal", ("a dark charcoal metal and glass building, bronze tinted "
+                    "glazing, a flat parapet roof")),
+)
+
+#: The residential subset, for a street of houses rather than of offices.
+HOUSE_SUBJECTS: tuple[str, ...] = (
+    "mortar", "siding", "clapboard", "machiya", "shopfront", "corrugated",
+)
+
+# Everything in here is about the *frame*, not the building. TRELLIS treats
+# whatever is in the picture as the subject, so a photograph of a house in its
+# street is a photograph of the street: measured, that returned a mesh with the
+# sky and the neighbour's garden baked into the walls. Asking for a photograph
+# of an isolated house does not work either — SDXL keeps the setting and the
+# backdrop covered 8-15 % of the frame. Asking for a *photograph of a model of*
+# one took the backdrop to 39-59 %, and it is the phrasing the frame responds
+# to: the material and the weathering survive it, and the mesh comes back a
+# building rather than a smear.
+ISOLATED_FRAME = ("studio product photograph of an architectural model of {subject}, "
+                  "isolated on a seamless plain background, floating, no ground, "
+                  "no sky, soft even lighting, the whole building visible including "
+                  "the roof, three-quarter view from slightly above")
+
+ISOLATED_NEGATIVE = ("street scene, sky, clouds, grass, garden, trees, fence, road, "
+                     "adjacent buildings, neighbours, power lines, people, cars, "
+                     "ground, horizon, close-up, cropped, cut off, interior, "
+                     "floor plan, text, watermark")
+
+
+def isolated_prompt(subject: str) -> str:
+    """One building on nothing, which is the only kind of picture an envelope wants."""
+    return ISOLATED_FRAME.format(subject=subject)
+
+
+def backdrop_share(image) -> float:
+    """How much of the frame :func:`cut_out` was able to call background.
+
+    The one number that predicts whether a picture will reconstruct. Below about
+    a quarter it is a street or a close-up crop, and what comes back is a slab
+    or a smear; the three pictures measured on the largest Kashiwanoha plot ran
+    0.08, 0.45 and 0.59, and only the last two produced a building.
+    """
+    return float((np.asarray(cut_out(image))[:, :, 3] < 8).mean())
+
+
+def photographs(subjects: Sequence[str], out_dir: str, *,
+                options: ImageOptions | None = None, prefix: str = "subject",
+                min_backdrop: float = 0.25, attempts: int = 3) -> list[dict[str, Any]]:
+    """A family of isolated building photographs, one per subject, drawn once.
+
+    :func:`elevation` loads and drops SDXL per call, which is right for one
+    building and wrong for a district; this keeps it for the batch. Each picture
+    is scored by :func:`backdrop_share` and redrawn on another seed when the
+    model has answered with a street instead of a building — the failure that
+    otherwise reaches the mesh, where it is much more expensive to notice.
+    """
+    import torch
+    from diffusers import AutoPipelineForText2Image
+
+    options = options or ImageOptions()
+    os.makedirs(out_dir, exist_ok=True)
     pipeline = AutoPipelineForText2Image.from_pretrained(
         options.model, torch_dtype=torch.float16, variant="fp16", use_safetensors=True)
     pipeline.set_progress_bar_config(disable=True)
     pipeline.enable_model_cpu_offload()
 
-    image = pipeline(
-        prompt=prompt, negative_prompt=options.negative,
-        width=options.size, height=options.size,
-        num_inference_steps=options.steps, guidance_scale=options.guidance,
-        generator=torch.Generator(device="cpu").manual_seed(options.seed),
-    ).images[0]
-
-    del pipeline
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
-    cut_out(image).save(path)
-    return path
+    drawn: list[dict[str, Any]] = []
+    try:
+        for index, subject in enumerate(subjects):
+            best, best_share, tries = None, -1.0, 0
+            for attempt in range(max(1, attempts)):
+                tries = attempt + 1
+                seed = options.seed + index * 1013 + attempt * 7919
+                image = pipeline(
+                    prompt=isolated_prompt(subject),
+                    # Its own negative is about the *building*; this one is
+                    # about the frame, and the frame is the whole difficulty.
+                    negative_prompt=", ".join(filter(None, (ISOLATED_NEGATIVE,
+                                                            options.negative))),
+                    width=options.size, height=options.size,
+                    num_inference_steps=options.steps, guidance_scale=options.guidance,
+                    generator=torch.Generator(device="cpu").manual_seed(seed),
+                ).images[0]
+                share = backdrop_share(image)
+                if share > best_share:
+                    best, best_share = image, share
+                if share >= min_backdrop:
+                    break
+            path = os.path.join(out_dir, f"{prefix}_{index:02d}.png")
+            cut_out(best).save(path)
+            drawn.append({"path": path, "subject": subject, "backdrop": round(best_share, 3),
+                          "tries": tries, "isolated": best_share >= min_backdrop})
+    finally:
+        del pipeline
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    return drawn
 
 
 VARIED_STYLE = (
@@ -612,6 +736,155 @@ def to_mesh(image_path: str, out_path: str, options: MeshOptions | None = None) 
     torch.cuda.empty_cache()
     return {"glb": out_path, "took_seconds": round(time.time() - started, 1),
             "bytes": os.path.getsize(out_path)}
+
+
+# ---------------------------------------------------------------------------
+# The plot as the envelope, and the picture as the material
+# ---------------------------------------------------------------------------
+
+# `run` samples the occupied cells at 32 for the 512 models and 64 for the 1024
+# ones, and the flow model that reads them is trained on that grid. Handing the
+# 512 model a 64 cube is a mismatch, not a finer envelope — it measured 0.743
+# against 0.822 for the same plot, which is what a mismatch looks like.
+_ENVELOPE_GRID = {"512": 32, "1024": 64, "1024_cascade": 32, "1536_cascade": 32}
+
+# A roof overhangs. An envelope drawn on the walls has nowhere to put the eaves,
+# and the model answers by pulling the whole building in: on the largest plot of
+# the Kashiwanoha map, growing the prism by 0.6 m in plan took the footprint IoU
+# from 0.822 to 0.882 at the same nine seconds. Worth more than resolution.
+EAVE_ROOM = 0.6
+
+
+def envelope_coords(footprint: Sequence[Sequence[float]], height: float, *,
+                    grid: int = 32, eave_room: float = EAVE_ROOM) -> np.ndarray:
+    """The plot's own prism, voxelised into the cube TRELLIS samples in.
+
+    TRELLIS.2 generates in three stages, and the first one is only a *choice of
+    cells*::
+
+        coords     = sample_sparse_structure(cond, 32 or 64)   # occupied voxels
+        shape_slat = sample_shape_slat(cond, model, coords)    # geometry in them
+        tex_slat   = sample_tex_slat(cond, model, shape_slat)  # PBR on it
+
+    ``coords`` is an ordinary tensor and ``sample_shape_slat`` takes it as an
+    argument, so it can be supplied rather than sampled. Supply the footprint
+    extruded to the building's height and the plan and the storey height stop
+    being things the model guesses and the fit has to repair; the model is left
+    to invent what we actually want from it, inside that envelope.
+
+    The axes are the identity — ``(i, j, k)`` in this package's own order, not
+    the Y-up convention :func:`texture_mesh` needs for its *mesh* input. Checked
+    by extents: identity puts the height on the height axis and every other
+    mapping tried put a plan dimension there.
+    """
+    from shapely.geometry import Point, Polygon
+
+    ring = Polygon(footprint)
+    lo = np.array([*ring.bounds[:2], 0.0])
+    hi = np.array([*ring.bounds[2:], float(height)])
+    span = float((hi - lo).max())
+    centre = (lo + hi) / 2.0
+    step = span / grid
+    grown = ring.buffer(eave_room)
+
+    half = grid / 2.0
+    columns = [(i, j) for i in range(grid) for j in range(grid)
+               if grown.contains(Point(centre[0] + (i + 0.5 - half) * step,
+                                       centre[1] + (j + 0.5 - half) * step))]
+    levels = [k for k in range(grid)
+              if 0.0 <= centre[2] + (k + 0.5 - half) * step <= float(height)]
+    if not columns or not levels:
+        raise ValueError(f"the plot is too small to voxelise at {grid}: "
+                         f"{len(columns)} columns, {len(levels)} levels")
+    return np.array([(i, j, k) for i, j in columns for k in levels], dtype=np.int32)
+
+
+def to_mesh_in_envelope(image_path: str, out_path: str, *,
+                        footprint: Sequence[Sequence[float]], height: float,
+                        options: MeshOptions | None = None,
+                        eave_room: float = EAVE_ROOM) -> dict[str, Any]:
+    """A textured GLB whose *plan is the plot's* and whose surface is the picture's.
+
+    The same model and the same call sequence as :func:`to_mesh`, with the one
+    stage that guesses the massing replaced by :func:`envelope_coords`. That
+    changes what the picture is for. In :func:`to_mesh` it has to carry the shape
+    as well as the material, which is why that path photographs the procedural
+    massing first and why the result then needs a yaw sweep, an anisotropic
+    stretch and a seating pass to be put back on its own plot. Here the shape is
+    already settled, so the picture is free to be what a diffusion model is
+    actually good at: a photograph of what the building is made of.
+
+    Two things about that picture, both learned by getting them wrong:
+
+    **One whole building, on nothing.** TRELLIS treats the entire frame as the
+    subject. Asked for a photograph of a Japanese house, SDXL returns a street —
+    sky, garden, fence, the neighbours — and :func:`cut_out` has no plain field
+    to key out, so all of it is fed in and the mesh comes back a smear of sky
+    and grass. See :func:`city_builder.texture.building_photos`, which is the
+    prompt that does not do that.
+
+    **Alpha, and a real one.** As everywhere else here, alpha is what keeps the
+    pipeline's own gated background remover out of the run.
+    """
+    import torch
+    from PIL import Image as PILImage
+
+    options = options or MeshOptions()
+    if options.pipeline_type not in ("512", "1024"):
+        # The cascades sample the structure twice and refine between; there is
+        # no single set of coords to substitute.
+        raise ValueError("an envelope needs a single-resolution pipeline_type "
+                         f"('512' or '1024'), not {options.pipeline_type!r}")
+    grid = _ENVELOPE_GRID[options.pipeline_type]
+    resolution = int(options.pipeline_type)
+
+    pipeline = _pipeline(options)
+    coords = envelope_coords(footprint, height, grid=grid, eave_room=eave_room)
+
+    def tuned(defaults: dict, guidance: float | None) -> dict:
+        params = dict(defaults or {})
+        if options.steps is not None:
+            params["steps"] = options.steps
+        if guidance is not None:
+            params["guidance_strength"] = guidance
+        return params
+
+    started = time.time()
+    torch.manual_seed(options.seed)
+    packed = torch.tensor(np.concatenate(
+        [np.zeros((len(coords), 1), dtype=np.int32), coords], axis=1),
+        dtype=torch.int32, device="cuda")
+    with torch.no_grad():
+        image = pipeline.preprocess_image(PILImage.open(image_path).convert("RGBA"))
+        cond = pipeline.get_cond([image], resolution)
+        shape_slat = pipeline.sample_shape_slat(
+            cond, pipeline.models[f"shape_slat_flow_model_{resolution}"], packed,
+            tuned(pipeline.shape_slat_sampler_params, options.shape_guidance))
+        torch.cuda.empty_cache()
+        tex_slat = pipeline.sample_tex_slat(
+            cond, pipeline.models[f"tex_slat_flow_model_{resolution}"], shape_slat,
+            tuned(pipeline.tex_slat_sampler_params, options.tex_guidance))
+        torch.cuda.empty_cache()
+        mesh = pipeline.decode_latent(shape_slat, tex_slat, resolution)[0]
+    mesh.simplify(16777216)
+    torch.cuda.empty_cache()
+
+    import o_voxel
+
+    glb = o_voxel.postprocess.to_glb(
+        vertices=mesh.vertices, faces=mesh.faces, attr_volume=mesh.attrs,
+        coords=mesh.coords, attr_layout=mesh.layout, voxel_size=mesh.voxel_size,
+        aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
+        decimation_target=options.decimation_target, texture_size=options.texture_size,
+        remesh=True, remesh_band=1, remesh_project=0, verbose=False)
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
+    glb.export(out_path, extension_webp=True)
+
+    del mesh, glb, shape_slat, tex_slat
+    torch.cuda.empty_cache()
+    return {"glb": out_path, "took_seconds": round(time.time() - started, 1),
+            "bytes": os.path.getsize(out_path), "voxels": len(coords),
+            "grid": grid, "eave_room": eave_room}
 
 
 # ---------------------------------------------------------------------------
@@ -1004,13 +1277,47 @@ def reconstruct(plot: dict[str, Any], out_dir: str, *, image: str | None = None,
     return {**report, "image": image, **made, **fit}
 
 
+def reconstruct_in_envelope(plot: dict[str, Any], out_dir: str, *, image: str,
+                            mesh_options: MeshOptions | None = None,
+                            eave_room: float = EAVE_ROOM,
+                            name: str = "building") -> dict[str, Any]:
+    """One plot to one placed building, with the plot holding the massing.
+
+    :func:`reconstruct` and this differ in where the shape comes from, and
+    everything else follows from that. There the picture carries the shape, so
+    it has to be a render of this plot's own massing, brushed up by an image
+    model; the mesh then arrives at some size and heading of its own and the fit
+    has to recover them, with a stretch to make up the rest. Here
+    :func:`envelope_coords` holds the plan and the height, so the picture is
+    only asked what the building is made of — the same photograph can serve
+    several plots — and the fit is a uniform placement rather than a rescue.
+
+    ``image`` is required, and is not optional in the way it is for
+    :func:`reconstruct`: without an envelope a prompt-drawn picture returns a
+    building of the model's own proportions, which is why that path renders the
+    massing at all. With one, a prompt-drawn picture is the point.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    made = to_mesh_in_envelope(
+        image, os.path.join(out_dir, f"{name}.glb"),
+        footprint=plot["footprint"], height=float(plot["height"]),
+        options=mesh_options, eave_room=eave_room)
+    # No stretch: the plan came from this plot, so a mesh that does not fit it
+    # is a mesh that departed from its envelope, and squeezing it would hide
+    # exactly the thing the IoU is there to report.
+    fit = fit_glb(made["glb"], plot, out_path=os.path.join(out_dir, f"{name}.obj"),
+                  stretch=0.0)
+    return {"image": image, **made, **fit}
+
+
 def fit_glb(glb_path: str, plot: dict[str, Any], *, out_path: str | None = None,
-            yaw_steps: int = 360) -> dict[str, Any]:
+            yaw_steps: int = 360, stretch: float | None = None) -> dict[str, Any]:
     """Read a reconstruction, fit it to the plot it came from, and write it out."""
     vertices, faces = read_glb(glb_path)
     vertices = to_scene_axes(vertices)
     fit = fit_to_footprint(vertices, plot["footprint"], float(plot["base_z"]),
-                           yaw_steps=yaw_steps)
+                           yaw_steps=yaw_steps,
+                           **({} if stretch is None else {"stretch": stretch}))
     placed = place(vertices, yaw=math.radians(fit["yaw_deg"]), scale=fit["scale_xy"],
                    stretch_deg=fit["stretch_deg"],
                    centre=(fit["centre"][0], fit["centre"][1]), base_z=fit["base_z"])

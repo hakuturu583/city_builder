@@ -21,6 +21,7 @@ come from the map and are left exactly as they are.
 
 from __future__ import annotations
 
+import contextlib
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -91,6 +92,31 @@ def _make_seamless(module) -> None:
             layer.padding_mode = "circular"
 
 
+@contextlib.contextmanager
+def vram_budget(gigabytes: float):
+    """Cap this process's share of the card, and give it back afterwards.
+
+    ``set_per_process_memory_fraction`` is process-wide and sticky, which is
+    easy to miss when each model here sets its own budget on the way in. It
+    cost a building: the tile stage caps the process at 6 GB so it does not
+    grow into a neighbour on a shared card, and the reconstruction that ran
+    after it in the same process then failed with "6.00 GiB allowed" on a card
+    with 25 GB free. A budget belongs to the model that asked for it, so it is
+    a scope rather than a setting.
+    """
+    import torch
+
+    on = gigabytes > 0 and torch.cuda.is_available()
+    if on:
+        total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        torch.cuda.set_per_process_memory_fraction(min(1.0, gigabytes / total), 0)
+    try:
+        yield
+    finally:
+        if on:
+            torch.cuda.set_per_process_memory_fraction(1.0, 0)
+
+
 def diffusion_tile(prompt: str, options: TextureOptions, *, negative_prompt: str = ""):
     """Generate one tileable texture with a diffusion model.
 
@@ -100,36 +126,34 @@ def diffusion_tile(prompt: str, options: TextureOptions, *, negative_prompt: str
     import torch
     from diffusers import AutoPipelineForText2Image
 
-    if options.vram_budget_gb > 0 and torch.cuda.is_available():
-        total = torch.cuda.get_device_properties(0).total_memory / 1024**3
-        torch.cuda.set_per_process_memory_fraction(min(1.0, options.vram_budget_gb / total), 0)
+    with vram_budget(options.vram_budget_gb):
+        pipeline = AutoPipelineForText2Image.from_pretrained(
+            options.model, torch_dtype=torch.float16, variant="fp16", use_safetensors=True
+        )
+        pipeline.set_progress_bar_config(disable=True)
+        # Keep the peak bounded on a shared card: one module on the GPU at a time.
+        pipeline.enable_model_cpu_offload()
+        pipeline.enable_vae_tiling()
+        pipeline.enable_attention_slicing()
 
-    pipeline = AutoPipelineForText2Image.from_pretrained(
-        options.model, torch_dtype=torch.float16, variant="fp16", use_safetensors=True
-    )
-    pipeline.set_progress_bar_config(disable=True)
-    # Keep the peak bounded on a shared card: one module on the GPU at a time.
-    pipeline.enable_model_cpu_offload()
-    pipeline.enable_vae_tiling()
-    pipeline.enable_attention_slicing()
+        _make_seamless(pipeline.unet)
+        _make_seamless(pipeline.vae)
 
-    _make_seamless(pipeline.unet)
-    _make_seamless(pipeline.vae)
+        generator = torch.Generator(device="cpu").manual_seed(options.seed)
+        image = pipeline(
+            prompt=prompt,
+            negative_prompt=(negative_prompt
+                             or "people, cars, text, watermark, seam, border, vignette"),
+            width=options.size,
+            height=options.size,
+            num_inference_steps=options.steps,
+            guidance_scale=options.guidance,
+            generator=generator,
+        ).images[0]
 
-    generator = torch.Generator(device="cpu").manual_seed(options.seed)
-    image = pipeline(
-        prompt=prompt,
-        negative_prompt=negative_prompt or "people, cars, text, watermark, seam, border, vignette",
-        width=options.size,
-        height=options.size,
-        num_inference_steps=options.steps,
-        guidance_scale=options.guidance,
-        generator=generator,
-    ).images[0]
-
-    del pipeline
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+        del pipeline
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     return np.asarray(image.convert("RGB"))
 
 
@@ -499,10 +523,6 @@ def facade_sheets(prompt, control=None, options: FacadeOptions | None = None, *,
     # horizontal-wrap trick costs memory the allocator has to find somewhere.
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-    if options.vram_budget_gb > 0 and torch.cuda.is_available():
-        total = torch.cuda.get_device_properties(0).total_memory / 1024**3
-        torch.cuda.set_per_process_memory_fraction(min(1.0, options.vram_budget_gb / total), 0)
-
     prompts = [prompt] * options.count if isinstance(prompt, str) else list(prompt)
     if len(prompts) != options.count:
         raise ValueError(f"{len(prompts)} prompt(s) for {options.count} sheet(s)")
@@ -518,48 +538,49 @@ def facade_sheets(prompt, control=None, options: FacadeOptions | None = None, *,
                 "adapter was never loaded")
         reference_image = _as_image(reference)
 
-    owned = pipeline is None
-    pipeline = pipeline or load_facade_pipeline(options)
+    with vram_budget(options.vram_budget_gb):
+        owned = pipeline is None
+        pipeline = pipeline or load_facade_pipeline(options)
 
-    if control is None:
-        raise ValueError("a facade needs a control image; see facade_layout.control_image")
-    wanted = control.shape[1], control.shape[0]  # the layout's own texel size
-    width, height = _sampling_size(wanted, options)
-    control_image = Image.fromarray(control).convert("RGB")
-    if (width, height) != wanted:
-        control_image = control_image.resize((width, height), Image.LANCZOS)
+        if control is None:
+            raise ValueError("a facade needs a control image; see facade_layout.control_image")
+        wanted = control.shape[1], control.shape[0]  # the layout's own texel size
+        width, height = _sampling_size(wanted, options)
+        control_image = Image.fromarray(control).convert("RGB")
+        if (width, height) != wanted:
+            control_image = control_image.resize((width, height), Image.LANCZOS)
 
-    factor = pipeline.vae_scale_factor
-    shape = (1, pipeline.unet.config.in_channels, height // factor, width // factor)
-    latents = _family_latents(shape, options.count, options.variation, options.seed,
-                              pipeline._execution_device, torch.float16)
+        factor = pipeline.vae_scale_factor
+        shape = (1, pipeline.unet.config.in_channels, height // factor, width // factor)
+        latents = _family_latents(shape, options.count, options.variation, options.seed,
+                                  pipeline._execution_device, torch.float16)
 
-    sheets = []
-    for start in range(0, options.count, options.batch):
-        chunk = latents[start:start + options.batch]
-        arguments = {
-            "prompt": prompts[start:start + len(chunk)],
-            "negative_prompt": [negative_prompt or _NEGATIVE] * len(chunk),
-            "width": width,
-            "height": height,
-            "num_inference_steps": options.steps,
-            "guidance_scale": options.guidance,
-            "latents": torch.cat(chunk, dim=0),
-        }
-        if options.controlnet:
-            arguments["image"] = [control_image] * len(chunk)
-            arguments["controlnet_conditioning_scale"] = options.control_scale
-        if reference is not None:
-            arguments["ip_adapter_image"] = [reference_image] * len(chunk)
-        for image in pipeline(**arguments).images:
-            if image.size != wanted:
-                image = image.resize(wanted, Image.LANCZOS)
-            sheets.append(np.asarray(image.convert("RGB")))
+        sheets = []
+        for start in range(0, options.count, options.batch):
+            chunk = latents[start:start + options.batch]
+            arguments = {
+                "prompt": prompts[start:start + len(chunk)],
+                "negative_prompt": [negative_prompt or _NEGATIVE] * len(chunk),
+                "width": width,
+                "height": height,
+                "num_inference_steps": options.steps,
+                "guidance_scale": options.guidance,
+                "latents": torch.cat(chunk, dim=0),
+            }
+            if options.controlnet:
+                arguments["image"] = [control_image] * len(chunk)
+                arguments["controlnet_conditioning_scale"] = options.control_scale
+            if reference is not None:
+                arguments["ip_adapter_image"] = [reference_image] * len(chunk)
+            for image in pipeline(**arguments).images:
+                if image.size != wanted:
+                    image = image.resize(wanted, Image.LANCZOS)
+                sheets.append(np.asarray(image.convert("RGB")))
 
-    if owned:
-        del pipeline
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        if owned:
+            del pipeline
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
     return sheets
 
 

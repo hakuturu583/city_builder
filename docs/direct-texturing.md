@@ -165,7 +165,70 @@ only one where the model is still free to produce something that is not a box,
 and its footprint error is already close to a path that needs three corrective
 mechanisms to beat it — none of which it needs.
 
-What is untested and would decide it: a real photograph as the conditioning
-image rather than the massing wearing SDXL sheets, and whether the remaining
-0.12 of IoU closes with a slightly larger eave allowance or is the shape model
-declining to fill its envelope.
+---
+
+# The picture, once it no longer has to carry the shape
+
+That was the untested half, and it is now tested: with the envelope holding the
+plan, the conditioning picture is free to be a photograph rather than a render
+of this particular block. It is in the package as
+`reconstruct.to_mesh_in_envelope` and reached from the pipeline with
+`--envelope`.
+
+## What decides whether it works, and it is not the prompt
+
+**One whole building, on nothing.** TRELLIS takes the entire frame as the
+subject. Asked for a *photograph of an ordinary Japanese suburban house*, SDXL
+returns the house in its street — sky, garden, fence, the neighbours — and
+`cut_out` has no plain field to key out, so all of it is fed in. What came back
+was a smear with the sky and the grass baked into the walls. This is the whole
+difficulty, and the prompt has to be about the *frame*, not the building.
+
+Measured over three phrasings, two seeds each, by the share of the frame
+`cut_out` can call backdrop:
+
+| prompt | backdrop | what came back |
+|---|---|---|
+| "…house, plain white background" | 8–15 % | a close-up crop; the mesh is a smear |
+| "studio product photograph of a **scale model** of …" | 39–45 % | a building |
+| "isolated object on a flat neutral grey backdrop, product shot" | 48–59 % | a building |
+
+"A model of" is what the frame responds to, and it costs nothing: the material
+and the weathering survive it, which is all the picture is being asked for. The
+number is now `reconstruct.backdrop_share`, and `reconstruct.photographs`
+redraws on another seed below 0.25 — the failure is far cheaper to catch in the
+picture than in the mesh.
+
+Three pictures, three meshes, on the same plot: footprint IoU 0.878, 0.884,
+0.884. The envelope owns the plan, so the picture only decides whether the
+result is a *building* or a slab.
+
+## A finer grid is worse, and it was not a mismatch
+
+The earlier table showed grid 64 losing to grid 32, and the obvious explanation
+was that a 64 cube was being handed to the 512 flow model, which samples at 32.
+It is not that. Run as the matched pair — `pipeline_type='1024'` with grid 64,
+which is what `run()` itself does — the footprint is unchanged (0.885 against
+0.888) and the *shape* is worse: the 512/32 mesh has modelled ridge tiles, an
+eave and a cream wall with window openings, and the 1024/64 one is a featureless
+beige box. A tighter cast of the envelope leaves the shape model nothing to
+invent. 32 is not a resolution compromise, it is the setting.
+
+## What it cost, and the bug it turned up
+
+The first six-building run lost one to `OutOfMemoryError`, three tries running,
+on a card with 25 GB free — "6.00 GiB allowed".
+`torch.cuda.set_per_process_memory_fraction` is process-wide and sticky, and the
+tile stage sets it to 6 GB so as not to grow into a neighbour on a shared card.
+Every model that ran after it in that process inherited the cap. It is now
+`texture.vram_budget`, a scope rather than a setting, and it was a live defect
+on the shipped path too.
+
+## The four routes
+
+| | shape | surface | footprint | time |
+|---|---|---|---|---|
+| image → 3D (was in the pipeline) | invented | invented | fitted, 0.917 mean, 3 % rejected | 17 s |
+| mesh → texture | the map's, exactly | invented | exact | 26 s |
+| envelope → 3D, from a render | invented inside the map's | invented | 0.882 | 9 s |
+| **envelope → 3D, from a photograph** | invented inside the map's | **photographed** | 0.85–0.97 | 9 s |

@@ -49,6 +49,82 @@ def test_make_tile_honours_the_procedural_flag(tmp_path):
     assert tile.shape == (64, 64, 3)
 
 
+# --- the card, which the next stage also wants -------------------------------
+
+
+def test_a_budget_is_given_back_when_the_model_is_done(monkeypatch):
+    """It cost a building. `set_per_process_memory_fraction` is process-wide
+    and sticky, so the 6 GB the tile stage caps itself to was still in force
+    when TRELLIS ran after it — "6.00 GiB allowed" on a card with 25 GB free.
+    """
+    asked = []
+
+    class _Cuda:
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def get_device_properties(_index):
+            return type("P", (), {"total_memory": 32 * 1024**3})()
+
+        @staticmethod
+        def set_per_process_memory_fraction(fraction, _device):
+            asked.append(round(fraction, 4))
+
+    import torch
+
+    monkeypatch.setattr(torch, "cuda", _Cuda)
+    with texture.vram_budget(8.0):
+        assert asked == [0.25]
+    assert asked == [0.25, 1.0]
+
+
+def test_a_budget_is_given_back_even_when_the_model_fails(monkeypatch):
+    released = []
+
+    class _Cuda:
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def get_device_properties(_index):
+            return type("P", (), {"total_memory": 32 * 1024**3})()
+
+        @staticmethod
+        def set_per_process_memory_fraction(fraction, _device):
+            released.append(fraction)
+
+    import torch
+
+    monkeypatch.setattr(torch, "cuda", _Cuda)
+    with pytest.raises(RuntimeError), texture.vram_budget(8.0):
+        raise RuntimeError("CUDA out of memory")
+    assert released[-1] == 1.0
+
+
+def test_no_budget_touches_nothing(monkeypatch):
+    """A stage that wants the whole card must not set a fraction at all."""
+    touched = []
+
+    class _Cuda:
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def set_per_process_memory_fraction(fraction, _device):
+            touched.append(fraction)
+
+    import torch
+
+    monkeypatch.setattr(torch, "cuda", _Cuda)
+    with texture.vram_budget(0.0):
+        pass
+    assert not touched
+
+
 # --- how it lands on the scene ----------------------------------------------
 
 
