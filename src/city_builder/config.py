@@ -41,6 +41,21 @@ class GroundOptions:
     clearance: float = ground_module.DEFAULT_CLEARANCE  # above the street before a ramp is elevated
     drop: float = 0.05  # hold the ground this far under the road
     fill_island: float = 0.0  # absorb junction scraps below this area (m2)
+    order: int = ground_module.DEFAULT_ORDER  # 2 = thin plate, 1 = the old harmonic fill
+    # Where the shape of the ground between the roads comes from. Only its
+    # *curvature* is ever used — the road elevations stay exact whichever of
+    # these is on — so the two are interchangeable and can be stacked: with
+    # both, the survey is used where it reaches and the invented terrain fills
+    # in behind it. See city_builder.elevation.
+    elevation_model: bool = False       # a published survey, downloaded
+    elevation_cache: str | None = None
+    relief: bool = False                # terrain invented from the keys below
+    relief_amplitude: float = 2.5       # m between the lowest and highest ground
+    relief_metres: float = 140.0        # how far across the largest feature is
+    relief_octaves: int = 4             # halvings of that size added on top
+    relief_roughness: float = 0.45      # how much of the last each octave keeps
+    relief_warp: float = 0.35           # bends the features; 0 is plain fBm
+    relief_seed: int = 0
 
 
 @dataclass

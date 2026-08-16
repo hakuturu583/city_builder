@@ -373,3 +373,45 @@ def test_saturation_tells_grey_from_coloured():
     brick = procedural_facade(layout, width, height, seed=1, wall=(0.55, 0.24, 0.18),
                               glass=(0.2, 0.3, 0.4))
     assert saturation(grey) < 0.1 < saturation(brick)
+
+
+# --- what the ground floor is ------------------------------------------------
+
+
+def test_a_house_does_not_have_a_shop_under_it():
+    """Where "the windows are enormous" came from.
+
+    The numbers were written for a mid-rise and applied to houses. On a
+    two-storey building a ground-floor ratio of 1.8 gives the shop nearly two
+    thirds of the height, and a shopfront 0.92 of a bay wide glazes almost all
+    of that.
+    """
+    for seed in range(20):
+        house = sample_layout(2, random.Random(seed), facade_width=7.0, kind="house")
+        shop = sample_layout(2, random.Random(seed), facade_width=7.0, kind="commercial")
+        assert house.ground_floor_ratio < 1.2, "a house's ground floor is a floor"
+        assert house.shopfront_width < shop.shopfront_width
+        assert house.shopfront_height < shop.shopfront_height
+
+
+def test_a_house_window_is_a_window_and_not_a_wall():
+    for seed in range(20):
+        house = sample_layout(2, random.Random(seed), facade_width=7.0, kind="house")
+        bay = 7.0 / house.bays
+        # 0.5 m is a stair or a bathroom, 2 m is a living room. Both are windows;
+        # the commercial range runs past 3 m, which on a house is a shopfront.
+        assert 0.5 <= house.window_width * bay <= 2.0
+
+
+def test_a_house_bay_is_a_window_and_a_pier():
+    """A structural span for a commercial frame, a window's worth for a house."""
+    wide = [sample_layout(2, random.Random(s), facade_width=12.0, kind="commercial").bays
+            for s in range(20)]
+    narrow = [sample_layout(2, random.Random(s), facade_width=12.0, kind="house").bays
+              for s in range(20)]
+    assert sum(narrow) > sum(wide)
+
+
+def test_a_kind_nobody_builds_is_refused():
+    with pytest.raises(ValueError, match="facade kind"):
+        sample_layout(2, random.Random(0), kind="cathedral")

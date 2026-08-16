@@ -12,7 +12,14 @@
 #
 # No CUDA base image. The torch wheels carry their own CUDA runtime, so a slim
 # Python and `--gpus all` is the whole of it — measured here, `torch.cuda` sees
-# the card and paints a facade in 1.7 s.
+# the card and paints a facade in 1.7 s. The one exception is building
+# TRELLIS.2's CUDA extensions, which is why there is a stage that installs a
+# toolkit and nothing that ships it.
+#
+# One gated model to know about before running the reconstruction: TRELLIS.2
+# conditions on DINOv3, whose weights download only for an account that has
+# accepted Meta's terms. Pass a token — `-e HF_TOKEN=...`, or a token file on
+# the /cache volume. Nothing else here needs an account.
 #
 # Model *weights* are not in here. They are downloaded, and a few gigabytes
 # each, so they belong on the volume at /cache rather than in a layer.
@@ -20,6 +27,12 @@
 # Drop the diffusion stack for a 1.8 GB image without the texture tools:
 #
 #     docker build --build-arg EXTRAS=mcp -t city-builder-mcp:slim .
+#
+# Building the CUDA extensions is most of the build time, and most of *that* is
+# emitting kernels for five architectures. Building for one is minutes rather
+# than the better part of an hour:
+#
+#     docker build --build-arg TORCH_CUDA_ARCH_LIST=12.0 -t city-builder-mcp .
 
 FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim AS build
 
@@ -29,7 +42,7 @@ ENV UV_COMPILE_BYTECODE=1 \
 
 # Which optional dependency groups go in. Drop `texture comfy` for an image
 # without the diffusion stack — a quarter of the size, and four fewer tools.
-ARG EXTRAS="mcp texture comfy"
+ARG EXTRAS="mcp texture comfy reconstruct"
 
 WORKDIR /app
 
@@ -62,6 +75,89 @@ RUN git clone --filter=blob:none https://github.com/comfyanonymous/ComfyUI.git /
     && rm -rf /opt/ComfyUI/.git /opt/ComfyUI/custom_nodes/ComfyUI-GGUF/.git
 
 
+# TRELLIS.2 is a checkout too, and five CUDA extensions that are not on PyPI.
+FROM alpine/git:latest AS trellis
+
+ARG TRELLIS_REF=main
+ARG CUMESH_REF=main
+ARG FLEXGEMM_REF=main
+ARG NVDIFFRAST_REF=v0.4.0
+ARG NVDIFFREC_REF=renderutils
+
+RUN git clone --depth 1 --branch ${TRELLIS_REF} \
+        https://github.com/microsoft/TRELLIS.2.git /opt/TRELLIS.2 \
+    && rm -rf /opt/TRELLIS.2/.git \
+    && mkdir -p /src \
+    && git clone --depth 1 --recursive --branch ${CUMESH_REF} \
+        https://github.com/JeffreyXiang/CuMesh.git /src/CuMesh \
+    && git clone --depth 1 --recursive --branch ${FLEXGEMM_REF} \
+        https://github.com/JeffreyXiang/FlexGEMM.git /src/FlexGEMM \
+    && git clone --depth 1 --branch ${NVDIFFRAST_REF} \
+        https://github.com/NVlabs/nvdiffrast.git /src/nvdiffrast \
+    && git clone --depth 1 --branch ${NVDIFFREC_REF} \
+        https://github.com/JeffreyXiang/nvdiffrec.git /src/nvdiffrec \
+    && cp -r /opt/TRELLIS.2/o-voxel /src/o-voxel
+
+
+# Compiling those five is the one thing here that needs a CUDA toolkit, and it
+# is the reason this stage exists rather than the final image growing one: nvcc
+# and its headers are three gigabytes that nothing at run time opens. They are
+# built into *this project's own* virtualenv, because a torch extension is
+# bound to the torch it was compiled against — which is also why they cannot be
+# declared as dependencies and resolved.
+FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim AS extensions
+
+# Must be the same CUDA *major* as the torch the lock file resolved: an
+# extension compiled against a different one does not load. The check below
+# fails the build rather than letting that surface as an ImportError on a
+# machine with a GPU in it.
+ARG CUDA_APT=13-0
+# Which cards the kernels are emitted for. Ampere through Blackwell by default;
+# every architecture is minutes of compilation and megabytes of image, so cut
+# this to the card you have if you are building for yourself.
+ARG TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0;12.0"
+
+RUN apt-get update && apt-get install --no-install-recommends -y \
+        ca-certificates curl gnupg build-essential git \
+        # Eigen is a header-only dependency of o-voxel and is not vendored.
+        libeigen3-dev \
+    && curl -fsSL -o /tmp/keyring.deb \
+        https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb \
+    && dpkg -i /tmp/keyring.deb && rm /tmp/keyring.deb \
+    && apt-get update \
+    # The toolkit only. Never `cuda`, which pulls cuda-drivers and would replace
+    # the host driver the container is given.
+    && apt-get install --no-install-recommends -y cuda-toolkit-${CUDA_APT} \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /app /app
+COPY --from=trellis /src /src
+
+ENV PATH="/usr/local/cuda/bin:/app/.venv/bin:$PATH" \
+    CPATH=/usr/include/eigen3 \
+    UV_LINK_MODE=copy \
+    MAX_JOBS=8
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    # A build without the `reconstruct` extra has no torch, and nothing here to
+    # compile against. Skipping is the whole difference for the slim image.
+    if ! /app/.venv/bin/python -c "import torch" 2>/dev/null; then \
+        echo "== no torch in this build; skipping the CUDA extensions"; exit 0; \
+    fi \
+    && torch_cuda=$(/app/.venv/bin/python -c "import torch; print(torch.version.cuda)") \
+    && nvcc_cuda=$(nvcc --version | sed -n 's/.*release \([0-9]*\)\..*/\1/p') \
+    && echo "== torch built for CUDA ${torch_cuda}, toolkit is ${nvcc_cuda}.x" \
+    && case "${torch_cuda}" in "${nvcc_cuda}".*) ;; *) \
+        echo "CUDA major mismatch: torch wants ${torch_cuda}, the toolkit is ${nvcc_cuda}.x." \
+             "Set --build-arg CUDA_APT to match." >&2; exit 1;; esac \
+    && for extension in o-voxel CuMesh FlexGEMM nvdiffrast nvdiffrec; do \
+        echo "== building $extension for ${TORCH_CUDA_ARCH_LIST}" \
+        && TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}" \
+           uv pip install --python /app/.venv/bin/python --no-build-isolation \
+               "/src/$extension" || exit 1; \
+    done
+
+
 FROM python:3.11-slim-bookworm
 
 # What bpy links against. libgl1/libegl1 and the Mesa drivers are for the
@@ -76,8 +172,11 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
         gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=build /app /app
+# From `extensions`, not from `build`: it is the same /app with the five
+# compiled extensions installed into its virtualenv.
+COPY --from=extensions /app /app
 COPY --from=comfy /opt/ComfyUI /opt/ComfyUI
+COPY --from=trellis /opt/TRELLIS.2 /opt/TRELLIS.2
 
 # The node that lets a sampler start from a render rather than from noise. H3
 # ships nothing that does this: its keyframe conditioning is re-injected every
@@ -94,6 +193,9 @@ COPY --from=build /app/src/city_builder/comfy_nodes/entrypoint.sh /usr/local/bin
 
 ENV PATH="/app/.venv/bin:$PATH" \
     COMFYUI_PATH=/opt/ComfyUI \
+    # TRELLIS.2 is a checkout with no package to install, so the pipeline puts
+    # this on sys.path rather than importing it by name.
+    TRELLIS2_PATH=/opt/TRELLIS.2 \
     PYTHONUNBUFFERED=1 \
     # Model weights are several gigabytes and are downloaded, not shipped, so
     # they must not land in the container's own writable layer — that is thrown

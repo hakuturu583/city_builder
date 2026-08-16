@@ -150,8 +150,12 @@ def _round8(value: float) -> int:
     return max(8, round(value / 8.0) * 8)
 
 
+KINDS = ("commercial", "house")
+
+
 def sample_layout(floors: int, rng, *, facade_width: float = 12.0,
-                  bay_metres: float = 3.0) -> FacadeLayout:
+                  bay_metres: float | None = None,
+                  kind: str = "commercial") -> FacadeLayout:
     """A layout for ``floors`` storeys, drawn at random within plausible bounds.
 
     One canonical drawing per floor count was the right thing while the
@@ -163,8 +167,38 @@ def sample_layout(floors: int, rng, *, facade_width: float = 12.0,
     The window width does most of the work. Narrow openings in a wide pier read
     as a punched-window block; at the top of the range the piers thin out to
     mullions and the same code draws a ribbon window.
+
+    ``kind`` decides whether the ground floor is a shop. It has to, because
+    these numbers were written for a mid-rise and applied to houses they are
+    absurd: at a ground-floor ratio of 1.8 the shop takes nearly two thirds of
+    a two-storey building's height, and a shopfront 0.92 of a bay wide glazes
+    the whole of it. A house has the same window on every floor, a narrower bay
+    — one window and a pier, not a structural span — and no shop at all.
     """
+    if kind not in KINDS:
+        raise ValueError(f"facade kind must be one of {KINDS}, not {kind!r}")
+    if bay_metres is None:
+        bay_metres = 3.0 if kind == "commercial" else 2.0
     bays = max(1, round(facade_width / rng.uniform(bay_metres * 0.8, bay_metres * 1.5)))
+
+    if kind == "house":
+        width = rng.uniform(0.30, 0.52)
+        height = rng.uniform(0.32, 0.46)
+        return FacadeLayout(
+            floors=floors,
+            bays=bays,
+            ground_floor_ratio=rng.uniform(0.95, 1.15),
+            window_width=width,
+            window_height=height,
+            window_base=rng.uniform(0.22, 0.38),
+            # No shop: the ground floor gets the same opening as the rest, give
+            # or take the entrance being a little taller.
+            shopfront_width=width * rng.uniform(0.9, 1.35),
+            shopfront_height=height * rng.uniform(1.0, 1.3),
+            shopfront_base=rng.uniform(0.04, 0.14),
+            parapet=rng.uniform(0.0, 0.02),
+        )
+
     return FacadeLayout(
         floors=floors,
         bays=bays,

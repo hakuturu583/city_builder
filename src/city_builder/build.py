@@ -35,6 +35,9 @@ class BuildResult:
     # One record per generated building, in the order of ``groups["Buildings"]``.
     # Carries the floor count, which decides which facade sheet it may wear.
     plots: list[dict[str, Any]] = field(default_factory=list)
+    # The dissolved carriageway. Expensive to build and wanted again by the
+    # ground cover, which measures its verges from it.
+    road_union: Any = None
 
 
 def build_city(
@@ -54,17 +57,28 @@ def build_city(
     clearance: float = ground_module.DEFAULT_CLEARANCE,
     ground_drop: float = 0.05,
     fill_island: float = 0.0,
+    ground_order: int = ground_module.DEFAULT_ORDER,
+    elevation_model: bool = False,
+    elevation_cache: str | None = None,
+    relief=None,
     buildings: bool = False,
     building_options: BuildingOptions | None = None,
     viaduct_options: ViaductOptions | None = None,
     marking_options: MarkingOptions | None = None,
     extend_options: ExtendOptions | None = None,
+    cover_options=None,
     verbose: bool = True,
 ) -> BuildResult:
     """Read a map and produce every surface, without touching Blender.
 
     Split out from the scene building so the geometry can be inspected, tested
     or fed somewhere other than Blender.
+
+    ``cover_options`` is read here for one thing only: standing water, which is
+    the single land-cover class that changes the *shape* of the ground rather
+    than its colour. The rest of the cover is a texture and is applied at scene
+    time. A palette with no water rule in it is never even classified, so a
+    build without water is the build it always was.
     """
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"Lanelet2 map not found: {input_path}")
@@ -98,12 +112,15 @@ def build_city(
     clipped = clip_crosswalks(groups, surface_options.crosswalk_lift
                               if surface_options else SurfaceOptions().crosswalk_lift)
     buried = clip_curbs(groups)
+    paved_over = clip_walkways(groups)
 
     stats = {name: len(shapes) for name, shapes in groups.items()}
     stats["extended_ends"] = plan.stats.get("extended", 0)
     stats["dangling_ends"] = plan.stats.get("dangling_ends", 0)
     if verbose:
         print(f"[build] surfaces: {stats}")
+        if paved_over:
+            print(f"[build] walkways: {paved_over:.0f} m2 lapping the carriageway removed")
         if clipped:
             print(f"[build] crossings clipped to the carriageway "
                   f"({clipped:+d} surface(s) after the cut)")
@@ -114,22 +131,79 @@ def build_city(
 
     elevated: set[int] = set()
     heightmap = None
+    road_union = None
+    water: list[Any] = []
     if ground:
         surfaces = list(groups.get("Roads", [])) + list(groups.get("Junctions", []))
         adjacency = lanelet.build_adjacency(lanelet.lanelet_end_keys(lmap))
+        # Where the shape of the ground comes from: a downloaded survey, an
+        # invented terrain, or both with the survey first and the invention
+        # behind it. Only the curvature is taken — see city_builder.elevation.
+        # The grid is not settled until the heightmap is being built, so this
+        # goes in as a callback and the extent comes back to it.
+        found: dict[str, Any] = {}
+
+        def terrain_shape(x0, y0, nx, ny, cell_size, found=found, surfaces=surfaces):
+            from . import elevation as elevation_module
+
+            sources: list[Any] = []
+            if elevation_model:
+                sources += elevation_module.web_sources(elevation_cache)
+            if relief is not None:
+                # The map's own latitude, so "140 m across" is 140 m here.
+                sources.append(elevation_module.InventedTiles(
+                    relief, latitude=frame.ref_lat))
+            if not sources:
+                return None
+
+            samples = [tuple(p) for r in surfaces for p in (*r.left, *r.right)]
+            got = elevation_module.prior_for(frame, x0, y0, nx, ny, cell_size, samples,
+                                             sources=sources)
+            if got is None:
+                return None
+            shape, coverage = got
+            found["coverage"] = coverage
+            return shape
+
         elevated, heightmap = ground_module.classify(
             surfaces, adjacency,
             cell=cell, z_gap=z_gap, min_overlap=min_overlap,
             clearance=clearance, smooth=smooth, drop=ground_drop,
+            order=ground_order,
+            guidance=terrain_shape if (elevation_model or relief is not None) else None,
             bounds=plan.box if plan.points else None,
         )
         if heightmap is None:
             raise RuntimeError("no ground-level road surfaces found; cannot build a ground surface")
 
+        # Before the mesh, because this changes the heights the mesh is built
+        # from. The class grid it reads is the one the painter will build again
+        # at scene time, minus the road and plot geometry, which do not exist
+        # yet — neither is produced until this mesh is. A rule that painted
+        # water relative to a road would therefore not be honoured here; none
+        # does, because standing water is said with Region.
+        water_meshes: list[Any] = []
+        if cover_options is not None:
+            from . import cover as cover_module
+
+            if cover_module.paints_water(cover_options):
+                painted = cover_module.classify(heightmap, cover_options)
+                water = cover_module.flatten_water(heightmap, painted)
+                water_meshes = cover_module.water_surface(water)
+                if verbose:
+                    for body in water:
+                        print(f"[build] water: {body.area:.0f} m2 levelled at "
+                              f"{body.level:+.2f} m, its bank at {body.bank:+.2f} m; "
+                              f"the interpolation had it falling {body.fall:.2f} m "
+                              f"across")
+
         mesh, road_union = ground_module.build_mesh(heightmap, surfaces, elevated,
                                                     fill_island=fill_island, drop=ground_drop,
                                                     return_road_union=True)
         groups["Ground"] = [mesh]
+        if water_meshes:
+            groups["Water"] = water_meshes
+            stats["water"] = [body.to_json() for body in water]
 
         # An elevated lanelet is surveyed as a driving surface and nothing
         # else: no slab, no soffit, no columns. Which *parts* of it are a bridge
@@ -145,6 +219,17 @@ def build_city(
                   + ", ".join(f"{len(v)} {k[7:].lower()}" for k, v in structure.items() if v))
 
         measured = float((heightmap.support == 0).mean() * 100)
+        if found.get("coverage") is not None:
+            stats["terrain"] = found["coverage"].to_json()
+            if verbose:
+                c = found["coverage"]
+                print(f"[build] terrain: {c.source} at {c.metres_per_pixel:.1f} m/px, "
+                      f"{c.covered*100:.0f}% coverage, datum offset {c.datum_offset:+.2f} m, "
+                      f"disagrees with the roads by {c.residual_p90:.2f} m (p90) — "
+                      f"its shape is used, its heights are not")
+        elif (elevation_model or relief is not None) and verbose:
+            print("[build] terrain: no source covers this map; "
+                  "the ground is interpolated from the roads alone")
         stats.update({
             "elevated_lanelets": len(elevated),
             "ground_faces": len(mesh.faces),
@@ -166,6 +251,13 @@ def build_city(
         if heightmap is None:
             raise RuntimeError("buildings need the ground; do not pass ground=False with buildings=True")
         keep_clear = buildings_module.exclusion_zone(groups) or road_union
+        if water:
+            # The plot generator reads a pond as open ground with no road
+            # anywhere near it, which is its idea of a good place to build.
+            from shapely.ops import unary_union
+
+            keep_clear = unary_union([keep_clear,
+                                      *(b.polygon for b in water if b.polygon is not None)])
         built = buildings_module.generate(heightmap, keep_clear, building_options)
         if built["Buildings"]:
             groups["Buildings"] = built["Buildings"]
@@ -196,7 +288,8 @@ def build_city(
                   f"atlas page(s); the marking geometry is gone")
 
     return BuildResult(frame, groups, heightmap, elevated, datum, stats=stats, plots=plots,
-                       marking_pages=pages, marking_page_of_shape=page_of_shape)
+                       marking_pages=pages, marking_page_of_shape=page_of_shape,
+                       road_union=road_union)
 
 
 def clip_crosswalks(groups: dict[str, list], lift_by: float) -> int:
@@ -244,6 +337,54 @@ def clip_crosswalks(groups: dict[str, list], lift_by: float) -> int:
     dropped = len(crossings) - len(kept)
     groups["Crosswalks"] = kept
     return dropped
+
+
+def clip_walkways(groups: dict[str, list]) -> float:
+    """Take the carriageway back out of every footway. Returns the area removed.
+
+    The mirror of :func:`clip_crosswalks`, and needed for the same reason from
+    the other side. A crossing belongs on the road, so it is cut *down* to it;
+    a walkway does not, so it is cut *away* from it. A walkway lanelet is
+    surveyed along the footway but its boundaries are generous at a junction
+    mouth, and the surface then laps onto the carriageway — measured on the
+    Kashiwanoha map, 9 of one walkway's 91 m2.
+
+    That is not a cosmetic overlap. Every pedestrian surface is lifted 3 cm
+    clear of the road so it does not z-fight with it, so the lapped part is a
+    3 cm lip lying across a lane: a vehicle driving the scene hits a step, and
+    a perception stack sees a kerb where the map says there is none.
+    """
+    from shapely.ops import unary_union
+
+    from .geometry import height_lookup, triangulate_polygon
+    from .viaduct import _footprints
+
+    walkways = groups.get("Walkways")
+    carriageway = list(groups.get("Roads", [])) + list(groups.get("Junctions", []))
+    if not walkways or not carriageway:
+        return 0.0
+
+    road = unary_union(_footprints(carriageway, None))
+    lift = height_lookup([p for r in walkways for p in list(r.left) + list(r.right)])
+
+    kept, removed = [], 0.0
+    for walkway in walkways:
+        footprint = _footprints([walkway], None)
+        if not footprint:
+            continue
+        off_road = footprint[0].difference(road)
+        removed += footprint[0].area - off_road.area
+        if off_road.is_empty:
+            continue
+        for part in getattr(off_road, "geoms", [off_road]):
+            if part.geom_type != "Polygon" or part.area < 0.5:
+                continue
+            mesh = triangulate_polygon(part, lift)
+            if mesh.faces:
+                kept.append(mesh)
+
+    groups["Walkways"] = kept
+    return removed
 
 
 def clip_curbs(groups: dict[str, list], probe: float = 0.6,
@@ -338,12 +479,29 @@ def infill_roads(groups: dict[str, list], options, elevated: set[int] | None = N
     return len(meshes), area
 
 
+def _relief_of(g):
+    """The invented-terrain settings, as the dataclass that generates it."""
+    if not getattr(g, "relief", False):
+        return None
+    from .elevation import Relief
+
+    return Relief(amplitude=g.relief_amplitude, metres=g.relief_metres,
+                  octaves=g.relief_octaves, roughness=g.relief_roughness,
+                  warp=g.relief_warp, seed=g.relief_seed)
+
+
 def build_city_from_config(input_path: str, config, *, buildings: bool = False,
                            ref_lat: float | None = None, ref_lon: float | None = None,
                            projector: str = "utm", z_datum: float | None = None,
-                           z_offset: float = 0.0, verbose: bool = True) -> BuildResult:
+                           z_offset: float = 0.0, cover_options=None,
+                           verbose: bool = True) -> BuildResult:
     """:func:`build_city`, with every option group taken from a
-    :class:`city_builder.config.CityConfig`."""
+    :class:`city_builder.config.CityConfig`.
+
+    ``cover_options`` stays an argument rather than a config section because
+    the cover is not in the config file yet — it is authored in Python, and
+    :func:`build_scene` takes it the same way.
+    """
     g = config.ground
     return build_city(
         input_path, ref_lat=ref_lat, ref_lon=ref_lon, projector=projector,
@@ -351,9 +509,12 @@ def build_city_from_config(input_path: str, config, *, buildings: bool = False,
         surface_options=config.surfaces, marking_options=config.markings,
         ground=g.enabled, cell=g.cell, smooth=g.smooth, z_gap=g.z_gap,
         min_overlap=g.min_overlap, clearance=g.clearance,
-        ground_drop=g.drop, fill_island=g.fill_island,
+        ground_drop=g.drop, fill_island=g.fill_island, ground_order=g.order,
+        elevation_model=g.elevation_model, elevation_cache=g.elevation_cache,
+        relief=_relief_of(g),
         buildings=buildings, building_options=config.buildings,
-        viaduct_options=config.viaduct, extend_options=config.extend, verbose=verbose,
+        viaduct_options=config.viaduct, extend_options=config.extend,
+        cover_options=cover_options, verbose=verbose,
     )
 
 
@@ -488,14 +649,27 @@ def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | Non
                 fbx: str | None = None,
                 ground_texture: str | None = None, tile_metres: float = 12.0,
                 road_tile_metres: float | None = None,
+                roof_texture: str | None = None, roof_tile_metres: float = 3.0,
                 facade_dir: str | None = None, road_texture: str | None = None,
                 marking_options: MarkingOptions | None = None,
+                cover_options=None, cover_path: str | None = None,
+                cover_texels_per_metre: float = 8.0,
                 markings_dir: str | None = None, verbose: bool = True) -> None:
     """Build the result into Blender and export it.
 
     ``ground_texture`` is a tile image to repeat across the ground. Only the
     ground: every lanelet-derived surface keeps the material it was built with,
     because the map already says what those look like.
+
+    ``cover_options`` replaces that one tile with a painted map — grass, gravel,
+    yards and paving where :mod:`city_builder.cover` says they are — baked once
+    into a single image anchored to the scene. It takes precedence over
+    ``ground_texture``, which then serves only as the ``grass`` fallback tile a
+    palette may not have supplied.
+
+    Water is the exception, and it is not handled here at all: it is geometry
+    rather than colour, so :func:`build_city` levelled the ground under it and
+    gave it a surface of its own, which keeps its own material.
 
     The carriageway gets its own metric scale. Paving slabs and road aggregate
     are not the same size: one tile spanning the twelve metres that suits a
@@ -544,7 +718,45 @@ def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | Non
                 print(f"[scene] Buildings: {len(sheets)} facade sheet(s) "
                       f"({matched} floor-matched) across {len(counts)} buildings")
 
-    if ground_texture:
+    if roof_texture:
+        # Its own scale, and a small one. A roof tile is a hand's width and the
+        # pitched roofs this generates are the largest single surfaces in a
+        # low-rise street — at the ground's twelve metres a kawara roof reads as
+        # a tarpaulin.
+        roofs = objects.get("Roofs")
+        if roofs is None:
+            raise RuntimeError("no Roofs object to texture; build with buildings=True")
+        scene.apply_tiled_texture(roofs, roof_texture, roof_tile_metres)
+        if verbose:
+            print(f"[scene] Roofs: tiled {os.path.basename(roof_texture)} every "
+                  f"{roof_tile_metres:g} m")
+
+    if cover_options is not None:
+        from . import cover as cover_module
+
+        ground = objects.get("Ground")
+        if ground is None:
+            raise RuntimeError("no Ground object to texture; build with ground=True")
+        if result.heightmap is None:
+            raise RuntimeError("the ground cover needs the height map")
+        painted = cover_module.classify(
+            result.heightmap, cover_options, roads=result.road_union,
+            plots=[plot["footprint"] for plot in result.plots if plot.get("footprint")])
+        anchor = blend or glb or fbx
+        target = cover_path or (
+            os.path.splitext(os.path.abspath(anchor))[0] + "_ground.png" if anchor
+            else os.path.abspath("ground_cover.png"))
+        report = cover_module.paint(painted, cover_options, target,
+                                    texels_per_metre=cover_texels_per_metre)
+        # One image over the whole map, so the UV spans it once and is anchored
+        # to it — and clamps at the edge rather than wrapping the town round.
+        scene.apply_tiled_texture(ground, target, report["metres"][0],
+                                  origin=tuple(report["origin"]), extend=True)
+        if verbose:
+            spread = ", ".join(f"{k} {v * 100:.0f}%" for k, v in report["surfaces"].items())
+            print(f"[scene] Ground: painted {report['size'][0]}x{report['size'][1]} at "
+                  f"{report['texels_per_metre']:.1f} texels/m — {spread}")
+    elif ground_texture:
         ground = objects.get("Ground")
         if ground is None:
             raise RuntimeError("no Ground object to texture; build with ground=True")

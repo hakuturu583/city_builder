@@ -166,7 +166,34 @@ def test_generate_stands_every_building_on_the_ground():
     for walls, record in zip(result["Buildings"], result["plots"]):
         wall_z = [v[2] for v in walls.vertices]
         assert min(wall_z) == pytest.approx(12.0 - 1.0)  # ground minus the skirt
-        assert max(wall_z) == pytest.approx(12.0 + record["height"])
+        top = 12.0 + record["height"]
+        if record["roof"] in ("gable", "mono"):
+            # A gable end and a mono-pitch's high side are wall, and they climb
+            # with the roof: the extrusion's top is the *eaves*, not the top.
+            assert max(wall_z) > top
+        else:
+            # Flat, or a hip over a plot it can close by itself.
+            assert max(wall_z) == pytest.approx(top)
+
+
+def test_every_record_carries_the_plot_it_was_built_on():
+    """The footprint is the only statement of scale anything downstream has.
+
+    A mesh reconstructed from footage of this building comes back normalised
+    into a unit cube; this ring is what puts it back at the size it was.
+    """
+    hm = _flat_heightmap(12.0)
+    result = B.generate(hm, _cross_roads(), B.BuildingOptions(seed=5), bounds=(0, 0, 200, 200))
+
+    for walls, record in zip(result["Buildings"], result["plots"]):
+        ring = record["footprint"]
+        assert len(ring) >= 3
+        assert ring[0] != ring[-1], "the ring is not closed; the last point would be a duplicate"
+        assert ShapelyPolygon(ring).area == pytest.approx(record["area"], rel=1e-3)
+        # The same plan the walls were extruded from, to the millimetre it was
+        # rounded to.
+        plan = {(round(x, 3), round(y, 3)) for x, y, _ in walls.vertices}
+        assert {(x, y) for x, y in ring} <= plan
 
 
 def test_generate_returns_nothing_when_there_is_no_room():
@@ -280,3 +307,95 @@ def test_every_building_records_the_floor_count_its_sheet_needs():
     for plot in built["plots"]:
         assert plot["floors"] == pytest.approx(plot["height"] / 3.5, abs=0.01)
         assert plot["floors"] >= 1
+
+
+# --- the base course ---------------------------------------------------------
+
+
+def test_the_plinth_stands_proud_of_the_wall_it_carries():
+    """Without one, a wall meets the ground as a line and reads as card."""
+    plot = box(0, 0, 10, 6)
+    base = B.plinth(plot, 2.0, height=0.35, proud=0.12, skirt=1.0)
+    xs = [v[0] for v in base.vertices]
+    zs = [v[2] for v in base.vertices]
+    assert min(xs) == pytest.approx(-0.12) and max(xs) == pytest.approx(10.12)
+    assert min(zs) == pytest.approx(1.0)  # down to the skirt, like the walls
+    assert max(zs) == pytest.approx(2.35)
+
+
+def test_the_plinth_wears_the_bottom_of_the_sheet_and_not_a_storey():
+    base = B.plinth(box(0, 0, 10, 6), 0.0)
+    assert base.uvs and max(v for _u, v in base.uvs) <= 0.05
+
+
+def test_a_building_is_still_one_wall_mesh_after_the_plinth_joins_it():
+    """A scene has one Buildings object, and a building is a range of faces in it."""
+    hm = _flat_heightmap()
+    result = B.generate(hm, _cross_roads(), B.BuildingOptions(seed=5), bounds=(0, 0, 200, 200))
+    assert len(result["Buildings"]) == len(result["Roofs"]) == len(result["plots"])
+
+
+def test_the_plinth_can_be_turned_off():
+    hm = _flat_heightmap()
+    options = B.BuildingOptions(seed=5, plinth_height=0.0)
+    result = B.generate(hm, _cross_roads(), options, bounds=(0, 0, 200, 200))
+    with_base = B.generate(hm, _cross_roads(), B.BuildingOptions(seed=5),
+                           bounds=(0, 0, 200, 200))
+    assert len(result["Buildings"][0].faces) < len(with_base["Buildings"][0].faces)
+
+
+# --- how much of the lot is used ---------------------------------------------
+
+
+def test_a_building_stands_back_from_the_street_it_faces():
+    """Insetting to coverage leaves the same gap on all four sides.
+
+    A street of those reads as one continuous wall with slots in it. A real lot
+    puts the building at the back and the front is a yard or a parking space.
+    """
+    roads = _cross_roads()
+    options = {"seed": 5, "target_lot_area": 200.0, "min_lot_area": 70.0,
+               "max_road_distance": 0.0}
+    flush = B.footprints(roads, (0, 0, 200, 200), B.BuildingOptions(frontage=0.0, **options))
+    stood_back = B.footprints(roads, (0, 0, 200, 200), B.BuildingOptions(frontage=3.5, **options))
+
+    def frontline(plots):
+        near = [p.distance(roads) for p in plots if p.distance(roads) < 25]
+        return sorted(near)[len(near) // 2]
+
+    assert frontline(stood_back) > frontline(flush) + 2.0
+    # And without losing the street: a lot too small for both a frontage and a
+    # house builds to the street rather than not at all.
+    assert len(stood_back) == len(flush)
+
+
+def test_a_lot_nothing_can_reach_is_not_built_on():
+    roads = _cross_roads()
+    options = {"seed": 5, "target_lot_area": 200.0, "min_lot_area": 70.0,
+               "frontage": 0.0}
+    everywhere = B.footprints(roads, (0, 0, 200, 200),
+                              B.BuildingOptions(max_road_distance=0.0, **options))
+    reachable = B.footprints(roads, (0, 0, 200, 200),
+                             B.BuildingOptions(max_road_distance=30.0, **options))
+    assert len(reachable) < len(everywhere)
+    # The limit is on the *lot*; the building then sits inside it, and the
+    # coverage inset moves it a metre or two further from the street.
+    assert max(p.distance(roads) for p in reachable) <= 30.0 + 3.0
+
+
+def test_the_frontage_is_taken_off_the_side_the_road_is_on():
+    from shapely.geometry import box as shapely_box
+
+    lot = shapely_box(0, 0, 20, 20)
+    road = shapely_box(-10, -6, 30, -1)  # to the south
+    back = B.give_up_the_frontage(lot, road, 5.0)
+    assert back.area < lot.area
+    assert back.centroid.y > lot.centroid.y, "the building moved towards the road"
+
+
+def test_a_lot_with_no_road_keeps_all_of_itself():
+    from shapely.geometry import box as shapely_box
+
+    lot = shapely_box(0, 0, 20, 20)
+    assert B.give_up_the_frontage(lot, None, 5.0) is lot
+    assert B.give_up_the_frontage(lot, shapely_box(-10, -6, 30, -1), 0.0) is lot
