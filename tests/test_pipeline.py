@@ -248,3 +248,52 @@ def test_the_run_writes_down_what_it_did(stubbed, tmp_path):
     assert set(report["stages"]) == {"ground", "materials"}
     assert report["stages"]["ground"]["plots"] == 3
     assert all("seconds" in stage for stage in report["stages"].values())
+
+
+# ---------------------------------------------------------------------------
+# What the run leaves on disk
+# ---------------------------------------------------------------------------
+
+
+def _exports(monkeypatch, tmp_path, *, fbx_raises=None):
+    """The three writers, replaced by a note of what was written."""
+    import city_builder.scene as scene_module
+
+    def save(path):
+        open(path, "w").close()
+
+    def export_glb(path):
+        open(path, "w").close()
+
+    def export_fbx(path):
+        if fbx_raises is not None:
+            raise fbx_raises
+        open(path, "w").close()
+
+    monkeypatch.setattr(scene_module, "save", save)
+    monkeypatch.setattr(scene_module, "export_glb", export_glb)
+    monkeypatch.setattr(scene_module, "export_fbx", export_fbx)
+
+
+def test_the_scene_is_written_as_a_blend_and_gltf_by_default(monkeypatch, tmp_path):
+    _exports(monkeypatch, tmp_path)
+    made = P._write(str(tmp_path), P.Recipe())
+    assert [os.path.basename(p) for p in made] == ["scene.blend", "scene.glb"]
+
+
+def test_asking_for_fbx_writes_one_as_well(monkeypatch, tmp_path):
+    """glTF is what this package's own readers take and it carries the surface
+    mask FBX cannot; FBX is for handing the district to Unreal or Unity."""
+    _exports(monkeypatch, tmp_path)
+    made = P._write(str(tmp_path), P.Recipe(fbx=True))
+    assert [os.path.basename(p) for p in made] == ["scene.blend", "scene.glb", "scene.fbx"]
+    assert os.path.exists(tmp_path / "scene.fbx")
+
+
+def test_an_fbx_that_will_not_write_does_not_lose_the_scene(monkeypatch, tmp_path):
+    """It packs a copy of every texture page, so on a full district it is the
+    largest thing written and the likeliest to run the disk out — at the very
+    end of a run that has already spent two hours on the scene."""
+    _exports(monkeypatch, tmp_path, fbx_raises=RuntimeError("No such file or directory"))
+    made = P._write(str(tmp_path), P.Recipe(fbx=True))
+    assert [os.path.basename(p) for p in made] == ["scene.blend", "scene.glb"]

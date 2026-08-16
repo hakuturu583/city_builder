@@ -739,6 +739,9 @@ def make_command(input_path, out_dir, config_path, facade_dir, road_texture, gro
 @click.option("--limit", type=int, default=None, help="Only the N biggest plots")
 @click.option("--seed", type=int, default=None)
 @click.option("--no-renders", is_flag=True)
+@click.option("--fbx", is_flag=True,
+              help="Also export scene.fbx, Y up with the textures embedded, for "
+                   "Unreal or Unity")
 @click.option("--quiet", is_flag=True)
 def pipeline_command(input_path, out_dir, config_path, stages, force, quiet, **overrides):
     """A Lanelet2 map to a textured, reconstructed city, in one run.

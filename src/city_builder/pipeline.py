@@ -146,6 +146,10 @@ class Recipe:
     # --- scene ----------------------------------------------------------
     renders: bool = True
     glb: bool = True
+    # Off by default and glTF on, because glTF is what this package's own
+    # readers take and it carries the surface mask that FBX cannot. FBX is for
+    # handing the district to Unreal or Unity, which is a thing you ask for.
+    fbx: bool = False
 
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -457,6 +461,18 @@ def _write(out_dir: str, recipe: Recipe) -> list[str]:
         glb = os.path.join(out_dir, "scene.glb")
         scene_module.export_glb(glb)
         made.append(glb)
+    if recipe.fbx:
+        # Last, and its failure is not the run's. A district of reconstructions
+        # is a few hundred megabytes of texture and the FBX exporter packs a
+        # copy of every page into the file; on a full map that is the largest
+        # thing this pipeline writes, and the disk running out at the very end
+        # would otherwise throw away the scene the run just spent two hours on.
+        fbx = os.path.join(out_dir, "scene.fbx")
+        try:
+            scene_module.export_fbx(fbx)
+            made.append(fbx)
+        except (RuntimeError, OSError) as error:
+            print(f"[pipeline] the FBX was not written: {error}")
     return made
 
 
