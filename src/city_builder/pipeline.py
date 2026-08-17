@@ -409,11 +409,19 @@ def _photographs(out_dir: str, recipe: Recipe, state, *, force, verbose):
         # be. Thirty-six PNGs is nothing to measure.
         from PIL import Image
 
-        already = [{"path": path,
-                    "floors": int(key.split("f_", 1)[0]),
-                    "aspect": reconstruct_module.silhouette_aspect(
-                        Image.open(path).convert("RGB"))}
-                   for key, group in families.items() for path in group]
+        already = []
+        for key, group in families.items():
+            for path in group:
+                seen = Image.open(path).convert("RGB")
+                backdrop = reconstruct_module.backdrop_share(seen)
+                edge = reconstruct_module.touches_the_frame(seen)
+                already.append({
+                    "path": path, "floors": int(key.split("f_", 1)[0]),
+                    "aspect": reconstruct_module.silhouette_aspect(seen),
+                    "backdrop": backdrop, "edge": edge,
+                    # Re-checked, not remembered: the whole point of keeping
+                    # them on disk is that nothing about them is written down.
+                    "isolated": backdrop >= 0.25 and edge <= 0.08})
         if verbose:
             print(f"[pipeline] {len(already)} photograph(s) already drawn")
         return _families(reconstruct_module.classify_by_aspect(already))
@@ -433,11 +441,25 @@ def _photographs(out_dir: str, recipe: Recipe, state, *, force, verbose):
 
 
 def _families(drawn) -> dict[str, list[str]]:
-    """The drawn photographs, grouped by the family each turned out to be in."""
+    """The drawn photographs, grouped by the family each turned out to be in.
+
+    A picture that never passed the framing checks is dropped, so long as its
+    family keeps somebody. :func:`~city_builder.reconstruct.photographs` keeps
+    the least bad of its tries rather than returning nothing, which is right
+    for one picture and wrong for a street: seven of thirty-six failed, and
+    what they reconstruct as is confetti, or a building with a lit interior
+    showing through the walls. A sibling of the same storey count and plan
+    shape is a much better answer than the least bad draw.
+    """
     made: dict[str, list[str]] = {}
+    dropped: dict[str, list[str]] = {}
     for row in drawn:
-        made.setdefault(f"{int(row['floors'] or 0)}f_{row['proportion']}",
-                        []).append(row["path"])
+        key = f"{int(row['floors'] or 0)}f_{row['proportion']}"
+        (made if row.get("isolated", True) else dropped).setdefault(
+            key, []).append(row["path"])
+    for key, group in dropped.items():
+        if key not in made:
+            made[key] = group
     return made
 
 

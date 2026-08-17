@@ -326,3 +326,22 @@ def test_an_fbx_that_will_not_write_does_not_lose_the_scene(monkeypatch, tmp_pat
     _exports(monkeypatch, tmp_path, fbx_raises=RuntimeError("No such file or directory"))
     made = P._write(str(tmp_path), P.Recipe(fbx=True))
     assert [os.path.basename(p) for p in made] == ["scene.blend", "scene.glb"]
+
+
+def test_a_photograph_that_never_framed_properly_is_dropped():
+    """`photographs` keeps the least bad of its tries rather than returning
+    nothing, which is right for one picture and wrong for a street: seven of
+    thirty-six failed, and what they reconstruct as is confetti, or a building
+    with a lit interior showing through the walls."""
+    drawn = [{"path": "good.png", "floors": 2, "proportion": "compact",
+              "isolated": True},
+             {"path": "bad.png", "floors": 2, "proportion": "compact",
+              "isolated": False}]
+    assert P._families(drawn) == {"2f_compact": ["good.png"]}
+
+
+def test_the_least_bad_is_kept_when_its_family_has_nobody_else():
+    """A family with no picture at all is worse than a badly framed one."""
+    drawn = [{"path": "bad.png", "floors": 3, "proportion": "elongated",
+              "isolated": False}]
+    assert P._families(drawn) == {"3f_elongated": ["bad.png"]}
