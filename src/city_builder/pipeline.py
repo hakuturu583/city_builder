@@ -40,7 +40,26 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+#: Every stage there is. `reconstruct` is not in :data:`DEFAULT_STAGES` — see
+#: there for why — but naming it explicitly still runs it.
 STAGES = ("ground", "materials", "facades", "reconstruct", "scene")
+
+#: What a run does when nobody says otherwise.
+#:
+#: TRELLIS.2 is out of it. What it contributed was a shape per building and a
+#: PBR texture, and both ends of that have been taken over. The massing variety
+#: is procedural and always was — `massing.py` says so in its own first
+#: paragraph, that the variety is built and only the surfaces are asked for —
+#: and the surfaces now come from a depth- and class-conditioned video model
+#: distilled into the splat cloud, which is 3D-consistent in a way a per-building
+#: reconstruction never was. Measured on this map, a photoreal district came out
+#: of an untextured, purely procedural scene with no reconstruction in it at all.
+#:
+#: What it still uniquely bought was non-prismatic geometry — a curved corner, a
+#: roof a plan operation cannot cut — against sixteen gigabytes of weights, five
+#: CUDA extensions and about a minute and a half per building. At street level
+#: that is not visible, so it is opt-in rather than default.
+DEFAULT_STAGES = ("ground", "materials", "facades", "scene")
 
 # What each ground cover class looks like. Written here rather than in
 # `cover.py` because they are prompts for one particular image model, and the

@@ -6,6 +6,7 @@ import os
 
 import click
 
+from .pipeline import DEFAULT_STAGES as PIPELINE_DEFAULTS
 from .pipeline import STAGES as PIPELINE_STAGES
 
 
@@ -725,8 +726,12 @@ def make_command(input_path, out_dir, config_path, facade_dir, road_texture, gro
 @click.argument("input_path", type=click.Path(exists=True))
 @click.option("--out", "out_dir", required=True, help="Everything is written here")
 @click.option("--config", "config_path", default=None, help="A city_builder config YAML")
-@click.option("--stages", default=",".join(PIPELINE_STAGES),
-              help="Which stages to run, comma separated: " + ", ".join(PIPELINE_STAGES))
+@click.option("--stages", default=",".join(PIPELINE_DEFAULTS),
+              help="Which stages to run, comma separated: "
+                   + ", ".join(PIPELINE_STAGES)
+                   + ". `reconstruct` is not on by default: it wants TRELLIS.2, "
+                     "sixteen gigabytes of weights and five CUDA extensions, and "
+                     "the massing it replaces is already procedural")
 @click.option("--force", default="", help="Stages to run again even though their output is there")
 @click.option("--cell", type=float, default=None, help="Ground grid spacing (m)")
 @click.option("--relief/--no-relief", default=None, help="Invent terrain between the roads")
@@ -754,14 +759,19 @@ def make_command(input_path, out_dir, config_path, facade_dir, road_texture, gro
                    "Unreal or Unity")
 @click.option("--quiet", is_flag=True)
 def pipeline_command(input_path, out_dir, config_path, stages, force, quiet, **overrides):
-    """A Lanelet2 map to a textured, reconstructed city, in one run.
+    """A Lanelet2 map to a textured city, in one run.
 
     Ground and terrain, then the tiles the massing wears, then a facade family
-    per floor count the map produced, then TRELLIS.2 over every plot, then the
-    scene. Each stage is skipped when its output is already there, so an
-    interrupted run continues where it stopped.
+    per floor count the map produced, then the scene. Each stage is skipped when
+    its output is already there, so an interrupted run continues where it
+    stopped.
 
-    **Stages 2-4 need a GPU**, TRELLIS.2 and a diffusion stack; `--stages
+    `reconstruct` — TRELLIS.2, a model per building — is a stage but not a
+    default one. Name it in `--stages` to run it; it wants sixteen gigabytes of
+    weights and five compiled CUDA extensions, and what it replaces is massing
+    that is already procedural.
+
+    **`materials` and `facades` need a GPU** and a diffusion stack; `--stages
     ground,scene` runs the geometry alone.
     """
     from .config import CityConfig
