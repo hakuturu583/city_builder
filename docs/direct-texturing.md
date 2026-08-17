@@ -285,6 +285,45 @@ street is a uniform grey-blue with windows painted on. The image-to-3D street
 has crisper geometry: real hips and gables, where a box envelope filled in
 gives a shallow hip at best.
 
+## The one that the numbers got wrong
+
+`sample_sparse_structure` returns a **surface**, so a solid prism is not the
+kind of object the shape model is used to: its own occupancy measured 4905
+cells of 32768 on this map's conditioning photograph, each column filling 0.62
+of the levels between its own top and bottom, while solid prisms for these
+plots ran to 11 000 at the median and 29 600 at the worst. That is a real
+observation, and it is what the memory failures were made of — the nineteen
+plots that would not generate at all, six attempts each across two processes,
+were exactly the densest, not the largest.
+
+Hollowing the envelope to a one-voxel shell fixed all of it, on paper:
+
+| | image → 3D | envelope, solid | envelope, shell |
+|---|---|---|---|
+| standing | 184/189 | 167/189 | **186/189** |
+| mean IoU | 0.912 | 0.902 | 0.901 |
+| height / block | 1.25 | 1.17 | **1.25** |
+| memory failures | 0 | 19 | **0** |
+| per building | 16 s | 31 s | **13 s** |
+
+And it produced a district of cages. Walls with daylight through them, roofs
+over open frames. **The footprint IoU cannot see it** — a cage has the same
+plan outline as a house — and it was slightly *better* on the cages, which is
+how a whole map got generated before anybody looked at it. Nor does the
+obvious mesh statistic help: open edges ran 0.25 on the shells against 0.38 on
+the solids, because a marching-cubes surface is ragged either way. Nine meshes
+rendered on their own looked fine; the fault was only visible in the street.
+
+So the envelope stays solid, and the memory ceiling is handled where it
+belongs. 22 272 cells generate and 28 672 do not, so a plot over
+`VOXEL_BUDGET` is peeled from the inside, innermost layer first — the middle
+of a building being the least informative thing you can tell a model about
+where the building is. On this map 159 of 189 stay whole, 30 are peeled, and
+the worst lands at 19 994.
+
+The lesson is not about voxels. Every number moved the right way and the thing
+got worse, so the numbers were not measuring the thing. Look at the render.
+
 ## Still open
 
 - **Memory.** The mesher wants a large contiguous allocation and does not
