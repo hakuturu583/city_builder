@@ -504,6 +504,10 @@ def styles_command():
 @click.option("--cameras", "cameras_path", default=None,
               help="Also write the camera pose of every frame as JSON, for "
                    "anything distilling the video back into 3D")
+@click.option("--segmentation-dir", default=None,
+              help="Also render which surface class every pixel is, as flat "
+                   "colour. Build with --marking-geometry, or the lane markings "
+                   "are baked into the road and cannot be told from it")
 @click.option("--quiet", is_flag=True)
 def drive_command(input_path, scene_path, output_path, quiet, **kwargs):
     """Drive a camera along the roads and render it to a video.

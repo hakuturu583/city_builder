@@ -601,6 +601,7 @@ def render_drive(result: BuildResult, input_path: str, scene_path: str, output_p
                  resolution: tuple[int, int] = (1280, 720), samples: int = 32,
                  engine: str = "eevee", route_seed: int = 0,
                  depth_dir: str | None = None, cameras_path: str | None = None,
+                 segmentation_dir: str | None = None,
                  verbose: bool = True) -> str | None:
     """Drive a camera through a built scene and render it.
 
@@ -657,18 +658,23 @@ def render_drive(result: BuildResult, input_path: str, scene_path: str, output_p
         samples=samples, engine="CYCLES" if engine == "cycles" else "BLENDER_EEVEE",
         verbose=verbose)
 
-    if depth_dir:
+    # Each control pass reopens the file: painting distance or identity over
+    # every material is destructive, and the beauty render has to happen first.
+    # The camera is keyed from the same path each time, so frame n is frame n in
+    # all of them.
+    for wanted, render_pass, label in (
+            (depth_dir, "render_depth", "depth"),
+            (segmentation_dir, "render_segmentation", "segmentation")):
+        if not wanted:
+            continue
         from . import conditioning
 
-        # From the file again, because painting distance over every material is
-        # destructive and the beauty render has to happen first. The camera is
-        # keyed from the same path, so frame n is frame n in both.
         bpy.ops.wm.open_mainfile(filepath=os.path.abspath(scene_path))
         scene_module.animate_camera(path, lens=lens)
-        conditioning.render_depth(depth_dir, frames=len(path), resolution=resolution,
-                                  verbose=verbose)
+        getattr(conditioning, render_pass)(wanted, frames=len(path),
+                                           resolution=resolution, verbose=verbose)
         if verbose:
-            print(f"[drive] wrote {len(path)} depth frame(s) to {depth_dir}")
+            print(f"[drive] wrote {len(path)} {label} frame(s) to {wanted}")
 
     return written
 

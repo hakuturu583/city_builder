@@ -187,6 +187,118 @@ def paint_depth(objects=None) -> int:
     return painted
 
 
+def to_linear(value: float) -> float:
+    """The scene-linear value that comes out of the display transform as ``value``.
+
+    A shader colour is scene-linear and an 8-bit render is written through the
+    sRGB transform, so a colour put straight into an emission comes back as a
+    different one. ``masks.py`` measured it: 7/255 in became 34 out. Only the
+    byte-per-channel passes need this — the depth is a float EXR and is not
+    touched by it.
+    """
+    return value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+
+
+def class_colours() -> dict[str, tuple[float, float, float, float]]:
+    """The emission colour per surface class, pre-compensated for the transform.
+
+    The colours are the ones ``classes.py`` already carries. They were chosen to
+    be told apart by eye in a debug render, which is the same property a
+    segmentation control image needs, so there is no second palette here.
+    """
+    from .classes import CLASSES
+
+    return {name: (*(to_linear(c) for c in surface.mask_colour), 1.0)
+            for name, surface in CLASSES.items()}
+
+
+def paint_classes(objects=None) -> dict[str, str]:
+    """Flat emission per object, keyed to the class it belongs to.
+
+    Returns what was painted what, because a control image nothing can name is
+    not much use. An object with no ``cb_class`` — a reconstruction dropped into
+    the scene, say — takes the class of the group it stands in if it can be
+    read off the name, and black otherwise.
+    """
+    import bpy
+
+    palette = class_colours()
+    painted: dict[str, str] = {}
+    for obj in list(objects if objects is not None else bpy.data.objects):
+        if obj.type != "MESH":
+            continue
+        name = str(obj.get("cb_class") or "")
+        if name not in palette and name != "":
+            name = ""
+        if not name:
+            # `rebuilt_b0002_geometry_0` is a building, and says so in its name.
+            name = "Buildings" if obj.name.startswith("rebuilt_") else ""
+
+        colour = palette.get(name, (0.0, 0.0, 0.0, 1.0))
+        material = bpy.data.materials.new(f"Class_{obj.name}")
+        material.use_nodes = True
+        tree = material.node_tree
+        tree.nodes.clear()
+        emission = tree.nodes.new("ShaderNodeEmission")
+        emission.inputs["Color"].default_value = colour
+        emission.inputs["Strength"].default_value = 1.0
+        output = tree.nodes.new("ShaderNodeOutputMaterial")
+        tree.links.new(emission.outputs["Emission"], output.inputs["Surface"])
+        obj.data.materials.clear()
+        obj.data.materials.append(material)
+        painted[obj.name] = name or "(unclassified)"
+    return painted
+
+
+def flatten_for_segmentation() -> None:
+    """As for depth, but written as bytes, so the colours must survive that."""
+    import bpy
+
+    flatten_for_depth()
+    render = bpy.context.scene.render
+    render.image_settings.file_format = "PNG"
+    render.image_settings.color_mode = "RGB"
+    render.image_settings.color_depth = "8"
+    render.image_settings.compression = 0
+
+
+def render_segmentation(out_dir: str, *, frames: int, resolution: tuple[int, int],
+                        verbose: bool = True) -> list[str]:
+    """The keyed camera path again, as which class every pixel belongs to.
+
+    This is the conditioning the depth cannot give. A road surface is one flat
+    plane in depth, so the paint on it carries no signal at all and a
+    depth-conditioned model invents its own lane markings — measured, and the
+    reason this exists. Built with ``--marking-geometry``, ``LaneMarkings`` is
+    an object of its own and lands here as its own colour.
+    """
+    import bpy
+
+    scene = bpy.context.scene
+    scene.render.engine = "BLENDER_EEVEE"
+    scene.render.resolution_x, scene.render.resolution_y = resolution
+    scene.render.resolution_percentage = 100
+
+    painted = paint_classes()
+    flatten_for_segmentation()
+    if verbose:
+        seen = sorted(set(painted.values()))
+        print(f"[segmentation] {len(painted)} object(s) over {len(seen)} class(es): "
+              f"{', '.join(seen)}")
+
+    os.makedirs(out_dir, exist_ok=True)
+    written = []
+    for frame in range(1, frames + 1):
+        scene.frame_set(frame)
+        path = os.path.join(out_dir, f"class_{frame:05d}.png")
+        scene.render.filepath = path[: -len(".png")]
+        bpy.ops.render.render(write_still=True)
+        written.append(path)
+        if verbose and frame % 30 == 0:
+            print(f"[segmentation] {frame}/{frames}")
+    return written
+
+
 def flatten_for_depth() -> None:
     """Take away everything that could tint or blend a distance.
 
