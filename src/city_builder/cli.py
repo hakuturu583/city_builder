@@ -786,3 +786,44 @@ def pipeline_command(input_path, out_dir, config_path, stages, force, quiet, **o
         click.echo(f"  {stage:<12} {got.get('seconds', 0):>7.1f}s  "
                    + ", ".join(f"{k}={v}" for k, v in got.items()
                                if k != "seconds" and not isinstance(v, (list, dict))))
+
+
+@main.command("splat")
+@click.option("--input", "input_path", required=True,
+              help="Mesh to sample: a .glb or .obj, e.g. a reconstruction or scene.glb")
+@click.option("--output", "output_path", required=True, help="Where to write the .ply")
+@click.option("--density", type=float, default=400.0,
+              help="Gaussians per m2 of surface")
+@click.option("--count", type=int, default=None,
+              help="An exact budget instead, split over the meshes by area")
+@click.option("--spread", type=float, default=1.0,
+              help="Disc radius as a multiple of the spacing; below 1.0 shows holes")
+@click.option("--thickness", type=float, default=0.05,
+              help="The flattened axis, as a fraction of the disc radius")
+@click.option("--opacity", type=float, default=0.99)
+@click.option("--seed", type=int, default=0)
+@click.option("--preview", "preview_path", default=None,
+              help="Also rasterise the cloud to this PNG (needs a GPU and gsplat)")
+@click.option("--elevation", type=float, default=35.0, help="Preview camera, degrees")
+@click.option("--azimuth", type=float, default=45.0, help="Preview camera, degrees")
+@click.option("--up", type=click.Choice(["auto", "x", "y", "z"]), default="auto",
+              help="Which axis the preview treats as vertical; auto reads it from "
+                   "the format, glTF being Y-up and everything else Z-up")
+def splat_command(input_path, output_path, density, count, spread, thickness,
+                  opacity, seed, preview_path, elevation, azimuth, up):
+    """Convert a mesh to 3D Gaussian Splatting by sampling its surface."""
+    from .splat import SplatOptions, from_mesh_file, render, write_ply
+
+    options = SplatOptions(density=density, count=count, spread=spread,
+                           thickness=thickness, opacity=opacity, seed=seed)
+    cloud = from_mesh_file(input_path, options=options)
+    write_ply(output_path, cloud)
+    click.echo(f"wrote {output_path}  {len(cloud['means'])} gaussian(s) over "
+               f"{cloud['area']:.1f} m2 of surface from {cloud['meshes']} mesh(es), "
+               f"disc radius {cloud['radius'] * 100:.1f} cm")
+
+    if preview_path:
+        if up == "auto":
+            up = "y" if input_path.lower().endswith((".glb", ".gltf")) else "z"
+        render(cloud, preview_path, elevation=elevation, azimuth=azimuth, up=up)
+        click.echo(f"wrote {preview_path}  (vertical axis: {up})")

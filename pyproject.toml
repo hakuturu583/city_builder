@@ -34,6 +34,17 @@ texture = [
 mcp = [
     "mcp>=1.2",
 ]
+# Turning the meshes into a 3D Gaussian Splatting cloud. The conversion itself
+# is numpy and lives in `splat.py` with no GPU in it — this is the rasteriser
+# that renders the result, which is how a cloud gets checked. gsplat compiles
+# its CUDA kernels on first use rather than at install, so this resolves and
+# installs like any wheel and then wants a toolkit the first time it runs;
+# `trimesh` is what reads the GLB the mesh arrives in.
+splat = [
+    "gsplat>=1.5",
+    "torch>=2.1",
+    "trimesh",
+]
 # A 3D model per building, from TRELLIS.2. Its own CUDA extensions — o-voxel,
 # CuMesh, FlexGEMM, nvdiffrast, nvdiffrec — are compiled against whatever torch
 # ends up here and so cannot be declared: the Dockerfile builds them, and a

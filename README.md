@@ -643,6 +643,46 @@ PyPI is built without FFmpeg, so Blender's own video writer is not there.
 EEVEE renders 720p at about 30 fps of footage per minute of wall clock;
 `--engine cycles` uses OptiX on the GPU for a better-looking, much slower pass.
 
+## Gaussian splatting
+
+Everything above makes triangles. `city-builder splat` turns them into a 3D
+Gaussian Splatting cloud without training anything: the geometry and the
+textures are already known, so the cloud is *derived* — points spread over the
+surface by area, each one a Gaussian flattened into the tangent plane.
+
+```bash
+city-builder splat --input out/scene.glb --output scene.ply \
+                   --count 3000000 --preview scene_splat.png
+```
+
+The output is the PLY the reference implementation writes, so any viewer reads
+it. `--preview` rasterises the result with gsplat, which is the only part of
+this that needs a GPU and is worth running at least once: a cloud with its
+normals flipped or its discs an order of magnitude too big is still a valid
+file, and only a picture says otherwise.
+
+Two things decide how it looks.
+
+**How many.** `--density` is per square metre of surface and `--count` is a flat
+budget split across the meshes by area. Disc size follows from whichever you
+give — spread the same surface thinner and each disc grows to keep it covered —
+so the count is the only knob most scenes need. Note that a TRELLIS.2 `.glb`
+sits in its own unit cube rather than in scene metres, so `--density` means
+something quite different there; the command prints the surface area it found,
+which is how you tell.
+
+**Where the colour comes from.** The texture through the UVs, vertex colours if
+there is no texture, and a flat grey only if there is neither — the `.obj`
+beside each reconstruction is bare geometry and comes out grey, while the
+`.glb` beside it carries the PBR texture. The texture is averaged over each
+splat's footprint rather than point-sampled, because a roof tile is near-white
+against near-black and reading one texel per splat turns a roof into salt and
+pepper.
+
+Installed with the `splat` extra, which brings gsplat. Its CUDA kernels compile
+on first use, so the first render takes a few minutes and every one after that
+does not.
+
 ## Placing other things on this ground
 
 `--heightmap out.json` writes the grid plus the scene anchor, so a building or

@@ -342,6 +342,11 @@ reconstruct = [
     { name = "trimesh" },
     { name = "utils3d" },
 ]
+splat = [
+    { name = "gsplat" },
+    { name = "torch" },
+    { name = "trimesh" },
+]
 texture = [
     { name = "accelerate" },
     { name = "diffusers" },
@@ -378,6 +383,7 @@ requires-dist = [
     { name = "einops", marker = "extra == 'comfy'" },
     { name = "filelock", marker = "extra == 'comfy'" },
     { name = "gguf", marker = "extra == 'comfy'", specifier = ">=0.13.0" },
+    { name = "gsplat", marker = "extra == 'splat'", specifier = ">=1.5" },
     { name = "huggingface-hub", marker = "extra == 'reconstruct'", specifier = ">=0.23" },
     { name = "huggingface-hub", marker = "extra == 'texture'", specifier = ">=0.23" },
     { name = "imageio", marker = "extra == 'reconstruct'" },
@@ -412,6 +418,7 @@ requires-dist = [
     { name = "timm", marker = "extra == 'reconstruct'" },
     { name = "tokenizers", marker = "extra == 'comfy'", specifier = ">=0.13.3" },
     { name = "torch", marker = "extra == 'reconstruct'", specifier = ">=2.1" },
+    { name = "torch", marker = "extra == 'splat'", specifier = ">=2.1" },
     { name = "torch", marker = "extra == 'texture'", specifier = ">=2.1" },
     { name = "torchaudio", marker = "extra == 'comfy'" },
     { name = "torchsde", marker = "extra == 'comfy'" },
@@ -420,10 +427,11 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'reconstruct'", specifier = ">=4.40" },
     { name = "transformers", marker = "extra == 'texture'", specifier = ">=4.40" },
     { name = "trimesh", marker = "extra == 'reconstruct'" },
+    { name = "trimesh", marker = "extra == 'splat'" },
     { name = "utils3d", marker = "extra == 'reconstruct'", git = "https://github.com/EasternJournalist/utils3d.git?rev=9a4eb15e4021b67b12c460c7057d642626897ec8" },
     { name = "yarl", marker = "extra == 'comfy'", specifier = ">=1.18.0" },
 ]
-provides-extras = ["texture", "mcp", "reconstruct", "cuda", "comfy"]
+provides-extras = ["texture", "mcp", "splat", "reconstruct", "cuda", "comfy"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -872,6 +880,22 @@ wheels = [
 ]
 
 [[package]]
+name = "gsplat"
+version = "1.5.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jaxtyping" },
+    { name = "ninja" },
+    { name = "numpy" },
+    { name = "rich" },
+    { name = "torch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6d/94/a0963873708223385ac926112dc3e40ab08297784ac53d95309b4cb5a801/gsplat-1.5.3.tar.gz", hash = "sha256:343f080c470e891ba3c697c03bdf0952cb982d1d535fdc24adb23c2cb4fba906", size = 4743603, upload-time = "2025-07-04T16:50:42.899Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/aa/68/c5cbbdb86421a3f45ac0b52cf9860b1048d089335151d3f37c23aabcbef1/gsplat-1.5.3-py3-none-any.whl", hash = "sha256:515a3773641f5e7f7717acab6276c0b1d6dbcad087b7968ca653337c3189a982", size = 6519041, upload-time = "2025-07-04T16:50:40.559Z" },
+]
+
+[[package]]
 name = "h11"
 version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1028,6 +1052,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/72/34/14ca021ce8e5dfedc35312d08ba8bf51fdd999c576889fc2c24cb97f4f10/iniconfig-2.3.0.tar.gz", hash = "sha256:c76315c77db068650d49c5b56314774a7804df16fee4402c1f19d6d15d8c4730", size = 20503, upload-time = "2025-10-18T21:55:43.219Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/cb/b1/3846dd7f199d53cb17f49cba7e651e9ce294d8497c8c150530ed11865bb8/iniconfig-2.3.0-py3-none-any.whl", hash = "sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12", size = 7484, upload-time = "2025-10-18T21:55:41.639Z" },
+]
+
+[[package]]
+name = "jaxtyping"
+version = "0.3.11"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "wadler-lindig" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/91/c1/091b8852bd7cbf50bd655543c8506033cf4029300c67f8c176c1286879a9/jaxtyping-0.3.11.tar.gz", hash = "sha256:b09c14acf6686feb9e0df5b0d8c6e7c5b6f8d36bf059ee54cd522a186c2ef050", size = 46489, upload-time = "2026-06-13T18:35:23.167Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8b/38/c66bbdc5047f4776c2bd3e47e5295a350e3fa44d5b8942105e71c2a876a0/jaxtyping-0.3.11-py3-none-any.whl", hash = "sha256:8a4bedc4e3f963fa82df41bd13c7ebc2bad925601eb48614c65798f21329d4e3", size = 56593, upload-time = "2026-06-13T18:35:22.01Z" },
 ]
 
 [[package]]
@@ -2374,6 +2410,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/2e/28/64ca011edf31c715b4fad359c587ea52391aaffa125065695590241ff617/uvicorn-0.52.3.tar.gz", hash = "sha256:18857b9e6579300be55c91c0a1cfd37d9a2cf0cabea33b88275f199eb73b8b58", size = 100621, upload-time = "2026-08-13T16:50:02.899Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/dc/2b/ebd108734a8204c6b4b93c681c9a38c5273b3ccd5d129fee4ffc1d97772c/uvicorn-0.52.3-py3-none-any.whl", hash = "sha256:116af2710dbf47c80f463cd20ee4884b6662f4c9f227d797ddc7279d2fcc2c7c", size = 79859, upload-time = "2026-08-13T16:50:01.323Z" },
+]
+
+[[package]]
+name = "wadler-lindig"
+version = "0.1.7"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1e/67/cbae4bf7683a64755c2c1778c418fea96d00e34395bb91743f08bd951571/wadler_lindig-0.1.7.tar.gz", hash = "sha256:81d14d3fe77d441acf3ebd7f4aefac20c74128bf460e84b512806dccf7b2cd55", size = 15842, upload-time = "2025-06-18T07:00:42.843Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8d/96/04e7b441807b26b794da5b11e59ed7f83b2cf8af202bd7eba8ad2fa6046e/wadler_lindig-0.1.7-py3-none-any.whl", hash = "sha256:e3ec83835570fd0a9509f969162aeb9c65618f998b1f42918cfc8d45122fe953", size = 20516, upload-time = "2025-06-18T07:00:41.684Z" },
 ]
 
 [[package]]
