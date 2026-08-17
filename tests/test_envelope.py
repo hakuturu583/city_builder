@@ -292,3 +292,20 @@ def test_every_subject_in_the_catalogue_reads_as_english_with_a_count():
         said = R.isolated_prompt(subject, 2)
         assert "a two-storey " in said
         assert " a a " not in said and "storey a " not in said
+
+
+def test_a_photograph_of_a_wall_is_caught_even_with_room_around_it():
+    """`backdrop_share` catches a picture with no background in it. This
+    catches one where the background is ample but the building is still
+    cropped — a photograph of a wall rather than of a house, which the image
+    model returns often enough to matter and which reconstructs as a slab."""
+    whole = _framed(0.25)
+    assert R.touches_the_frame(whole) < 0.05
+    assert R.touches_the_frame(_street()) > 0.5
+
+
+def test_a_subject_that_runs_off_one_edge_only_still_counts():
+    rng = np.random.default_rng(2)
+    frame = np.full((128, 128, 3), 150, dtype=np.uint8)
+    frame[20:128, 30:90] = rng.integers(20, 110, (108, 60, 3), dtype=np.uint8)
+    assert R.touches_the_frame(Image.fromarray(frame)) > 0.05

@@ -276,15 +276,27 @@ HOUSE_SUBJECTS: tuple[str, ...] = (
 # one took the backdrop to 39-59 %, and it is the phrasing the frame responds
 # to: the material and the weathering survive it, and the mesh comes back a
 # building rather than a smear.
-ISOLATED_FRAME = ("studio product photograph of an architectural model of "
-                  "{storeys}{subject}, isolated on a seamless plain background, "
-                  "floating, no ground, no sky, soft even lighting, the whole "
-                  "building visible including the roof, three-quarter view from "
-                  "slightly above")
+ISOLATED_FRAME = ("studio product photograph of a finished miniature model of "
+                  "{storeys}{subject}, every wall closed and complete, exterior "
+                  "only, isolated on a seamless plain background, floating, no "
+                  "ground, no sky, soft even lighting, the whole building visible "
+                  "including the roof, three-quarter view from slightly above")
 
-ISOLATED_NEGATIVE = ("street scene, sky, clouds, grass, garden, trees, fence, road, "
+# The frame half of this was the first difficulty and the *kind of model* is the
+# second. "Architectural model" is a term of art and the image model knows it:
+# asked for one it draws a sectioned display model with the front wall taken
+# off, and TRELLIS then paints the rooms and the furniture onto the outside of
+# the building. Of thirty drawn that way, roughly a third were cutaways, several
+# were massing studies in bare concrete or a bare structural frame, one was a
+# tray, and the three-storey family contained seven- and eight-storey towers.
+ISOLATED_NEGATIVE = ("cutaway, cross-section, sectional model, dollhouse, open "
+                     "wall, missing wall, interior visible, rooms, furniture, "
+                     "staircase, massing study, bare concrete blocks, structural "
+                     "frame, unfinished building, scaffolding, construction site, "
+                     "temple, shrine, pagoda, castle, tower block, high-rise, "
+                     "street scene, sky, clouds, grass, garden, trees, fence, road, "
                      "adjacent buildings, neighbours, power lines, people, cars, "
-                     "ground, horizon, close-up, cropped, cut off, interior, "
+                     "ground, horizon, close-up, cropped, cut off, "
                      "floor plan, text, watermark")
 
 # The envelope sets the height and the picture sets everything else, so a
@@ -327,6 +339,22 @@ def _bare(subject: str) -> str:
     return rest if head.lower() in {"a", "an", "the"} and rest else subject
 
 
+def touches_the_frame(image, *, margin: int = 6) -> float:
+    """How much of the frame's border the subject runs into.
+
+    The other half of "one whole building". :func:`backdrop_share` catches a
+    picture with no background in it; this catches one where the background is
+    ample but the *building* is still cropped — a photograph of a wall rather
+    than of a house, which the image model returns often enough to matter and
+    which reconstructs as a slab. Measured as the share of border pixels the
+    subject occupies: a model floating in a studio sweep scores 0.
+    """
+    alpha = np.asarray(cut_out(image))[:, :, 3] > 8
+    border = np.concatenate([alpha[:margin].ravel(), alpha[-margin:].ravel(),
+                             alpha[:, :margin].ravel(), alpha[:, -margin:].ravel()])
+    return float(border.mean())
+
+
 def backdrop_share(image) -> float:
     """How much of the frame :func:`cut_out` was able to call background.
 
@@ -341,7 +369,8 @@ def backdrop_share(image) -> float:
 def photographs(subjects: Sequence[str], out_dir: str, *,
                 floors: Sequence[int] = (0,),
                 options: ImageOptions | None = None, prefix: str = "subject",
-                min_backdrop: float = 0.25, attempts: int = 3) -> list[dict[str, Any]]:
+                min_backdrop: float = 0.25, max_edge: float = 0.08,
+                attempts: int = 3) -> list[dict[str, Any]]:
     """Isolated building photographs, one per subject and floor count, drawn once.
 
     :func:`elevation` loads and drops SDXL per call, which is right for one
@@ -369,11 +398,11 @@ def photographs(subjects: Sequence[str], out_dir: str, *,
     drawn: list[dict[str, Any]] = []
     try:
         for index, (storeys, subject) in enumerate(wanted):
-            best, best_share, tries = None, -1.0, 0
+            best, best_share, best_edge, best_score, tries = None, -1.0, 1.0, -9.0, 0
             for attempt in range(max(1, attempts)):
                 tries = attempt + 1
                 seed = options.seed + index * 1013 + attempt * 7919
-                image = pipeline(
+                drawing = pipeline(
                     prompt=isolated_prompt(subject, storeys),
                     # Its own negative is about the *building*; this one is
                     # about the frame, and the frame is the whole difficulty.
@@ -383,17 +412,24 @@ def photographs(subjects: Sequence[str], out_dir: str, *,
                     num_inference_steps=options.steps, guidance_scale=options.guidance,
                     generator=torch.Generator(device="cpu").manual_seed(seed),
                 ).images[0]
-                share = backdrop_share(image)
-                if share > best_share:
-                    best, best_share = image, share
-                if share >= min_backdrop:
+                share = backdrop_share(drawing)
+                edge = touches_the_frame(drawing)
+                # One number to rank by, so the best of a bad set is still the
+                # least bad: background is what there is, less what the subject
+                # runs off the edge of.
+                score = share - edge
+                if score > best_score:
+                    best, best_share, best_edge, best_score = (
+                        drawing, share, edge, score)
+                if share >= min_backdrop and edge <= max_edge:
                     break
             stamp = f"{storeys}f_" if storeys else ""
             path = os.path.join(out_dir, f"{prefix}_{stamp}{index:02d}.png")
             cut_out(best).save(path)
             drawn.append({"path": path, "subject": subject, "floors": storeys or None,
-                          "backdrop": round(best_share, 3), "tries": tries,
-                          "isolated": best_share >= min_backdrop})
+                          "backdrop": round(best_share, 3),
+                          "edge": round(best_edge, 3), "tries": tries,
+                          "isolated": best_share >= min_backdrop and best_edge <= max_edge})
     finally:
         del pipeline
         if torch.cuda.is_available():
