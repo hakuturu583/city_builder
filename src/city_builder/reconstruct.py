@@ -267,6 +267,24 @@ HOUSE_SUBJECTS: tuple[str, ...] = (
     "mortar", "siding", "clapboard", "machiya", "shopfront", "corrugated",
 )
 
+#: What a street of houses is actually made of, weighted by repetition rather
+#: than by numbers — the same idiom as the roof mix in
+#: :mod:`city_builder.buildings`.
+#:
+#: Given one photograph each, the six above come out even, and a suburb of
+#: 200 m2 plots then has as many machiya, shopfronts and corrugated workshops
+#: as ordinary houses. What that reads as is a light industrial estate: the
+#: twenty-building run came back all sheds, dark boxes and rusted metal, which
+#: is a fair rendering of the mix it was given. Rendered walls and ceramic
+#: siding are what most of a Japanese suburb is.
+#: Interleaved rather than grouped, because a caller asking for fewer than all
+#: of them takes a prefix: grouped, the first six would be nothing but rendered
+#: walls and siding.
+HOUSE_MIX: tuple[str, ...] = (
+    "mortar", "siding", "clapboard", "mortar", "siding", "machiya",
+    "mortar", "siding", "clapboard", "shopfront", "corrugated",
+)
+
 # Everything in here is about the *frame*, not the building. TRELLIS treats
 # whatever is in the picture as the subject, so a photograph of a house in its
 # street is a photograph of the street: measured, that returned a mesh with the

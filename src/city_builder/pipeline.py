@@ -386,11 +386,12 @@ def _photographs(out_dir: str, recipe: Recipe, state, *, force, verbose):
         return None
     from . import reconstruct as reconstruct_module
 
-    # Houses first, because that is what a street of 200 m2 plots is; the
-    # commercial subjects only come in if more are asked for than there are
-    # residential ones.
+    # Houses first, and in the proportion a suburb of 200 m2 plots is built
+    # in — see HOUSE_MIX, which repeats a subject to ask for more of it. The
+    # commercial subjects only come in if more are asked for than the
+    # residential mix has entries.
     known = dict(reconstruct_module.BUILDING_SUBJECTS)
-    ordered = ([known[name] for name in reconstruct_module.HOUSE_SUBJECTS]
+    ordered = ([known[name] for name in reconstruct_module.HOUSE_MIX]
                + [text for name, text in reconstruct_module.BUILDING_SUBJECTS
                   if name not in reconstruct_module.HOUSE_SUBJECTS])
     wanted = ordered[:max(1, recipe.envelope_subjects)]

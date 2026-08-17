@@ -353,3 +353,23 @@ def test_each_storey_count_is_split_on_its_own_median():
     for floors in (1, 3):
         group = [row["proportion"] for row in got if row["floors"] == floors]
         assert group.count("compact") == 2 and group.count("elongated") == 2
+
+
+def test_the_house_mix_is_mostly_ordinary_houses():
+    """Given one photograph each, the six residential subjects come out even,
+    and a suburb then has as many machiya, shopfronts and corrugated workshops
+    as houses. What that reads as is a light industrial estate — which is what
+    the twenty-building run came back as."""
+    import collections
+
+    counts = collections.Counter(R.HOUSE_MIX)
+    assert counts["mortar"] + counts["siding"] > len(R.HOUSE_MIX) / 2
+    assert counts["corrugated"] == 1 and counts["machiya"] == 1
+    assert set(R.HOUSE_MIX) == set(R.HOUSE_SUBJECTS), "a subject went missing"
+
+
+def test_a_short_run_still_gets_a_mix():
+    """A caller asking for fewer takes a prefix, so grouping would give the
+    first six nothing but rendered walls and siding."""
+    for count in (4, 6, 8):
+        assert len(set(R.HOUSE_MIX[:count])) >= 3
