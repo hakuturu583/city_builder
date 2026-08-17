@@ -372,10 +372,15 @@ def _photographs(out_dir: str, recipe: Recipe, state, *, force, verbose):
     """The street's shared photographs, drawn once — or ``None`` for the render path.
 
     Cheap enough to be a step inside the reconstruction rather than a stage of
-    its own: ten pictures against a hundred and eighty buildings. They are kept
-    on disk because the whole point is that they are shared, and a resumed run
-    that redrew them would change the material of every building it had not got
-    to yet.
+    its own: a few dozen pictures against a hundred and eighty buildings. They
+    are kept on disk because the whole point is that they are shared, and a
+    resumed run that redrew them would change the material of every building it
+    had not got to yet.
+
+    One family per floor count, exactly as the facade sheets are and for the
+    same reason: the envelope sets the height and the picture sets everything
+    else, so a bungalow photographed for a three-storey plot comes back as a
+    bungalow nine metres tall.
     """
     if not recipe.envelope:
         return None
@@ -389,24 +394,34 @@ def _photographs(out_dir: str, recipe: Recipe, state, *, force, verbose):
                + [text for name, text in reconstruct_module.BUILDING_SUBJECTS
                   if name not in reconstruct_module.HOUSE_SUBJECTS])
     wanted = ordered[:max(1, recipe.envelope_subjects)]
+    floors = sorted(state.get("floors") or [1, 2, 3])
 
     where = os.path.join(out_dir, "subjects")
-    paths = [os.path.join(where, f"subject_{i:02d}.png") for i in range(len(wanted))]
-    if all(os.path.exists(path) for path in paths) and not force:
+    families: dict[int, list[str]] = {}
+    for row, (storeys, _subject) in enumerate(
+            (n, s) for n in floors for s in wanted):
+        families.setdefault(storeys, []).append(
+            os.path.join(where, f"subject_{storeys}f_{row:02d}.png"))
+    if all(os.path.exists(p) for group in families.values() for p in group) and not force:
         if verbose:
-            print(f"[pipeline] {len(paths)} photograph(s) already drawn")
-        return paths
+            print(f"[pipeline] {sum(map(len, families.values()))} photograph(s) "
+                  f"already drawn, {len(families)} floor count(s)")
+        return families
 
     drawn = reconstruct_module.photographs(
-        wanted, where, options=reconstruct_module.ImageOptions(seed=recipe.seed))
+        wanted, where, floors=floors,
+        options=reconstruct_module.ImageOptions(seed=recipe.seed))
     if verbose:
         thin = [row for row in drawn if not row["isolated"]]
-        print(f"[pipeline] {len(drawn)} photograph(s), backdrop "
-              f"{min(r['backdrop'] for r in drawn):.2f}-"
+        print(f"[pipeline] {len(drawn)} photograph(s) over floor counts {floors}, "
+              f"backdrop {min(r['backdrop'] for r in drawn):.2f}-"
               f"{max(r['backdrop'] for r in drawn):.2f}"
               + (f", {len(thin)} still framed too tight" if thin else ""))
     state["photographs"] = drawn
-    return [row["path"] for row in drawn]
+    made: dict[int, list[str]] = {}
+    for row in drawn:
+        made.setdefault(int(row["floors"] or 0), []).append(row["path"])
+    return made
 
 
 # ---------------------------------------------------------------------------

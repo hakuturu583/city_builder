@@ -276,20 +276,55 @@ HOUSE_SUBJECTS: tuple[str, ...] = (
 # one took the backdrop to 39-59 %, and it is the phrasing the frame responds
 # to: the material and the weathering survive it, and the mesh comes back a
 # building rather than a smear.
-ISOLATED_FRAME = ("studio product photograph of an architectural model of {subject}, "
-                  "isolated on a seamless plain background, floating, no ground, "
-                  "no sky, soft even lighting, the whole building visible including "
-                  "the roof, three-quarter view from slightly above")
+ISOLATED_FRAME = ("studio product photograph of an architectural model of "
+                  "{storeys}{subject}, isolated on a seamless plain background, "
+                  "floating, no ground, no sky, soft even lighting, the whole "
+                  "building visible including the roof, three-quarter view from "
+                  "slightly above")
 
 ISOLATED_NEGATIVE = ("street scene, sky, clouds, grass, garden, trees, fence, road, "
                      "adjacent buildings, neighbours, power lines, people, cars, "
                      "ground, horizon, close-up, cropped, cut off, interior, "
                      "floor plan, text, watermark")
 
+# The envelope sets the height and the picture sets everything else, so a
+# bungalow photographed for a three-storey plot comes back as a bungalow nine
+# metres tall — one storey of windows stretched over three. The storey count is
+# the one thing about the *shape* the picture still has to agree with.
+STOREYS: dict[int, str] = {
+    1: "a single-storey ",
+    2: "a two-storey ",
+    3: "a three-storey ",
+    4: "a four-storey ",
+    5: "a five-storey ",
+}
 
-def isolated_prompt(subject: str) -> str:
-    """One building on nothing, which is the only kind of picture an envelope wants."""
-    return ISOLATED_FRAME.format(subject=subject)
+
+def storeys_said(floors: int | None) -> str:
+    """How to say a floor count to an image model, or nothing if it is unknown."""
+    if not floors or floors < 1:
+        return ""
+    return STOREYS.get(int(floors), f"a {int(floors)}-storey ")
+
+
+def isolated_prompt(subject: str, floors: int | None = None) -> str:
+    """One building on nothing, which is the only kind of picture an envelope wants.
+
+    ``floors`` is not decoration: see :data:`STOREYS`. Left out, the subject
+    carries its own article and the height is the model's guess.
+    """
+    said = storeys_said(floors)
+    if said:
+        # The subjects introduce themselves ("a small Japanese house"), and
+        # "a two-storey a small Japanese house" is not a prompt.
+        subject = _bare(subject)
+    return ISOLATED_FRAME.format(storeys=said, subject=subject)
+
+
+def _bare(subject: str) -> str:
+    """The subject without the article it introduces itself with."""
+    head, _, rest = subject.partition(" ")
+    return rest if head.lower() in {"a", "an", "the"} and rest else subject
 
 
 def backdrop_share(image) -> float:
@@ -304,15 +339,21 @@ def backdrop_share(image) -> float:
 
 
 def photographs(subjects: Sequence[str], out_dir: str, *,
+                floors: Sequence[int] = (0,),
                 options: ImageOptions | None = None, prefix: str = "subject",
                 min_backdrop: float = 0.25, attempts: int = 3) -> list[dict[str, Any]]:
-    """A family of isolated building photographs, one per subject, drawn once.
+    """Isolated building photographs, one per subject and floor count, drawn once.
 
     :func:`elevation` loads and drops SDXL per call, which is right for one
     building and wrong for a district; this keeps it for the batch. Each picture
     is scored by :func:`backdrop_share` and redrawn on another seed when the
     model has answered with a street instead of a building — the failure that
     otherwise reaches the mesh, where it is much more expensive to notice.
+
+    ``floors`` is a family per storey count, the same shape as the facade
+    sheets and for the same reason: the envelope sets the height and the
+    picture sets everything else, so a bungalow photographed for a three-storey
+    plot comes back as a bungalow nine metres tall.
     """
     import torch
     from diffusers import AutoPipelineForText2Image
@@ -324,15 +365,16 @@ def photographs(subjects: Sequence[str], out_dir: str, *,
     pipeline.set_progress_bar_config(disable=True)
     pipeline.enable_model_cpu_offload()
 
+    wanted = [(storeys, subject) for storeys in floors for subject in subjects]
     drawn: list[dict[str, Any]] = []
     try:
-        for index, subject in enumerate(subjects):
+        for index, (storeys, subject) in enumerate(wanted):
             best, best_share, tries = None, -1.0, 0
             for attempt in range(max(1, attempts)):
                 tries = attempt + 1
                 seed = options.seed + index * 1013 + attempt * 7919
                 image = pipeline(
-                    prompt=isolated_prompt(subject),
+                    prompt=isolated_prompt(subject, storeys),
                     # Its own negative is about the *building*; this one is
                     # about the frame, and the frame is the whole difficulty.
                     negative_prompt=", ".join(filter(None, (ISOLATED_NEGATIVE,
@@ -346,10 +388,12 @@ def photographs(subjects: Sequence[str], out_dir: str, *,
                     best, best_share = image, share
                 if share >= min_backdrop:
                     break
-            path = os.path.join(out_dir, f"{prefix}_{index:02d}.png")
+            stamp = f"{storeys}f_" if storeys else ""
+            path = os.path.join(out_dir, f"{prefix}_{stamp}{index:02d}.png")
             cut_out(best).save(path)
-            drawn.append({"path": path, "subject": subject, "backdrop": round(best_share, 3),
-                          "tries": tries, "isolated": best_share >= min_backdrop})
+            drawn.append({"path": path, "subject": subject, "floors": storeys or None,
+                          "backdrop": round(best_share, 3), "tries": tries,
+                          "isolated": best_share >= min_backdrop})
     finally:
         del pipeline
         if torch.cuda.is_available():

@@ -88,16 +88,18 @@ def stubbed(monkeypatch, tmp_path):
         calls.append(("place", {"ledger": str(ledger)}))
         return {"placed": 1, "procedural": 0}
 
-    def photographs(subjects, out, **kwargs):
-        calls.append(("photographs", {"subjects": len(subjects)}))
+    def photographs(subjects, out, *, floors=(0,), **kwargs):
+        calls.append(("photographs", {"subjects": len(subjects),
+                                      "floors": list(floors)}))
         os.makedirs(out, exist_ok=True)
         drawn = []
-        for i, subject in enumerate(subjects):
-            path = os.path.join(out, f"subject_{i:02d}.png")
+        for i, (storeys, subject) in enumerate(
+                (n, s) for n in floors for s in subjects):
+            path = os.path.join(out, f"subject_{storeys}f_{i:02d}.png")
             with open(path, "wb") as handle:
                 handle.write(b"x")
-            drawn.append({"path": path, "subject": subject, "backdrop": 0.5,
-                          "tries": 1, "isolated": True})
+            drawn.append({"path": path, "subject": subject, "floors": storeys,
+                          "backdrop": 0.5, "tries": 1, "isolated": True})
         return drawn
 
     import city_builder.build as build_module
@@ -171,12 +173,18 @@ def test_the_render_route_draws_no_photographs(stubbed, tmp_path):
     assert _named(stubbed, "reconstruct")[0]["photos"] is None
 
 
-def test_the_envelope_route_draws_a_family_and_hands_it_over(stubbed, tmp_path):
+def test_the_envelope_route_draws_a_family_per_floor_count(stubbed, tmp_path):
+    """The envelope sets the height and the picture sets everything else, so a
+    bungalow photographed for a three-storey plot comes back as a bungalow nine
+    metres tall — one row of windows stretched over three."""
     P.run("map.osm", str(tmp_path),
           recipe=P.Recipe(envelope=True, envelope_subjects=4, renders=False, glb=False),
           stages=("ground", "reconstruct"), verbose=False)
-    assert _named(stubbed, "photographs")[0]["subjects"] == 4
-    assert len(_named(stubbed, "reconstruct")[0]["photos"]) == 4
+    asked = _named(stubbed, "photographs")[0]
+    assert asked["subjects"] == 4 and asked["floors"] == [1, 2, 3]
+    handed = _named(stubbed, "reconstruct")[0]["photos"]
+    assert sorted(handed) == [1, 2, 3]
+    assert all(len(group) == 4 for group in handed.values())
 
 
 def test_the_photographs_are_drawn_once_and_shared(stubbed, tmp_path):

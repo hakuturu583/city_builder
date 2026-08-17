@@ -259,3 +259,36 @@ def test_an_allocator_setting_the_caller_chose_is_left_alone():
         capture_output=True, text=True, check=True,
         env={**os.environ, "PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:128"})
     assert got.stdout.strip() == "max_split_size_mb:128"
+
+
+# ---------------------------------------------------------------------------
+# The one thing about the shape the picture still has to agree with
+# ---------------------------------------------------------------------------
+
+
+def test_the_storey_count_is_said_to_the_image_model():
+    """The envelope sets the height and the picture sets everything else, so a
+    bungalow photographed for a three-storey plot comes back as a bungalow nine
+    metres tall — one row of windows stretched over three."""
+    assert "three-storey" in R.isolated_prompt("a Japanese house", 3)
+    assert "single-storey" in R.isolated_prompt("a Japanese house", 1)
+    assert "storey" not in R.isolated_prompt("a Japanese house")
+
+
+def test_a_storey_count_nobody_wrote_down_is_still_sayable():
+    assert "a 9-storey " == R.storeys_said(9)
+    assert R.storeys_said(0) == "" and R.storeys_said(None) == ""
+
+
+def test_the_subject_does_not_keep_its_own_article():
+    """"a two-storey a small Japanese house" is not a prompt."""
+    said = R.isolated_prompt("a small Japanese suburban house", 2)
+    assert "a two-storey small Japanese suburban house" in said
+    assert "storey a " not in said
+
+
+def test_every_subject_in_the_catalogue_reads_as_english_with_a_count():
+    for _name, subject in R.BUILDING_SUBJECTS:
+        said = R.isolated_prompt(subject, 2)
+        assert "a two-storey " in said
+        assert " a a " not in said and "storey a " not in said

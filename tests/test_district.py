@@ -339,3 +339,32 @@ def test_a_building_that_came_back_and_fitted_badly_is_left_alone(monkeypatch, t
 def test_a_building_that_stands_is_never_paid_for_again(monkeypatch, tmp_path):
     _ran(monkeypatch, tmp_path, [0.93])
     assert _ran(monkeypatch, tmp_path, [0.93]) == []
+
+
+# ---------------------------------------------------------------------------
+# Which photograph a plot is built from
+# ---------------------------------------------------------------------------
+
+
+def test_a_plot_is_built_from_a_photograph_of_its_own_storey_count():
+    photos = {1: ["one_a.png", "one_b.png"], 3: ["three_a.png"]}
+    assert D._photograph_for(photos, {"floors": 3}, 0) == "three_a.png"
+    assert D._photograph_for(photos, {"floors": 1}, 0) == "one_a.png"
+
+
+def test_within_a_storey_count_the_plots_take_them_in_turn():
+    """Assigning by area or at random clusters one material along a street."""
+    photos = {2: ["a.png", "b.png", "c.png"]}
+    got = [D._photograph_for(photos, {"floors": 2}, turn) for turn in range(4)]
+    assert got == ["a.png", "b.png", "c.png", "a.png"]
+
+
+def test_a_storey_count_nobody_drew_for_takes_the_nearest_that_was():
+    """Better than an error, and much better than a bungalow."""
+    photos = {1: ["one.png"], 2: ["two.png"]}
+    assert D._photograph_for(photos, {"floors": 7}, 0) == "two.png"
+    assert D._photograph_for(photos, {}, 0) == "one.png"
+
+
+def test_a_plain_list_is_still_a_family_of_one():
+    assert D._photograph_for(["a.png", "b.png"], {"floors": 3}, 1) == "b.png"

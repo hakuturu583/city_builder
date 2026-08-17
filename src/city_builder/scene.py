@@ -343,6 +343,45 @@ def export_glb(path: str) -> None:
     print(f"[scene] wrote {path}")
 
 
+def _textures_an_engine_reads(folder: str) -> int:
+    """Rewrite every texture as PNG, and return how many had to be.
+
+    FBX embeds the texture *file*, byte for byte, whatever it happens to be —
+    the exporter does not transcode. The reconstructions arrive as GLBs written
+    with ``extension_webp=True``, so their pages come into Blender as packed
+    WebP with no filename to speak of (``.001``, ``.002``, …), and a district
+    of them exported straight to FBX carries forty images no engine can decode.
+    What that looks like on the other side is magenta.
+
+    Blender can decode them, which is why this is invisible until the file
+    leaves. The glTF path is unaffected and keeps its WebP.
+    """
+    import bpy
+
+    written = 0
+    for index, image in enumerate(bpy.data.images):
+        if image.size[0] == 0 and not image.packed_file:
+            continue  # a broken reference; the exporter will skip it too
+        readable = image.file_format in {"PNG", "JPEG", "TARGA", "BMP"}
+        if readable and image.filepath_raw and not image.packed_file:
+            continue
+        os.makedirs(folder, exist_ok=True)
+        name = bpy.path.clean_name(image.name) or "texture"
+        image.file_format = "PNG"
+        image.filepath_raw = os.path.join(folder, f"{index:03d}_{name}.png")
+        image.save()
+        if image.packed_file:
+            # REMOVE, not WRITE_LOCAL: writing it out writes the *packed* bytes,
+            # which are the WebP this is here to get rid of, and repoints the
+            # image at them. The PNG has just been saved; drop the pack and let
+            # the file stand.
+            image.unpack(method="REMOVE")
+        written += 1
+    if written:
+        print(f"[scene] {written} texture(s) rewritten as PNG for FBX")
+    return written
+
+
 def export_fbx(path: str) -> None:
     """Write the scene as FBX.
 
@@ -352,12 +391,15 @@ def export_fbx(path: str) -> None:
     does not survive — FBX carries one vertex colour set and calling it
     ``COLOR_0`` would tint the asset, which is the thing
     :func:`tag_object` avoids. Use glTF where the mask matters.
+
+    The textures are rewritten as PNG first; see :func:`_textures_an_engine_reads`.
     """
     import bpy
 
     directory = os.path.dirname(os.path.abspath(path))
     if directory:
         os.makedirs(directory, exist_ok=True)
+    _textures_an_engine_reads(os.path.join(directory or ".", "textures"))
     bpy.ops.export_scene.fbx(
         filepath=os.path.abspath(path),
         use_active_collection=False,

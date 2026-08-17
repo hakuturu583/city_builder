@@ -315,7 +315,8 @@ def rebuild(scene, out_dir: str, *, buildings: list[int] | None = None,
                     decimation_target=80_000, tex_guidance=3.0)
                 if photos:
                     report = reconstruct_module.reconstruct_in_envelope(
-                        plots[index], out_dir, image=photos[count % len(photos)],
+                        plots[index], out_dir,
+                        image=_photograph_for(photos, plots[index], count),
                         name=mesh_name, mesh_options=mesh_options,
                         **({} if eave_room is None else {"eave_room": eave_room}),
                         **({} if roof_room is None else {"roof_room": roof_room}))
@@ -362,6 +363,31 @@ def rebuild(scene, out_dir: str, *, buildings: list[int] | None = None,
         ledger.write(ledger_path)
 
     return ledger.write(ledger_path)
+
+
+def _photograph_for(photos, plot: dict[str, Any], turn: int) -> str:
+    """Which of the photographs this plot is built from.
+
+    Keyed by storey count when the caller supplied a family per storey count,
+    because the envelope sets the height and the picture sets everything else:
+    a bungalow photographed for a three-storey plot comes back as a bungalow
+    nine metres tall, one row of windows stretched over three. Within a storey
+    count the plots take the pictures in turn, which spreads the materials
+    along a street rather than clustering them.
+
+    A plain list is still accepted, and is then a family of one.
+    """
+    if isinstance(photos, dict):
+        floors = int(plot.get("floors") or 0)
+        family = photos.get(floors)
+        if not family:
+            # A count nobody drew for: the nearest one that was drawn beats
+            # both an error and a bungalow.
+            nearest = min(photos, key=lambda n: (abs(n - floors), n))
+            family = photos[nearest]
+    else:
+        family = photos
+    return family[turn % len(family)]
 
 
 def _release_the_card() -> None:
