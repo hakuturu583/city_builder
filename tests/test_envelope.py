@@ -311,3 +311,45 @@ def test_a_subject_that_runs_off_one_edge_only_still_counts():
     frame = np.full((128, 128, 3), 150, dtype=np.uint8)
     frame[20:128, 30:90] = rng.integers(20, 110, (108, 60, 3), dtype=np.uint8)
     assert R.touches_the_frame(Image.fromarray(frame)) > 0.05
+
+
+# ---------------------------------------------------------------------------
+# The prompt asks; the measurement decides
+# ---------------------------------------------------------------------------
+
+
+def _wide(width, height, size=160):
+    rng = np.random.default_rng(3)
+    frame = np.full((size, size, 3), 150, dtype=np.uint8)
+    box = frame[(size-height)//2:(size+height)//2, (size-width)//2:(size+width)//2]
+    box[:] = rng.integers(20, 110, box.shape, dtype=np.uint8)
+    return Image.fromarray(frame)
+
+
+def test_the_silhouette_aspect_is_what_was_drawn():
+    assert R.silhouette_aspect(_wide(100, 50)) == pytest.approx(2.0, rel=0.1)
+    assert R.silhouette_aspect(_wide(50, 100)) == pytest.approx(0.5, rel=0.1)
+
+
+def test_the_proportion_is_relabelled_from_the_picture_not_the_prompt():
+    """Told "long and narrow in plan", the image model returns the same roughly
+    square house — on the same 3:1 plot, 0.876 against 0.879 for one drawn
+    without the phrase. What it draws can still be measured."""
+    drawn = [{"floors": 2, "asked": "elongated", "aspect": 0.9},
+             {"floors": 2, "asked": "elongated", "aspect": 1.0},
+             {"floors": 2, "asked": "compact", "aspect": 1.6},
+             {"floors": 2, "asked": "compact", "aspect": 1.9}]
+    got = R.classify_by_aspect(drawn)
+    assert [row["proportion"] for row in got] == [
+        "compact", "compact", "elongated", "elongated"]
+
+
+def test_each_storey_count_is_split_on_its_own_median():
+    """Self-calibrating: the plots are split the same way, so half of one meets
+    half of the other however the model happened to draw that day."""
+    drawn = ([{"floors": 1, "aspect": a} for a in (1.4, 1.5, 1.6, 1.7)]
+             + [{"floors": 3, "aspect": a} for a in (0.8, 0.9, 1.0, 1.1)])
+    got = R.classify_by_aspect(drawn)
+    for floors in (1, 3):
+        group = [row["proportion"] for row in got if row["floors"] == floors]
+        assert group.count("compact") == 2 and group.count("elongated") == 2

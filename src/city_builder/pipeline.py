@@ -404,10 +404,19 @@ def _photographs(out_dir: str, recipe: Recipe, state, *, force, verbose):
         families.setdefault(f"{storeys}f_{shape}", []).append(
             os.path.join(where, f"subject_{storeys}f_{shape}_{row:02d}.png"))
     if all(os.path.exists(p) for group in families.values() for p in group) and not force:
+        # Re-measured rather than read off the filename: the name records what
+        # the prompt asked for and the family is what the picture turned out to
+        # be. Thirty-six PNGs is nothing to measure.
+        from PIL import Image
+
+        already = [{"path": path,
+                    "floors": int(key.split("f_", 1)[0]),
+                    "aspect": reconstruct_module.silhouette_aspect(
+                        Image.open(path).convert("RGB"))}
+                   for key, group in families.items() for path in group]
         if verbose:
-            print(f"[pipeline] {sum(map(len, families.values()))} photograph(s) "
-                  f"already drawn, {len(families)} family(s)")
-        return families
+            print(f"[pipeline] {len(already)} photograph(s) already drawn")
+        return _families(reconstruct_module.classify_by_aspect(already))
 
     drawn = reconstruct_module.photographs(
         wanted, where, floors=floors, proportions=shapes,
@@ -420,6 +429,11 @@ def _photographs(out_dir: str, recipe: Recipe, state, *, force, verbose):
               f"{max(r['backdrop'] for r in drawn):.2f}"
               + (f", {len(thin)} still framed badly" if thin else ""))
     state["photographs"] = drawn
+    return _families(drawn)
+
+
+def _families(drawn) -> dict[str, list[str]]:
+    """The drawn photographs, grouped by the family each turned out to be in."""
     made: dict[str, list[str]] = {}
     for row in drawn:
         made.setdefault(f"{int(row['floors'] or 0)}f_{row['proportion']}",

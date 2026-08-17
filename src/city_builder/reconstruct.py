@@ -391,6 +391,45 @@ def touches_the_frame(image, *, margin: int = 6) -> float:
     return float(border.mean())
 
 
+def silhouette_aspect(image) -> float:
+    """How wide the subject is against how tall, as drawn.
+
+    Not the plan aspect — one three-quarter view cannot give that — but
+    monotonic in it at a fixed storey count, which is all the choosing needs.
+    It exists because asking for a proportion does not work: told "long and
+    narrow in plan, about twice as wide as it is deep", the image model returns
+    the same roughly square house, and on the same 3:1 plot the picture drawn
+    that way fitted 0.876 against 0.879 for one drawn without it. What the
+    model draws can still be *measured*, and within one storey count these run
+    from 0.89 to 1.96 — a factor of two, and enough to choose on.
+    """
+    alpha = np.asarray(cut_out(image))[:, :, 3] > 8
+    ys, xs = np.where(alpha)
+    if not len(xs):
+        return 1.0
+    return float((xs.max() - xs.min() + 1) / max(ys.max() - ys.min() + 1, 1))
+
+
+def classify_by_aspect(drawn: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Re-label a set of photographs by the proportion they actually have.
+
+    Split at the median within each storey count, which is self-calibrating:
+    the plots are split the same way, so half of each meets half of the other
+    however the image model happened to draw that day.
+    """
+    import statistics
+
+    by_floors: dict[Any, list[dict[str, Any]]] = {}
+    for row in drawn:
+        by_floors.setdefault(row.get("floors"), []).append(row)
+    compact, elongated = PROPORTIONS[0][0], PROPORTIONS[-1][0]
+    for group in by_floors.values():
+        middle = statistics.median(row["aspect"] for row in group)
+        for row in group:
+            row["proportion"] = elongated if row["aspect"] > middle else compact
+    return list(drawn)
+
+
 def backdrop_share(image) -> float:
     """How much of the frame :func:`cut_out` was able to call background.
 
@@ -469,6 +508,8 @@ def photographs(subjects: Sequence[str], out_dir: str, *,
             cut_out(best).save(path)
             drawn.append({"path": path, "subject": subject, "floors": storeys or None,
                           "proportion": shape or None,
+                          "asked": shape or None,
+                          "aspect": round(silhouette_aspect(best), 3),
                           "backdrop": round(best_share, 3),
                           "edge": round(best_edge, 3), "tries": tries,
                           "isolated": best_share >= min_backdrop and best_edge <= max_edge})
@@ -476,7 +517,10 @@ def photographs(subjects: Sequence[str], out_dir: str, *,
         del pipeline
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-    return drawn
+    # The prompt asked; the measurement decides. Drawing both halves is still
+    # worth it — it widens the spread there is to split — but which half a
+    # picture landed in is not the prompt's to say.
+    return classify_by_aspect(drawn)
 
 
 VARIED_STYLE = (

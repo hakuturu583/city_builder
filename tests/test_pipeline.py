@@ -21,6 +21,21 @@ class _Plot(dict):
     pass
 
 
+def _a_picture(path, *, wide=False, size=64):
+    """A subject on a plain field, so the resume path can measure it."""
+    import numpy as np
+    from PIL import Image
+
+    rng = np.random.default_rng(1)
+    frame = np.full((size, size, 3), 150, dtype=np.uint8)
+    half = size // 4
+    box = frame[size//2-half//2:size//2+half//2,
+                size//4:size*3//4] if wide else frame[size//4:size*3//4,
+                                                      size//3:size*2//3]
+    box[:] = rng.integers(20, 110, box.shape, dtype=np.uint8)
+    Image.fromarray(frame).save(path)
+
+
 def _result(floors=(1, 2, 3)):
     class _Mesh:
         faces = [[0, 1, 2]] * 7
@@ -97,11 +112,10 @@ def stubbed(monkeypatch, tmp_path):
         for i, (storeys, shape, subject) in enumerate(
                 (n, p, s) for n in floors for p in proportions for s in subjects):
             path = os.path.join(out, f"subject_{storeys}f_{shape}_{i:02d}.png")
-            with open(path, "wb") as handle:
-                handle.write(b"x")
+            _a_picture(path, wide=(shape == "elongated"))
             drawn.append({"path": path, "subject": subject, "floors": storeys,
-                          "proportion": shape, "backdrop": 0.5, "tries": 1,
-                          "isolated": True})
+                          "proportion": shape, "aspect": 1.8 if shape == "elongated"
+                          else 0.9, "backdrop": 0.5, "tries": 1, "isolated": True})
         return drawn
 
     import city_builder.build as build_module
