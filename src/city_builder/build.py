@@ -329,14 +329,18 @@ def build_city(
         print(f"[build] road infill: {patched} patch(es), {patched_area:.0f} m2 of gap "
               f"between lanelets closed")
 
-        if verbose:
-            heights = [p["height"] for p in plots]
-            span = f"{min(heights):.0f}-{max(heights):.0f} m" if heights else "none"
-            floors = sorted({p["floors"] for p in plots})
-            print(f"[build] buildings: {len(built['Buildings'])} on the open ground, {span} tall")
-            if floors:
-                print(f"[build] floor counts: {floors[0]}-{floors[-1]} "
-                      f"({len(floors)} distinct, one facade sheet family each)")
+    # Not nested under the infill report, and not reading `built`: this ran only
+    # when a road happened to need patching, and crashed on `built` whenever it
+    # ran without buildings — which is every `city-builder drive`.
+    if verbose and plots:
+        heights = [p["height"] for p in plots]
+        span = f"{min(heights):.0f}-{max(heights):.0f} m" if heights else "none"
+        floors = sorted({p["floors"] for p in plots})
+        print(f"[build] buildings: {len(groups.get('Buildings', []))} on the open ground, "
+              f"{span} tall")
+        if floors:
+            print(f"[build] floor counts: {floors[0]}-{floors[-1]} "
+                  f"({len(floors)} distinct, one facade sheet family each)")
 
     from . import markings as markings_module
 
@@ -596,12 +600,18 @@ def render_drive(result: BuildResult, input_path: str, scene_path: str, output_p
                  eye_height: float = 1.4, look_ahead: float = 18.0, lens: float = 30.0,
                  resolution: tuple[int, int] = (1280, 720), samples: int = 32,
                  engine: str = "eevee", route_seed: int = 0,
+                 depth_dir: str | None = None, cameras_path: str | None = None,
                  verbose: bool = True) -> str | None:
     """Drive a camera through a built scene and render it.
 
     The route comes from the map rather than from the scene, because the scene
     only kept the surfaces. Returns the video path, or None if the map has no
     drivable route in it.
+
+    ``depth_dir`` and ``cameras_path`` add what a depth-conditioned video model
+    and anything distilling its output need: metric depth per frame and the
+    camera that saw it. Both are measured off this scene rather than estimated
+    from the video, which is the one advantage a synthetic drive has.
     """
     import bpy
 
@@ -630,10 +640,37 @@ def render_drive(result: BuildResult, input_path: str, scene_path: str, output_p
     if not any(obj.type == "LIGHT" for obj in bpy.data.objects):
         scene_module.sunlit()
     scene_module.animate_camera(path, lens=lens)
-    return scene_module.render_animation(
+
+    if cameras_path:
+        from . import conditioning
+
+        conditioning.write_cameras(
+            cameras_path,
+            conditioning.cameras_along(len(path), resolution[0], resolution[1]),
+            extra={"fps": fps, "lens_mm": lens, "map": os.path.abspath(input_path),
+                   "scene": os.path.abspath(scene_path)})
+        if verbose:
+            print(f"[drive] wrote {len(path)} camera pose(s) to {cameras_path}")
+
+    written = scene_module.render_animation(
         output_path, frames=len(path), fps=fps, resolution=resolution,
         samples=samples, engine="CYCLES" if engine == "cycles" else "BLENDER_EEVEE",
         verbose=verbose)
+
+    if depth_dir:
+        from . import conditioning
+
+        # From the file again, because painting distance over every material is
+        # destructive and the beauty render has to happen first. The camera is
+        # keyed from the same path, so frame n is frame n in both.
+        bpy.ops.wm.open_mainfile(filepath=os.path.abspath(scene_path))
+        scene_module.animate_camera(path, lens=lens)
+        conditioning.render_depth(depth_dir, frames=len(path), resolution=resolution,
+                                  verbose=verbose)
+        if verbose:
+            print(f"[drive] wrote {len(path)} depth frame(s) to {depth_dir}")
+
+    return written
 
 
 def write_manifest(result: BuildResult, path: str) -> None:

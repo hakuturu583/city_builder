@@ -1,0 +1,358 @@
+"""What a video model has to be told about a drive, taken from the scene itself.
+
+A depth-conditioned video model needs a depth video and, if what comes back is
+going to be distilled into a 3D representation, the camera that saw each frame.
+Both are usually *estimated* — a monocular depth network, then structure from
+motion — because the usual input is a recording of somewhere real. Here the
+scene is ours. The depth is not inferred, it is measured off the geometry that
+was rendered, and the camera is not solved for, it is the one that was keyed.
+
+**Depth as colour, not as a render pass.** The same reason ``masks.py`` renders
+object identity that way: the compositor moved in Blender 5 and the depth pass
+has never been dependable outside Cycles. An emission shader whose value *is*
+the distance to the camera works in EEVEE, at any sample count, and lands in a
+float EXR in metres. Measured against a scene of known height: a camera 60 m
+above the ground read 59.9-60.2 m on the ground and 44.2 m on the tallest roof,
+which is that building's 15.8 m.
+
+**Planar depth, not radial.** ``View Z Depth`` is the distance along the view
+axis, so a flat floor reads the same at the edge of frame as at the centre.
+That is what a depth-conditioned model is trained on and what unprojecting to a
+point cloud wants; radial distance would put a bowl in every flat surface.
+
+**One sample, no filter, no dither.** All three for the same reason as the ID
+pass, and it matters more here: EEVEE jitters the camera between samples and
+averages, so a silhouette pixel comes back as the mean of the near surface and
+the far one — a depth that is on neither, floating in the air between them.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass
+from typing import Any
+
+import numpy as np
+
+#: Blender's camera looks down its local -Z with +Y up. Nearly everything that
+#: consumes a pose — OpenCV, gsplat, the 3DGS reference implementation — looks
+#: down +Z with +Y down. This is the change of basis between them, and it is a
+#: rotation: `diag(1, -1, -1)` has determinant +1, so no handedness is lost.
+BLENDER_TO_CV = np.diag([1.0, -1.0, -1.0])
+
+#: Blender's default camera sensor. `lens` is in millimetres against this.
+SENSOR_MM = 36.0
+
+
+@dataclass
+class Camera:
+    """One frame's camera, in the convention a rasteriser expects."""
+
+    frame: int
+    #: 4x4 world-to-camera, +Z forward, +Y down.
+    view: np.ndarray
+    #: 3x3 pinhole intrinsics in pixels.
+    intrinsics: np.ndarray
+    width: int
+    height: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"frame": self.frame,
+                "view": [[round(float(v), 8) for v in row] for row in self.view],
+                "intrinsics": [[round(float(v), 6) for v in row] for row in self.intrinsics],
+                "width": self.width, "height": self.height}
+
+    @property
+    def position(self) -> np.ndarray:
+        """Where the camera is, back in world coordinates."""
+        rotation, translation = self.view[:3, :3], self.view[:3, 3]
+        return -rotation.T @ translation
+
+
+def intrinsics(width: int, height: int, lens_mm: float,
+               sensor_mm: float = SENSOR_MM) -> np.ndarray:
+    """Pinhole intrinsics for a Blender camera of this focal length.
+
+    Blender's default sensor fit is ``AUTO``, which puts the sensor across the
+    *larger* of the two image dimensions. Assuming it is always the width gives
+    a focal length that is wrong by the aspect ratio on any portrait render, and
+    the error shows up as a depth that unprojects into a scene the wrong size.
+    """
+    across = max(width, height)
+    focal = across * lens_mm / sensor_mm
+    return np.array([[focal, 0.0, width / 2.0],
+                     [0.0, focal, height / 2.0],
+                     [0.0, 0.0, 1.0]])
+
+
+def world_to_camera(matrix_world) -> np.ndarray:
+    """A Blender camera's ``matrix_world`` as a world-to-camera matrix.
+
+    Taken from the object rather than rebuilt from the ``(position, target)``
+    the route handed over: ``to_track_quat`` has behaviour at the poles that is
+    Blender's to define, and a pose that disagrees with the frame it labels is
+    worse than no pose at all.
+    """
+    matrix = np.asarray(matrix_world, dtype=float).reshape(4, 4)
+    to_world = matrix[:3, :3] @ BLENDER_TO_CV
+    position = matrix[:3, 3]
+
+    view = np.eye(4)
+    view[:3, :3] = to_world.T
+    view[:3, 3] = -to_world.T @ position
+    return view
+
+
+def unproject(depth: np.ndarray, camera: Camera) -> np.ndarray:
+    """Planar depth back into world points, one per pixel. The check on the rest.
+
+    If the depth, the intrinsics and the pose agree, these land on the surfaces
+    that were rendered. If any one of them is wrong they land somewhere plausible
+    and nothing else notices, which is why this is here rather than in a caller.
+    """
+    height, width = depth.shape[:2]
+    ys, xs = np.mgrid[0:height, 0:width]
+    fx, fy = camera.intrinsics[0, 0], camera.intrinsics[1, 1]
+    cx, cy = camera.intrinsics[0, 2], camera.intrinsics[1, 2]
+
+    local = np.stack([(xs - cx) / fx * depth,
+                      (ys - cy) / fy * depth,
+                      depth], axis=-1)
+    rotation, translation = camera.view[:3, :3], camera.view[:3, 3]
+    return (local - translation) @ rotation
+
+
+def write_cameras(path: str, cameras: list[Camera], *, extra: dict | None = None) -> str:
+    """The poses as one JSON, because a drive is one thing."""
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    payload = {"convention": "world-to-camera, +Z forward, +Y down, pixels",
+               "frames": [camera.to_dict() for camera in cameras]}
+    payload.update(extra or {})
+    with open(path, "w") as handle:
+        json.dump(payload, handle, indent=1)
+    return path
+
+
+def read_cameras(path: str) -> list[Camera]:
+    """Read them back, for anything downstream that only has the files."""
+    with open(path) as handle:
+        payload = json.load(handle)
+    return [Camera(frame=int(f["frame"]),
+                   view=np.asarray(f["view"], dtype=float),
+                   intrinsics=np.asarray(f["intrinsics"], dtype=float),
+                   width=int(f["width"]), height=int(f["height"]))
+            for f in payload["frames"]]
+
+
+# ---------------------------------------------------------------------------
+# The render. Everything below wants bpy.
+# ---------------------------------------------------------------------------
+
+
+def depth_material(name: str = "ViewDepth"):
+    """An emission whose value is the distance along the view axis, in metres."""
+    import bpy
+
+    material = bpy.data.materials.new(name)
+    material.use_nodes = True
+    tree = material.node_tree
+    tree.nodes.clear()
+    camera_data = tree.nodes.new("ShaderNodeCameraData")
+    emission = tree.nodes.new("ShaderNodeEmission")
+    emission.inputs["Strength"].default_value = 1.0
+    output = tree.nodes.new("ShaderNodeOutputMaterial")
+    tree.links.new(camera_data.outputs["View Z Depth"], emission.inputs["Color"])
+    tree.links.new(emission.outputs["Emission"], output.inputs["Surface"])
+    return material
+
+
+def paint_depth(objects=None) -> int:
+    """Put that material on every mesh. Destructive, like the ID pass.
+
+    This is a second run over a scene that has already been rendered for
+    beauty; the caller reopens the .blend rather than putting the materials
+    back.
+    """
+    import bpy
+
+    material = depth_material()
+    painted = 0
+    for obj in list(objects if objects is not None else bpy.data.objects):
+        if obj.type != "MESH":
+            continue
+        obj.data.materials.clear()
+        obj.data.materials.append(material)
+        painted += 1
+    return painted
+
+
+def flatten_for_depth() -> None:
+    """Take away everything that could tint or blend a distance.
+
+    The world goes entirely rather than to black — ``masks.py`` found that
+    setting it black left the sky shader running — and with it the lights, the
+    display transform, the reconstruction filter, the dither and every sample
+    but one. The last is the one that matters most for depth: EEVEE jitters the
+    camera between samples and averages the result, so a silhouette pixel comes
+    back as the mean of the surface in front and the surface behind, which is a
+    distance to neither.
+    """
+    import bpy
+
+    scene = bpy.context.scene
+    for obj in list(bpy.data.objects):
+        if obj.type == "LIGHT":
+            bpy.data.objects.remove(obj, do_unlink=True)
+    scene.world = None
+
+    view = scene.view_settings
+    view.view_transform = "Standard"
+    view.look = "None"
+    view.exposure = 0.0
+    view.gamma = 1.0
+
+    render = scene.render
+    render.filter_size = 0.0
+    render.dither_intensity = 0.0
+    scene.eevee.taa_render_samples = 1
+    render.film_transparent = False
+    # Float EXR: a depth squashed into a byte is a depth quantised to the
+    # nearest 15 cm over a 40 m street, and every consumer wants a different
+    # normalisation anyway. Metres now, whatever the model wants later.
+    render.image_settings.file_format = "OPEN_EXR"
+    render.image_settings.color_mode = "RGB"
+    render.image_settings.color_depth = "32"
+    render.image_settings.exr_codec = "ZIP"
+
+
+def cameras_along(path_length: int, width: int, height: int) -> list[Camera]:
+    """The scene camera's pose at each frame of the animation it is keyed to."""
+    import bpy
+
+    scene = bpy.context.scene
+    camera = scene.camera
+    if camera is None:
+        raise RuntimeError("no camera in the scene to read poses from")
+
+    lens = camera.data.lens
+    matrix = intrinsics(width, height, lens)
+    out = []
+    for frame in range(1, path_length + 1):
+        scene.frame_set(frame)
+        out.append(Camera(frame=frame,
+                          view=world_to_camera(camera.matrix_world),
+                          intrinsics=matrix, width=width, height=height))
+    return out
+
+
+def render_depth(out_dir: str, *, frames: int, resolution: tuple[int, int],
+                 verbose: bool = True) -> list[str]:
+    """Render the keyed camera path again, as distance. One EXR per frame."""
+    import bpy
+
+    scene = bpy.context.scene
+    scene.render.engine = "BLENDER_EEVEE"
+    scene.render.resolution_x, scene.render.resolution_y = resolution
+    scene.render.resolution_percentage = 100
+
+    painted = paint_depth()
+    flatten_for_depth()
+    if verbose:
+        print(f"[depth] {painted} mesh object(s) painted with view distance")
+
+    os.makedirs(out_dir, exist_ok=True)
+    written = []
+    for frame in range(1, frames + 1):
+        scene.frame_set(frame)
+        path = os.path.join(out_dir, f"depth_{frame:05d}.exr")
+        scene.render.filepath = path[: -len(".exr")]
+        bpy.ops.render.render(write_still=True)
+        written.append(path)
+        if verbose and frame % 30 == 0:
+            print(f"[depth] {frame}/{frames}")
+    return written
+
+
+def sky(depth: np.ndarray) -> np.ndarray:
+    """Where the ray hit nothing. Zero metres means *no surface*, not "here".
+
+    An emission shader returns 0 where there is no geometry, so the sky comes
+    back as a depth of zero — which is the nearest value there is. Handed
+    straight to a model that reads near as bright, the sky becomes the closest
+    thing in the frame and the restyled result puts a wall across the horizon.
+    Roughly a tenth of a street-level frame is sky, so this is not a corner.
+    """
+    return ~np.isfinite(depth) | (depth <= 0.0)
+
+
+def to_control_image(depth: np.ndarray, *, near: float | None = None,
+                     far: float | None = None, invert: bool = True) -> np.ndarray:
+    """Metric depth as the 0-1 image a depth-conditioned model is trained on.
+
+    Inverted by default — near is bright — because that is what the depth
+    estimators these models were conditioned on produce, and a model shown the
+    other sense reads a street as a tunnel.
+
+    ``near`` and ``far`` default to the range actually present, excluding the
+    sky. Fixing them across a sequence is usually what you want instead: a
+    per-frame range makes the brightness of a given wall change as other things
+    enter and leave the shot, and that flicker is exactly what a video model
+    will faithfully reproduce.
+    """
+    nothing = sky(depth)
+    metres = np.where(nothing, np.nan, depth)
+    if not np.isfinite(metres).any():
+        return np.zeros_like(depth, dtype=np.float32)
+
+    low = float(np.nanmin(metres)) if near is None else float(near)
+    high = float(np.nanmax(metres)) if far is None else float(far)
+    high = max(high, low + 1e-6)
+
+    if invert:
+        # In inverse depth, so the resolution goes where the detail is.
+        one = 1.0 / np.clip(metres, low, high)
+        image = (one - 1.0 / high) / (1.0 / low - 1.0 / high)
+    else:
+        image = (np.clip(metres, low, high) - low) / (high - low)
+
+    # The sky is the far end, whichever way round the ramp runs.
+    return np.where(nothing, 0.0, image).astype(np.float32)
+
+
+def depth_range(frames, *, low: float = 0.5, high: float = 99.5,
+                budget: int = 2_000_000) -> tuple[float, float]:
+    """One near and far for a whole drive, from the depths that are in it.
+
+    Guessing the range wastes most of it. Inverse depth puts its resolution at
+    the near end, so a ``near`` of 1 m on a street whose closest surface is the
+    road four metres ahead spends three quarters of the ramp on distances that
+    never occur — measured on a 2 s drive, every real surface landed inside the
+    darkest quarter of the image.
+
+    Percentiles rather than the extremes, for the same reason ``fitting.bounds``
+    uses them: one stray polygon at the clip plane should not set the far end.
+    """
+    kept = []
+    for depth in frames:
+        values = depth[~sky(depth)]
+        if values.size:
+            kept.append(values)
+    if not kept:
+        raise ValueError("every frame is sky; there is no depth to range")
+
+    values = np.concatenate(kept)
+    if values.size > budget:                       # hundreds of frames of 720p
+        values = values[:: values.size // budget + 1]
+    return float(np.percentile(values, low)), float(np.percentile(values, high))
+
+
+def read_depth(path: str) -> np.ndarray:
+    """One EXR back as metres. Single channel — the three are identical."""
+    os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
+    import cv2
+
+    image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if image is None:
+        raise ValueError(f"could not read {path} as an EXR")
+    return (image[..., 0] if image.ndim == 3 else image).astype(np.float32)

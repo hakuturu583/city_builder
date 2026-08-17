@@ -498,6 +498,12 @@ def styles_command():
 @click.option("--samples", type=int, default=24)
 @click.option("--engine", type=click.Choice(["eevee", "cycles"]), default="eevee")
 @click.option("--route-seed", type=int, default=0, help="Which route the search settles on")
+@click.option("--depth-dir", default=None,
+              help="Also render metric depth, one float EXR per frame, for a "
+                   "depth-conditioned video model")
+@click.option("--cameras", "cameras_path", default=None,
+              help="Also write the camera pose of every frame as JSON, for "
+                   "anything distilling the video back into 3D")
 @click.option("--quiet", is_flag=True)
 def drive_command(input_path, scene_path, output_path, quiet, **kwargs):
     """Drive a camera along the roads and render it to a video.
