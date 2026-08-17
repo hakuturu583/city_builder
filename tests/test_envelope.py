@@ -128,10 +128,12 @@ def test_a_prism_over_budget_is_peeled_until_it_fits():
             assert any(c[axis] == face for c in cells)
 
 
-def test_the_budget_is_the_one_the_card_was_measured_at():
-    """22 272 cells generated and 28 672 did not, with the model resident on a
-    32 GB card."""
-    assert 20_000 <= R.VOXEL_BUDGET < 22_272
+def test_the_budget_is_the_one_nothing_observed_has_failed_at():
+    """The ceiling is not a property of the count alone: a square plot at
+    20 000 asked for a 12.7 GB allocation and died where a long thin plot of
+    the same count had not. Peeling costs a little detail; running out costs
+    the whole building."""
+    assert R.VOXEL_BUDGET <= 12_000
 
 
 def test_no_budget_leaves_the_prism_alone():

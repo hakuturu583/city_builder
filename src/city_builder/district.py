@@ -365,28 +365,49 @@ def rebuild(scene, out_dir: str, *, buildings: list[int] | None = None,
     return ledger.write(ledger_path)
 
 
+def plot_family(plot: dict[str, Any]) -> str:
+    """Which family of photographs a plot belongs to.
+
+    The two things about the shape the picture still has to agree with, because
+    the envelope decides the shape and the picture decides everything else. A
+    bungalow photographed for a three-storey plot comes back nine metres tall,
+    one row of windows stretched over three; a square house photographed for a
+    5:1 plot comes back as a railway carriage — measured, 0.996, 0.888 and
+    0.807 of footprint IoU at 1:1, 3:1 and 5:1 from the same picture.
+    """
+    from .reconstruct import plan_dimensions, proportion_of
+
+    floors = int(plot.get("floors") or 0)
+    ratio = None
+    if plot.get("footprint"):
+        long_side, short_side = plan_dimensions(plot["footprint"])
+        ratio = long_side / max(short_side, 1e-6)
+    return f"{floors}f_{proportion_of(ratio)}"
+
+
 def _photograph_for(photos, plot: dict[str, Any], turn: int) -> str:
     """Which of the photographs this plot is built from.
 
-    Keyed by storey count when the caller supplied a family per storey count,
-    because the envelope sets the height and the picture sets everything else:
-    a bungalow photographed for a three-storey plot comes back as a bungalow
-    nine metres tall, one row of windows stretched over three. Within a storey
-    count the plots take the pictures in turn, which spreads the materials
-    along a street rather than clustering them.
-
-    A plain list is still accepted, and is then a family of one.
+    Keyed by :func:`plot_family` when the caller supplied families. Within one
+    the plots take the pictures in turn, which spreads the materials along a
+    street rather than clustering them. A plain list is still accepted, and is
+    then a family of one.
     """
-    if isinstance(photos, dict):
-        floors = int(plot.get("floors") or 0)
-        family = photos.get(floors)
-        if not family:
-            # A count nobody drew for: the nearest one that was drawn beats
-            # both an error and a bungalow.
-            nearest = min(photos, key=lambda n: (abs(n - floors), n))
-            family = photos[nearest]
-    else:
-        family = photos
+    if not isinstance(photos, dict):
+        return photos[turn % len(photos)]
+
+    wanted = plot_family(plot)
+    family = photos.get(wanted)
+    if not family:
+        # Nobody drew for this combination. Prefer the same plan shape at
+        # another storey count over the same storey count at another shape:
+        # the height is what the envelope is about to impose anyway.
+        shape = wanted.split("_", 1)[1]
+        floors = int(wanted.split("f_", 1)[0])
+        same_shape = {int(k.split("f_", 1)[0]): v for k, v in photos.items()
+                      if k.endswith(shape)}
+        pool = same_shape or {int(k.split("f_", 1)[0]): v for k, v in photos.items()}
+        family = pool[min(pool, key=lambda n: (abs(n - floors), n))]
     return family[turn % len(family)]
 
 

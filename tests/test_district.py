@@ -346,24 +346,36 @@ def test_a_building_that_stands_is_never_paid_for_again(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_a_plot_is_built_from_a_photograph_of_its_own_storey_count():
-    photos = {1: ["one_a.png", "one_b.png"], 3: ["three_a.png"]}
-    assert D._photograph_for(photos, {"floors": 3}, 0) == "three_a.png"
-    assert D._photograph_for(photos, {"floors": 1}, 0) == "one_a.png"
+def _square(side=12.0):
+    return _plot(side, side)
 
 
-def test_within_a_storey_count_the_plots_take_them_in_turn():
+def test_a_plot_is_built_from_a_photograph_of_its_own_family():
+    photos = {"3f_compact": ["three_sq.png"], "1f_elongated": ["one_long.png"]}
+    assert D._photograph_for(photos, {**_square(), "floors": 3}, 0) == "three_sq.png"
+    assert D._photograph_for(photos, {**_plot(40.0, 10.0), "floors": 1}, 0) \
+        == "one_long.png"
+
+
+def test_the_family_is_the_storey_count_and_the_plan_shape():
+    assert D.plot_family({**_square(), "floors": 2}) == "2f_compact"
+    assert D.plot_family({**_plot(40.0, 10.0), "floors": 2}) == "2f_elongated"
+
+
+def test_within_a_family_the_plots_take_them_in_turn():
     """Assigning by area or at random clusters one material along a street."""
-    photos = {2: ["a.png", "b.png", "c.png"]}
-    got = [D._photograph_for(photos, {"floors": 2}, turn) for turn in range(4)]
+    photos = {"2f_compact": ["a.png", "b.png", "c.png"]}
+    got = [D._photograph_for(photos, {**_square(), "floors": 2}, turn)
+           for turn in range(4)]
     assert got == ["a.png", "b.png", "c.png", "a.png"]
 
 
-def test_a_storey_count_nobody_drew_for_takes_the_nearest_that_was():
-    """Better than an error, and much better than a bungalow."""
-    photos = {1: ["one.png"], 2: ["two.png"]}
-    assert D._photograph_for(photos, {"floors": 7}, 0) == "two.png"
-    assert D._photograph_for(photos, {}, 0) == "one.png"
+def test_a_family_nobody_drew_for_keeps_the_plan_shape_over_the_storey_count():
+    """The height is what the envelope is about to impose anyway; the plan
+    shape is what the facade has to stretch over."""
+    photos = {"1f_elongated": ["long.png"], "7f_compact": ["square.png"]}
+    got = D._photograph_for(photos, {**_plot(40.0, 10.0), "floors": 7}, 0)
+    assert got == "long.png"
 
 
 def test_a_plain_list_is_still_a_family_of_one():

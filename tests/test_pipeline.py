@@ -88,18 +88,20 @@ def stubbed(monkeypatch, tmp_path):
         calls.append(("place", {"ledger": str(ledger)}))
         return {"placed": 1, "procedural": 0}
 
-    def photographs(subjects, out, *, floors=(0,), **kwargs):
+    def photographs(subjects, out, *, floors=(0,), proportions=("",), **kwargs):
         calls.append(("photographs", {"subjects": len(subjects),
-                                      "floors": list(floors)}))
+                                      "floors": list(floors),
+                                      "proportions": list(proportions)}))
         os.makedirs(out, exist_ok=True)
         drawn = []
-        for i, (storeys, subject) in enumerate(
-                (n, s) for n in floors for s in subjects):
-            path = os.path.join(out, f"subject_{storeys}f_{i:02d}.png")
+        for i, (storeys, shape, subject) in enumerate(
+                (n, p, s) for n in floors for p in proportions for s in subjects):
+            path = os.path.join(out, f"subject_{storeys}f_{shape}_{i:02d}.png")
             with open(path, "wb") as handle:
                 handle.write(b"x")
             drawn.append({"path": path, "subject": subject, "floors": storeys,
-                          "backdrop": 0.5, "tries": 1, "isolated": True})
+                          "proportion": shape, "backdrop": 0.5, "tries": 1,
+                          "isolated": True})
         return drawn
 
     import city_builder.build as build_module
@@ -173,17 +175,22 @@ def test_the_render_route_draws_no_photographs(stubbed, tmp_path):
     assert _named(stubbed, "reconstruct")[0]["photos"] is None
 
 
-def test_the_envelope_route_draws_a_family_per_floor_count(stubbed, tmp_path):
-    """The envelope sets the height and the picture sets everything else, so a
-    bungalow photographed for a three-storey plot comes back as a bungalow nine
-    metres tall — one row of windows stretched over three."""
+def test_the_envelope_route_draws_a_family_per_floor_count_and_plan_shape(
+        stubbed, tmp_path):
+    """The envelope decides the shape and the picture decides everything else,
+    so a bungalow photographed for a three-storey plot comes back nine metres
+    tall and a square house for a 5:1 plot comes back a railway carriage."""
+    from city_builder.reconstruct import PROPORTIONS
+
     P.run("map.osm", str(tmp_path),
           recipe=P.Recipe(envelope=True, envelope_subjects=4, renders=False, glb=False),
           stages=("ground", "reconstruct"), verbose=False)
     asked = _named(stubbed, "photographs")[0]
     assert asked["subjects"] == 4 and asked["floors"] == [1, 2, 3]
+    assert asked["proportions"] == [name for name, _r, _p in PROPORTIONS]
     handed = _named(stubbed, "reconstruct")[0]["photos"]
-    assert sorted(handed) == [1, 2, 3]
+    assert sorted(handed) == ["1f_compact", "1f_elongated", "2f_compact",
+                              "2f_elongated", "3f_compact", "3f_elongated"]
     assert all(len(group) == 4 for group in handed.values())
 
 

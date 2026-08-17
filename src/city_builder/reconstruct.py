@@ -277,10 +277,11 @@ HOUSE_SUBJECTS: tuple[str, ...] = (
 # to: the material and the weathering survive it, and the mesh comes back a
 # building rather than a smear.
 ISOLATED_FRAME = ("studio product photograph of a finished miniature model of "
-                  "{storeys}{subject}, every wall closed and complete, exterior "
-                  "only, isolated on a seamless plain background, floating, no "
-                  "ground, no sky, soft even lighting, the whole building visible "
-                  "including the roof, three-quarter view from slightly above")
+                  "{storeys}{subject}, {plan}every wall closed and complete, "
+                  "exterior only, isolated on a seamless plain background, "
+                  "floating, no ground, no sky, soft even lighting, the whole "
+                  "building visible including the roof, three-quarter view from "
+                  "slightly above")
 
 # The frame half of this was the first difficulty and the *kind of model* is the
 # second. "Architectural model" is a term of art and the image model knows it:
@@ -319,18 +320,53 @@ def storeys_said(floors: int | None) -> str:
     return STOREYS.get(int(floors), f"a {int(floors)}-storey ")
 
 
-def isolated_prompt(subject: str, floors: int | None = None) -> str:
+# The same argument as the storey count, in plan. The envelope makes the
+# footprint right whatever the picture shows, so nothing *breaks* — but the
+# facade has to stretch to cover a plot the photograph does not agree with, and
+# it does: one picture into plots of the same 120 m2 at 1:1, 3:1 and 5:1 fitted
+# 0.996, 0.888 and 0.807, and by 5:1 the windows are drawn out until the
+# building reads as a railway carriage. It is not a rare case either — this
+# map's plots run to a median of 1.73:1, with 122 of 189 over 1.5 and 16 over 3.
+PROPORTIONS: tuple[tuple[str, float, str], ...] = (
+    ("compact", 1.15, "roughly square in plan, "),
+    ("elongated", 2.4, "long and narrow in plan, about twice as wide as it is deep, "),
+)
+
+
+def proportion_of(ratio: float | None) -> str:
+    """Which of :data:`PROPORTIONS` a plan aspect belongs to.
+
+    Nearest in log space, because 1:1 is as far from 2:1 as 2:1 is from 4:1.
+    """
+    if not ratio or ratio <= 0:
+        return PROPORTIONS[0][0]
+    return min(PROPORTIONS, key=lambda p: abs(math.log(ratio / p[1])))[0]
+
+
+def proportion_said(name: str | None) -> str:
+    """How to say a plan proportion to an image model."""
+    for known, _ratio, phrase in PROPORTIONS:
+        if known == name:
+            return phrase
+    return ""
+
+
+def isolated_prompt(subject: str, floors: int | None = None,
+                    proportion: str | None = None) -> str:
     """One building on nothing, which is the only kind of picture an envelope wants.
 
-    ``floors`` is not decoration: see :data:`STOREYS`. Left out, the subject
-    carries its own article and the height is the model's guess.
+    ``floors`` and ``proportion`` are not decoration: see :data:`STOREYS` and
+    :data:`PROPORTIONS`. They are the two things about the *shape* the picture
+    still has to agree with, because the envelope decides the shape and the
+    picture decides everything else — and everything else has to fit on it.
     """
     said = storeys_said(floors)
     if said:
         # The subjects introduce themselves ("a small Japanese house"), and
         # "a two-storey a small Japanese house" is not a prompt.
         subject = _bare(subject)
-    return ISOLATED_FRAME.format(storeys=said, subject=subject)
+    return ISOLATED_FRAME.format(storeys=said, subject=subject,
+                                 plan=proportion_said(proportion))
 
 
 def _bare(subject: str) -> str:
@@ -368,6 +404,7 @@ def backdrop_share(image) -> float:
 
 def photographs(subjects: Sequence[str], out_dir: str, *,
                 floors: Sequence[int] = (0,),
+                proportions: Sequence[str] = ("",),
                 options: ImageOptions | None = None, prefix: str = "subject",
                 min_backdrop: float = 0.25, max_edge: float = 0.08,
                 attempts: int = 3) -> list[dict[str, Any]]:
@@ -379,10 +416,12 @@ def photographs(subjects: Sequence[str], out_dir: str, *,
     model has answered with a street instead of a building — the failure that
     otherwise reaches the mesh, where it is much more expensive to notice.
 
-    ``floors`` is a family per storey count, the same shape as the facade
-    sheets and for the same reason: the envelope sets the height and the
-    picture sets everything else, so a bungalow photographed for a three-storey
-    plot comes back as a bungalow nine metres tall.
+    ``floors`` and ``proportions`` make a family per storey count and plan
+    shape, the same idea as the facade sheets' family per floor count and for
+    the same reason: the envelope decides the shape and the picture decides
+    everything else, so a bungalow photographed for a three-storey plot comes
+    back nine metres tall, and a square house photographed for a 5:1 plot comes
+    back as a railway carriage.
     """
     import torch
     from diffusers import AutoPipelineForText2Image
@@ -394,16 +433,17 @@ def photographs(subjects: Sequence[str], out_dir: str, *,
     pipeline.set_progress_bar_config(disable=True)
     pipeline.enable_model_cpu_offload()
 
-    wanted = [(storeys, subject) for storeys in floors for subject in subjects]
+    wanted = [(storeys, shape, subject)
+              for storeys in floors for shape in proportions for subject in subjects]
     drawn: list[dict[str, Any]] = []
     try:
-        for index, (storeys, subject) in enumerate(wanted):
+        for index, (storeys, shape, subject) in enumerate(wanted):
             best, best_share, best_edge, best_score, tries = None, -1.0, 1.0, -9.0, 0
             for attempt in range(max(1, attempts)):
                 tries = attempt + 1
                 seed = options.seed + index * 1013 + attempt * 7919
                 drawing = pipeline(
-                    prompt=isolated_prompt(subject, storeys),
+                    prompt=isolated_prompt(subject, storeys, shape),
                     # Its own negative is about the *building*; this one is
                     # about the frame, and the frame is the whole difficulty.
                     negative_prompt=", ".join(filter(None, (ISOLATED_NEGATIVE,
@@ -423,10 +463,12 @@ def photographs(subjects: Sequence[str], out_dir: str, *,
                         drawing, share, edge, score)
                 if share >= min_backdrop and edge <= max_edge:
                     break
-            stamp = f"{storeys}f_" if storeys else ""
+            stamp = "".join(filter(None, (f"{storeys}f_" if storeys else "",
+                                          f"{shape}_" if shape else "")))
             path = os.path.join(out_dir, f"{prefix}_{stamp}{index:02d}.png")
             cut_out(best).save(path)
             drawn.append({"path": path, "subject": subject, "floors": storeys or None,
+                          "proportion": shape or None,
                           "backdrop": round(best_share, 3),
                           "edge": round(best_edge, 3), "tries": tries,
                           "isolated": best_share >= min_backdrop and best_edge <= max_edge})
@@ -844,13 +886,18 @@ EAVE_ROOM = 0.6
 # of the block at one, two and three storeys alike.
 ROOF_ROOM = 0.4
 
-# How many cells the sampler will take. Not a tidy number: 22 272 generated and
-# 28 672 did not, on a 32 GB card with the model resident, so the ceiling is
-# somewhere between and this is inside it. Above it the run does not degrade,
-# it throws — nineteen buildings on this map, three attempts each, twice, every
-# one out of memory — so something has to give, and it is better that it be the
-# envelope than the building.
-VOXEL_BUDGET = 20_000
+# How many cells the sampler will take. Above it the run does not degrade, it
+# throws — nineteen buildings on this map, three attempts each, twice, every one
+# out of memory — so something has to give, and better the envelope than the
+# building.
+#
+# 12 000 rather than the 20 000 the first measurement suggested. 22 272 cells
+# did generate once and 28 672 did not, but the ceiling is not a property of the
+# count alone: a square plot at 20 000 asked for a 12.7 GB allocation and died
+# on a card with the model already resident, where a long thin plot of the same
+# count had not. Peeling a plot costs a little of its detail; running out costs
+# the whole building, so the budget sits where nothing observed has failed.
+VOXEL_BUDGET = 12_000
 
 
 def envelope_coords(footprint: Sequence[Sequence[float]], height: float, *,

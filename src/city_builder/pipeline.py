@@ -395,32 +395,35 @@ def _photographs(out_dir: str, recipe: Recipe, state, *, force, verbose):
                   if name not in reconstruct_module.HOUSE_SUBJECTS])
     wanted = ordered[:max(1, recipe.envelope_subjects)]
     floors = sorted(state.get("floors") or [1, 2, 3])
+    shapes = [name for name, _ratio, _phrase in reconstruct_module.PROPORTIONS]
 
     where = os.path.join(out_dir, "subjects")
-    families: dict[int, list[str]] = {}
-    for row, (storeys, _subject) in enumerate(
-            (n, s) for n in floors for s in wanted):
-        families.setdefault(storeys, []).append(
-            os.path.join(where, f"subject_{storeys}f_{row:02d}.png"))
+    families: dict[str, list[str]] = {}
+    for row, (storeys, shape, _subject) in enumerate(
+            (n, p, s) for n in floors for p in shapes for s in wanted):
+        families.setdefault(f"{storeys}f_{shape}", []).append(
+            os.path.join(where, f"subject_{storeys}f_{shape}_{row:02d}.png"))
     if all(os.path.exists(p) for group in families.values() for p in group) and not force:
         if verbose:
             print(f"[pipeline] {sum(map(len, families.values()))} photograph(s) "
-                  f"already drawn, {len(families)} floor count(s)")
+                  f"already drawn, {len(families)} family(s)")
         return families
 
     drawn = reconstruct_module.photographs(
-        wanted, where, floors=floors,
+        wanted, where, floors=floors, proportions=shapes,
         options=reconstruct_module.ImageOptions(seed=recipe.seed))
     if verbose:
         thin = [row for row in drawn if not row["isolated"]]
-        print(f"[pipeline] {len(drawn)} photograph(s) over floor counts {floors}, "
-              f"backdrop {min(r['backdrop'] for r in drawn):.2f}-"
+        print(f"[pipeline] {len(drawn)} photograph(s) over floor counts {floors} "
+              f"and {len(shapes)} plan shape(s), backdrop "
+              f"{min(r['backdrop'] for r in drawn):.2f}-"
               f"{max(r['backdrop'] for r in drawn):.2f}"
-              + (f", {len(thin)} still framed too tight" if thin else ""))
+              + (f", {len(thin)} still framed badly" if thin else ""))
     state["photographs"] = drawn
-    made: dict[int, list[str]] = {}
+    made: dict[str, list[str]] = {}
     for row in drawn:
-        made.setdefault(int(row["floors"] or 0), []).append(row["path"])
+        made.setdefault(f"{int(row['floors'] or 0)}f_{row['proportion']}",
+                        []).append(row["path"])
     return made
 
 
