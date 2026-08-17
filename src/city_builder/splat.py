@@ -74,6 +74,17 @@ class SplatOptions:
     thickness: float = 0.05
     #: Surfaces are opaque. Stored through a logit, so 1.0 is not representable.
     opacity: float = 0.99
+    #: Points to size the cloud for — a camera path, usually. One size over a
+    #: whole street cannot be right: a drive sees the road four metres in front
+    #: of it and the buildings fifty metres away, and a disc that covers the
+    #: far wall in a pixel covers the near tarmac in twenty-six. Sampling
+    #: density is weighted by inverse square distance to the nearest of these,
+    #: which is exactly the weighting that makes every disc the same size *on
+    #: screen*. ``None`` samples uniformly by area.
+    viewpoints: Any = None
+    #: How close a surface is allowed to count as, in metres. Without a floor a
+    #: splat on the road under the camera takes an unbounded share of the budget.
+    viewpoint_floor: float = 2.0
     #: Average the texture over each splat's footprint instead of reading one
     #: texel. Off is faster and aliases; a roof tile is the texture that shows
     #: it, coming out as salt and pepper rather than as tiles.
@@ -93,8 +104,35 @@ def triangle_areas(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
     return 0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1)
 
 
+def face_weights(vertices: np.ndarray, faces: np.ndarray, viewpoints,
+                 floor: float = 2.0) -> np.ndarray:
+    """How much of the budget each triangle deserves, given where it is seen from.
+
+    Inverse square distance, and the exponent is not a knob. A disc of radius
+    ``r`` at distance ``d`` covers ``r/d`` of the frame, so equal *screen* size
+    wants ``r`` proportional to ``d``. Radius comes out of the sampling density
+    as ``1/sqrt(density)``, so density has to go as ``1/d^2`` — which is this.
+
+    Measured from the triangle's centroid to the nearest viewpoint, with a floor
+    so that the metre of road directly under the camera does not take the lot.
+    """
+    points = np.asarray(viewpoints, dtype=float).reshape(-1, 3)
+    centroids = vertices[faces].mean(axis=1)
+
+    # Chunked: a district is a million triangles and a drive a few hundred
+    # cameras, and the full matrix of distances between them is not needed at
+    # once.
+    nearest = np.empty(len(centroids))
+    for start in range(0, len(centroids), 4096):
+        block = centroids[start:start + 4096]
+        nearest[start:start + 4096] = np.sqrt(
+            ((block[:, None, :] - points[None, :, :]) ** 2).sum(-1)).min(axis=1)
+    return 1.0 / np.maximum(nearest, floor) ** 2
+
+
 def sample_surface(vertices: np.ndarray, faces: np.ndarray, count: int,
-                   seed: int = 0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+                   seed: int = 0, weights: np.ndarray | None = None
+                   ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """``(points, face_index, barycentric)`` spread evenly over the surface.
 
     Even *by area*, not by triangle: a mesh from a marching-cubes reconstruction
@@ -112,12 +150,15 @@ def sample_surface(vertices: np.ndarray, faces: np.ndarray, count: int,
         return np.zeros((0, 3)), empty_i, np.zeros((0, 3))
 
     areas = triangle_areas(vertices, faces)
-    total = float(areas.sum())
-    if total <= 0.0:
+    if float(areas.sum()) <= 0.0:
         raise ValueError("the mesh has no area to sample")
+    share = areas if weights is None else areas * weights
+    total = float(share.sum())
+    if total <= 0.0:
+        raise ValueError("every triangle has been weighted to nothing")
 
     rng = np.random.default_rng(seed)
-    cumulative = np.cumsum(areas)
+    cumulative = np.cumsum(share)
     picked = np.searchsorted(cumulative, rng.random(count) * total, side="right")
     picked = np.clip(picked, 0, len(faces) - 1)
 
@@ -325,19 +366,31 @@ def to_gaussians(vertices, faces, *, options: SplatOptions | None = None,
     count = options.count if options.count is not None else round(area * options.density)
     count = max(count, 0)
 
-    points, index, bary = sample_surface(vertices, faces, count, options.seed)
+    weights = None
+    if options.viewpoints is not None:
+        weights = face_weights(vertices, faces, options.viewpoints,
+                               options.viewpoint_floor)
+
+    points, index, bary = sample_surface(vertices, faces, count, options.seed, weights)
     samples = {"face_index": index, "barycentric": bary}
     normals = face_normals(vertices, faces)[index]
 
-    radius = options.spread * np.sqrt(area / (max(count, 1) * np.pi))
-    scales = np.column_stack([
-        np.full(len(points), radius),
-        np.full(len(points), radius),
-        np.full(len(points), radius * options.thickness),
-    ])
+    # Radius follows the density the sampling actually put down, which is the
+    # whole point: weight a triangle up and it gets more discs, each smaller,
+    # and the surface stays covered. Uniformly that reduces to the global
+    # spacing, which is what it was before there were weights.
+    if weights is None:
+        radius = np.full(len(points), options.spread * np.sqrt(area / (max(count, 1) * np.pi)))
+    else:
+        share = float((triangle_areas(vertices, faces) * weights).sum())
+        per_metre = max(count, 1) * weights[index] / max(share, 1e-12)
+        radius = options.spread / np.sqrt(np.maximum(per_metre, 1e-12) * np.pi)
+
+    scales = np.column_stack([radius, radius, radius * options.thickness])
 
     colours = _colours_for(samples, faces, options, vertex_colours, uv, image,
-                           vertices=vertices, radius=float(radius))
+                           vertices=vertices, radius=float(np.median(radius))
+                           if len(radius) else None)
     return {
         "means": points,
         "normals": normals,
@@ -346,7 +399,9 @@ def to_gaussians(vertices, faces, *, options: SplatOptions | None = None,
         "opacities": np.full(len(points), options.opacity),
         "colours": np.clip(colours, 0.0, 1.0),
         "area": area,
-        "radius": float(radius),
+        "radius": float(np.median(radius)) if len(radius) else 0.0,
+        "radius_range": ((float(radius.min()), float(radius.max()))
+                         if len(radius) else (0.0, 0.0)),
     }
 
 
@@ -378,13 +433,25 @@ def from_mesh_file(path: str, *, options: SplatOptions | None = None) -> dict[st
     # A budget is for the file, not for each mesh in it, so it is split by area
     # — which is the same rule the sampling inside one mesh already follows, and
     # it keeps every disc in the scene the same size.
-    areas = [float(triangle_areas(np.asarray(m.vertices, dtype=float),
-                                  np.asarray(m.faces, dtype=np.int64)).sum())
-             for m in meshes]
-    total = sum(areas)
+    # Weighted area, not area, when there are viewpoints: the split has to use
+    # the same measure the sampling inside each mesh does, or a mesh that is
+    # mostly far away takes a near mesh's share and its discs come out the wrong
+    # size on screen at the seam between them.
+    shares = []
+    for mesh in meshes:
+        points = np.asarray(mesh.vertices, dtype=float)
+        triangles = np.asarray(mesh.faces, dtype=np.int64)
+        area = triangle_areas(points, triangles)
+        if options.viewpoints is None:
+            shares.append(float(area.sum()))
+        else:
+            shares.append(float((area * face_weights(
+                points, triangles, options.viewpoints, options.viewpoint_floor)).sum()))
+
+    total = sum(shares)
     budgets: list[int | None] = [None] * len(meshes)
     if options.count is not None and total > 0:
-        budgets = [round(options.count * area / total) for area in areas]
+        budgets = [round(options.count * share / total) for share in shares]
 
     clouds = [_sample_one(mesh, options, seed_offset=i, count=budget)
               for i, (mesh, budget) in enumerate(zip(meshes, budgets, strict=True))]
@@ -395,7 +462,9 @@ def from_mesh_file(path: str, *, options: SplatOptions | None = None) -> dict[st
     joined = {key: np.concatenate([cloud[key] for cloud in clouds])
               for key in ("means", "normals", "quats", "scales", "opacities", "colours")}
     joined["area"] = float(sum(cloud["area"] for cloud in clouds))
-    joined["radius"] = float(np.mean([cloud["radius"] for cloud in clouds]))
+    joined["radius"] = float(np.median(joined["scales"][:, 0]))
+    joined["radius_range"] = (float(joined["scales"][:, 0].min()),
+                              float(joined["scales"][:, 0].max()))
     joined["meshes"] = len(clouds)
     return joined
 

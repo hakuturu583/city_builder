@@ -161,6 +161,62 @@ def test_spreading_the_same_surface_thinner_grows_each_disc():
     assert sparse["radius"] / dense["radius"] == pytest.approx(10.0, rel=1e-6)
 
 
+def _corridor(length: float = 100.0, width: float = 40.0):
+    """A flat plate a camera can drive along the middle of."""
+    vertices, faces = [], []
+    step = 2.0
+    nx, ny = int(width / step), int(length / step)
+    for j in range(ny + 1):
+        for i in range(nx + 1):
+            vertices.append((-width / 2 + i * step, -length / 2 + j * step, 0.0))
+    for j in range(ny):
+        for i in range(nx):
+            a = j * (nx + 1) + i
+            faces += [[a, a + 1, a + nx + 2], [a, a + nx + 2, a + nx + 1]]
+    return np.asarray(vertices, dtype=float), np.asarray(faces, dtype=np.int64)
+
+
+def test_sampling_towards_a_camera_path_puts_the_budget_where_it_is_seen():
+    vertices, faces = _corridor()
+    path = np.column_stack([np.zeros(20), np.linspace(-45, 45, 20), np.full(20, 1.5)])
+
+    even = S.to_gaussians(vertices, faces, options=S.SplatOptions(count=40_000))
+    aimed = S.to_gaussians(vertices, faces,
+                           options=S.SplatOptions(count=40_000, viewpoints=path))
+
+    near = lambda cloud: (np.abs(cloud["means"][:, 0]) < 3.0).mean()
+    assert near(aimed) > near(even) * 2.0
+
+
+def test_a_disc_near_the_camera_is_smaller_than_one_far_from_it():
+    """The point of the weighting: equal size on screen, not in the world."""
+    vertices, faces = _corridor()
+    path = np.column_stack([np.zeros(20), np.linspace(-45, 45, 20), np.full(20, 1.5)])
+    cloud = S.to_gaussians(vertices, faces,
+                           options=S.SplatOptions(count=60_000, viewpoints=path))
+
+    distance = np.abs(cloud["means"][:, 0])
+    radius = cloud["scales"][:, 0]
+    close = radius[distance < 4.0].mean()
+    far = radius[distance > 16.0].mean()
+    assert far > close * 3.0
+
+    # Radius proportional to distance is what makes the screen size constant.
+    # Not exactly: the weight is one number per triangle, taken at its centroid,
+    # while this measures each sample where it actually landed, so a couple of
+    # metres of triangle shows up as a few per cent of spread.
+    ratio = radius / np.maximum(distance, S.SplatOptions().viewpoint_floor)
+    outer = ratio[distance > 6.0]
+    assert outer.std() / outer.mean() < 0.10
+
+
+def test_uniform_sampling_is_unchanged_when_no_viewpoints_are_given():
+    vertices, faces = _unit_square()
+    cloud = S.to_gaussians(vertices, faces, options=S.SplatOptions(count=400))
+    assert np.allclose(cloud["scales"][:, 0], cloud["scales"][0, 0])
+    assert cloud["radius"] == pytest.approx(np.sqrt(1.0 / (400 * np.pi)))
+
+
 def test_density_is_per_square_metre_of_surface():
     one = S.to_gaussians(*_unit_square(), options=S.SplatOptions(density=400.0))
     four = S.to_gaussians(np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0],
