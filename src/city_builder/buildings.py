@@ -62,6 +62,12 @@ class BuildingOptions:
     max_height: float = 45.0
     floor_height: float = 3.5  # heights snap to whole floors
     tall_bias: float = 0.35  # 0 = every block low, 1 = every block tall
+    # How tall a building may stand against the *narrow* side of its plot. Not
+    # a style choice: the lot subdivision produces plots much longer than they
+    # are deep, and a height drawn from the area alone puts three storeys on
+    # something 4.7 m across. 1.5 is about a two-storey house on a 5 m frontage
+    # — tall for a suburb and not a tower.
+    slenderness: float = 1.5
 
     facade_width: float = 12.0  # how much wall one sheet spans horizontally
     skirt: float = 1.0  # how far the walls run below the ground
@@ -325,16 +331,47 @@ def footprints(
     return plots
 
 
-def pick_height(area: float, options: BuildingOptions, rng: random.Random) -> float:
+def _narrow_side(plot) -> float:
+    """The short side of a plot's minimum rotated rectangle, in metres.
+
+    Not the axis-aligned bounds: a plot on a street that does not run north has
+    a bounding box much wider than the plot, and would read as roomy enough for
+    a tower when it is not.
+    """
+    ring = plot if plot.is_valid else plot.buffer(0)
+    corners = list(ring.minimum_rotated_rectangle.exterior.coords)[:4]
+    if len(corners) < 4:
+        return 0.0
+    sides = [math.dist(corners[i], corners[(i + 1) % 4]) for i in range(4)]
+    return min(sides[0], sides[1])
+
+
+def pick_height(area: float, options: BuildingOptions, rng: random.Random,
+                short_side: float | None = None) -> float:
     """A plausible height for a plot, snapped to whole floors.
 
     Bigger plots lean taller — a tower needs a footprint — but the draw stays
     random so a street does not come out monotonic.
+
+    ``short_side`` is the *narrow* dimension of the plot, and it is a cap
+    rather than a pull. Area alone does not say whether a footprint can carry a
+    height: a 110 m2 plot 18.6 m by 5.9 m has as much of it as one 10.5 m
+    square, and gets the same draw, but three storeys on the first is a tower
+    two and a half times as tall as it is deep. On this map 48 plots of 189 are
+    under 6 m across and 23 are under 5, so it is not a corner case — and it is
+    the reconstructions it shows up in worst, since they are photographed as
+    houses and then stretched into whatever shape the plot is.
     """
     span = options.max_height - options.min_height
     footprint_pull = min(1.0, area / 2500.0)
     draw = rng.random() ** (1.0 - options.tall_bias * footprint_pull)
     height = options.min_height + span * draw * (0.35 + 0.65 * footprint_pull)
+    if short_side and height > short_side * options.slenderness:
+        # Snapped *down* when the cap binds, because rounding a capped height
+        # up puts the storey back: a 5.0 m cap rounds to two floors and 6.0 m,
+        # which is the height the cap was there to refuse.
+        height = short_side * options.slenderness
+        return max(1, int(height / options.floor_height)) * options.floor_height
     floors = max(1, round(height / options.floor_height))
     return floors * options.floor_height
 
@@ -768,7 +805,7 @@ def generate(
     for plot in plots:
         # On its own platform, not on the hillside it was cut out of.
         base = base_height(plot, heightmap) + options.terrace
-        height = pick_height(plot.area, options, rng)
+        height = pick_height(plot.area, options, rng, short_side=_narrow_side(plot))
         wall_mesh, roof_mesh = extrude(plot, base, height, skirt=options.skirt,
                                       facade_width=options.facade_width)
         if options.plinth_height > 0:

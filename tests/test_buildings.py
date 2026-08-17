@@ -401,3 +401,53 @@ def test_a_lot_with_no_road_keeps_all_of_itself():
     lot = shapely_box(0, 0, 20, 20)
     assert B.give_up_the_frontage(lot, None, 5.0) is lot
     assert B.give_up_the_frontage(lot, shapely_box(-10, -6, 30, -1), 0.0) is lot
+
+
+# ---------------------------------------------------------------------------
+# A tower needs a footprint in both directions
+# ---------------------------------------------------------------------------
+
+
+def test_a_narrow_plot_does_not_get_a_tower():
+    """Area alone does not say whether a footprint can carry a height: a
+    110 m2 plot 18.6 m by 5.9 m has as much of it as one 10.5 m square, and
+    three storeys on the first is two and a half times as tall as it is deep.
+    On the Kashiwanoha map 48 plots of 189 are under 6 m across."""
+    import random
+
+    options = B.BuildingOptions(min_height=6.0, max_height=45.0, floor_height=3.0,
+                                slenderness=1.5)
+    rng = random.Random(0)
+    tall = [B.pick_height(110.0, options, rng, short_side=4.7) for _ in range(40)]
+    assert max(tall) <= 4.7 * 1.5
+
+
+def test_the_cap_snaps_down_and_not_up():
+    """Rounding a capped height puts the storey back: a 5.0 m cap rounds to
+    two floors and 6.0 m, which is the height the cap refused."""
+    import random
+
+    options = B.BuildingOptions(min_height=6.0, max_height=45.0, floor_height=3.0,
+                                slenderness=1.5)
+    assert B.pick_height(110.0, options, random.Random(3), short_side=3.4) == 3.0
+
+
+def test_a_roomy_plot_is_left_to_the_draw():
+    import random
+
+    options = B.BuildingOptions(min_height=6.0, max_height=45.0, floor_height=3.0)
+    rng = random.Random(7)
+    free = [B.pick_height(2000.0, options, rng) for _ in range(30)]
+    rng = random.Random(7)
+    wide = [B.pick_height(2000.0, options, rng, short_side=40.0) for _ in range(30)]
+    assert free == wide
+
+
+def test_the_short_side_is_the_rotated_rectangles():
+    """A plot on a street that does not run north has a bounding box much
+    wider than the plot, and would read as roomy enough for a tower."""
+    from shapely.affinity import rotate
+    from shapely.geometry import box
+
+    turned = rotate(box(0.0, 0.0, 20.0, 5.0), 37.0, origin="center")
+    assert B._narrow_side(turned) == pytest.approx(5.0, abs=0.05)
