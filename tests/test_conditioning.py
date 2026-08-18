@@ -291,3 +291,76 @@ def test_the_file_says_which_convention_it_is_in(tmp_path):
         payload = json.load(handle)
     assert "world-to-camera" in payload["convention"]
     assert "+Z forward" in payload["convention"]
+
+
+# ---------------------------------------------------------------------------
+# Carrying a picture from one camera to another
+# ---------------------------------------------------------------------------
+
+
+def _wall(camera, distance=20.0):
+    """A flat wall square to the camera, at a known distance."""
+    return np.full((camera.height, camera.width), distance, dtype=np.float32)
+
+
+def test_a_view_of_the_same_wall_carries_its_colours_over():
+    """The whole point: a picture taken there, shown here."""
+    there = _camera(rotation=HORIZON)
+    here = _camera(rotation=HORIZON, position=(0.0, 2.0, 0.0))   # 2 m along the wall's normal
+    rgb = np.zeros((there.height, there.width, 3), np.float32)
+    rgb[:, : there.width // 2] = (1.0, 0.0, 0.0)
+    rgb[:, there.width // 2:] = (0.0, 0.0, 1.0)
+
+    colour, valid = C.reproject(here, _wall(here, 18.0),
+                                [(there, _wall(there, 20.0), rgb)])
+    assert valid.mean() > 0.9
+    # The camera moved straight at the wall, so left stays left.
+    left = colour[valid][:, 0] > 0.5
+    assert left.any() and (~left).any()
+    assert np.allclose(colour[valid][left], (1.0, 0.0, 0.0))
+
+
+def test_surface_no_source_ever_saw_comes_back_invalid():
+    """"Not seen" has to be reported, not filled in with something plausible."""
+    there = _camera(rotation=HORIZON)
+    here = _camera(rotation=spin("z", 180.0) @ HORIZON)          # looking the other way
+    rgb = np.full((there.height, there.width, 3), 0.5, np.float32)
+
+    _colour, valid = C.reproject(here, _wall(here), [(there, _wall(there), rgb)])
+    assert not valid.any()
+
+
+def test_a_point_hidden_in_the_source_is_refused():
+    """It lands inside the old frame, and the old frame saw something nearer."""
+    there = _camera(rotation=HORIZON)
+    here = _camera(rotation=HORIZON)
+    rgb = np.full((there.height, there.width, 3), 0.5, np.float32)
+
+    # The source saw a wall at 5 m; this view is asking about surface at 40 m,
+    # in the same direction, which is therefore behind it.
+    _colour, valid = C.reproject(here, _wall(here, 40.0),
+                                 [(there, _wall(there, 5.0), rgb)])
+    assert not valid.any()
+
+
+def test_the_sky_is_never_carried():
+    camera = _camera(rotation=HORIZON)
+    depth = _wall(camera)
+    depth[: camera.height // 3] = 0.0                            # no surface up there
+    rgb = np.full((camera.height, camera.width, 3), 0.5, np.float32)
+
+    _colour, valid = C.reproject(camera, depth, [(camera, depth, rgb)])
+    assert not valid[: camera.height // 3].any()
+    assert valid[camera.height // 3:].mean() > 0.9
+
+
+def test_the_most_recent_source_wins():
+    """Sources come newest first, so the freshest answer is the one taken."""
+    camera = _camera(rotation=HORIZON)
+    depth = _wall(camera)
+    newest = np.full((camera.height, camera.width, 3), 0.9, np.float32)
+    oldest = np.full((camera.height, camera.width, 3), 0.1, np.float32)
+
+    colour, valid = C.reproject(camera, depth,
+                                [(camera, depth, newest), (camera, depth, oldest)])
+    assert np.allclose(colour[valid], 0.9)

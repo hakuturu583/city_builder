@@ -468,3 +468,69 @@ def read_depth(path: str) -> np.ndarray:
     if image is None:
         raise ValueError(f"could not read {path} as an EXR")
     return (image[..., 0] if image.ndim == 3 else image).astype(np.float32)
+
+
+def reproject(camera: Camera, depth: np.ndarray, sources, *,
+              tolerance: float = 0.15) -> tuple[np.ndarray, np.ndarray]:
+    """``(colour, valid)`` for one view, gathered from views already rendered.
+
+    What it is for: carrying a picture from cameras that have one into a camera
+    that does not. A video model asked to continue a drive needs to be shown
+    what the last stretch looked like, and the only honest way to put that in
+    front of the new camera is to move it there through the geometry — which is
+    measured here rather than estimated, so this is arithmetic rather than a
+    guess.
+
+    ``sources`` is a sequence of ``(camera, depth, rgb)`` already in hand, most
+    recent first; each target pixel takes the first answer that survives.
+
+    **Backward, not forward.** Scattering source pixels into the target leaves
+    holes wherever the sampling stretches, and a hole is indistinguishable from
+    surface that genuinely was not seen. Going the other way every target pixel
+    asks a question and either gets an answer or does not, and "does not" is
+    exactly the mask a caller wants.
+
+    **Occlusion is checked.** A world point can land inside an old frame and
+    still have been hidden there, behind something since driven past. If the old
+    depth at that pixel disagrees with how far the point actually is — by more
+    than ``tolerance`` of the distance, because a fixed margin is wrong at both
+    two metres and eighty — the answer is thrown away.
+    """
+    height, width = depth.shape[:2]
+    world = unproject(depth, camera)
+    colour = np.zeros((height, width, 3), np.float32)
+    valid = np.zeros((height, width), bool)
+    nothing = sky(depth)
+
+    for source, source_depth, rgb in sources:
+        want = ~valid & ~nothing
+        if not want.any():
+            break
+        local = world[want] @ source.view[:3, :3].T + source.view[:3, 3]
+        ahead = local[:, 2] > 0.05
+        fx, fy = source.intrinsics[0, 0], source.intrinsics[1, 1]
+        cx, cy = source.intrinsics[0, 2], source.intrinsics[1, 2]
+
+        u = np.full(len(local), -1.0)
+        v = np.full(len(local), -1.0)
+        u[ahead] = local[ahead, 0] / local[ahead, 2] * fx + cx
+        v[ahead] = local[ahead, 1] / local[ahead, 2] * fy + cy
+        ui, vi = np.round(u).astype(int), np.round(v).astype(int)
+        inside = (ahead & (ui >= 0) & (ui < source.width)
+                  & (vi >= 0) & (vi < source.height))
+        if not inside.any():
+            continue
+
+        there = np.zeros(len(local))
+        there[inside] = source_depth[vi[inside], ui[inside]]
+        agrees = np.zeros(len(local), bool)
+        near = inside & (there > 0)
+        agrees[near] = np.abs(there[near] - local[near, 2]) < tolerance * local[near, 2]
+        if not agrees.any():
+            continue
+
+        rows, cols = np.nonzero(want)
+        colour[rows[agrees], cols[agrees]] = rgb[vi[agrees], ui[agrees]]
+        valid[rows[agrees], cols[agrees]] = True
+
+    return colour, valid
