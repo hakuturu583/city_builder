@@ -85,6 +85,18 @@ class SplatOptions:
     #: How close a surface is allowed to count as, in metres. Without a floor a
     #: splat on the road under the camera takes an unbounded share of the budget.
     viewpoint_floor: float = 2.0
+    #: How sharply the budget falls off with distance. Two is the exponent that
+    #: makes every disc the same size on screen, and on a drive that is the
+    #: wrong thing to want: measured on this map it put 51.6 % of the budget on
+    #: the road and the junctions, which are 2.6 % of the surface and almost
+    #: featureless, and left the building walls at seven times the road's disc
+    #: size. Screen area is not where the detail is. One spreads it back out.
+    falloff: float = 1.0
+    #: A multiplier per mesh or object name, matched case-insensitively on a
+    #: substring. What it is for is saying that a wall carries windows and
+    #: balconies while a carriageway carries almost nothing, which no amount of
+    #: geometry can work out on its own.
+    emphasis: Any = None
     #: Average the texture over each splat's footprint instead of reading one
     #: texel. Off is faster and aliases; a roof tile is the texture that shows
     #: it, coming out as salt and pepper rather than as tiles.
@@ -105,13 +117,20 @@ def triangle_areas(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
 
 
 def face_weights(vertices: np.ndarray, faces: np.ndarray, viewpoints,
-                 floor: float = 2.0) -> np.ndarray:
+                 floor: float = 2.0, falloff: float = 1.0) -> np.ndarray:
     """How much of the budget each triangle deserves, given where it is seen from.
 
-    Inverse square distance, and the exponent is not a knob. A disc of radius
-    ``r`` at distance ``d`` covers ``r/d`` of the frame, so equal *screen* size
-    wants ``r`` proportional to ``d``. Radius comes out of the sampling density
-    as ``1/sqrt(density)``, so density has to go as ``1/d^2`` — which is this.
+    A disc of radius ``r`` at distance ``d`` covers ``r/d`` of the frame, so a
+    ``falloff`` of 2 is the exponent that makes every disc the same size on
+    screen. That is the obvious thing to want and it is wrong for a drive: the
+    camera is a metre and a half above a road that fills the bottom half of
+    every frame, so squared falloff spent 51.6 % of the budget on the
+    carriageway and the junctions — 2.6 % of the surface, and almost featureless
+    — while the building walls, which carry every window and balcony, came out
+    at seven times the road's disc size.
+
+    So the default is 1. Screen area and detail are not the same measure, and
+    between the two this errs towards the surfaces that have something on them.
 
     Measured from the triangle's centroid to the nearest viewpoint, with a floor
     so that the metre of road directly under the camera does not take the lot.
@@ -127,7 +146,24 @@ def face_weights(vertices: np.ndarray, faces: np.ndarray, viewpoints,
         block = centroids[start:start + 4096]
         nearest[start:start + 4096] = np.sqrt(
             ((block[:, None, :] - points[None, :, :]) ** 2).sum(-1)).min(axis=1)
-    return 1.0 / np.maximum(nearest, floor) ** 2
+    return 1.0 / np.maximum(nearest, floor) ** falloff
+
+
+def emphasis_for(name: str, emphasis) -> float:
+    """The multiplier for a mesh called ``name``, or 1.0 if none applies.
+
+    Substring and case-insensitive, because the name a glTF gives a mesh is the
+    scene's group with an exporter's suffix on it — ``Buildings`` arrives as
+    ``Buildings_Mesh`` — and keying on the exact string would break the moment
+    the exporter changed its mind.
+    """
+    if not emphasis:
+        return 1.0
+    lowered = name.lower()
+    for key, value in dict(emphasis).items():
+        if key.lower() in lowered:
+            return float(value)
+    return 1.0
 
 
 def sample_surface(vertices: np.ndarray, faces: np.ndarray, count: int,
@@ -343,7 +379,8 @@ def _colours_for(samples: dict, faces: np.ndarray, options: SplatOptions,
 
 
 def to_gaussians(vertices, faces, *, options: SplatOptions | None = None,
-                 vertex_colours=None, uv=None, image=None) -> dict[str, Any]:
+                 vertex_colours=None, uv=None, image=None,
+                 extra_weight=None) -> dict[str, Any]:
     """Sample a triangle mesh into 3D Gaussians.
 
     Returns the arrays a rasteriser wants, in its units rather than the file's:
@@ -366,10 +403,12 @@ def to_gaussians(vertices, faces, *, options: SplatOptions | None = None,
     count = options.count if options.count is not None else round(area * options.density)
     count = max(count, 0)
 
-    weights = None
+    weights = extra_weight
     if options.viewpoints is not None:
         weights = face_weights(vertices, faces, options.viewpoints,
-                               options.viewpoint_floor)
+                               options.viewpoint_floor, options.falloff)
+        if extra_weight is not None:
+            weights = weights * extra_weight
 
     points, index, bary = sample_surface(vertices, faces, count, options.seed, weights)
     samples = {"face_index": index, "barycentric": bary}
@@ -421,32 +460,34 @@ def from_mesh_file(path: str, *, options: SplatOptions | None = None) -> dict[st
     if isinstance(loaded, trimesh.Scene):
         # Bake each mesh's placement in the scene graph into its vertices, or a
         # district comes out as every building standing on the same spot.
-        meshes = []
+        meshes, names = [], []
         for name, geometry in loaded.geometry.items():
             placed = geometry.copy()
             if name in loaded.graph.nodes_geometry:
                 placed.apply_transform(loaded.graph.get(name)[0])
             meshes.append(placed)
+            names.append(name)
     else:
-        meshes = [loaded]
+        meshes, names = [loaded], [os.path.basename(path)]
 
-    # A budget is for the file, not for each mesh in it, so it is split by area
-    # — which is the same rule the sampling inside one mesh already follows, and
-    # it keeps every disc in the scene the same size.
-    # Weighted area, not area, when there are viewpoints: the split has to use
-    # the same measure the sampling inside each mesh does, or a mesh that is
-    # mostly far away takes a near mesh's share and its discs come out the wrong
-    # size on screen at the seam between them.
+    # A budget is for the file, not for each mesh in it. Split by the same
+    # measure the sampling inside each mesh uses — weighted area where there are
+    # viewpoints, plain area otherwise — or a mesh that is mostly far away takes
+    # a near mesh's share and the discs change size at the seam between them.
+    # `emphasis` then says which meshes are worth more than their geometry
+    # suggests, which is the only way to know that a wall has windows on it.
     shares = []
     for mesh in meshes:
         points = np.asarray(mesh.vertices, dtype=float)
         triangles = np.asarray(mesh.faces, dtype=np.int64)
         area = triangle_areas(points, triangles)
+        lift = emphasis_for(names[len(shares)], options.emphasis)
         if options.viewpoints is None:
-            shares.append(float(area.sum()))
+            shares.append(float(area.sum()) * lift)
         else:
-            shares.append(float((area * face_weights(
-                points, triangles, options.viewpoints, options.viewpoint_floor)).sum()))
+            shares.append(lift * float((area * face_weights(
+                points, triangles, options.viewpoints, options.viewpoint_floor,
+                options.falloff)).sum()))
 
     total = sum(shares)
     budgets: list[int | None] = [None] * len(meshes)

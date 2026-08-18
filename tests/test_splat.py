@@ -189,7 +189,6 @@ def test_sampling_towards_a_camera_path_puts_the_budget_where_it_is_seen():
 
 
 def test_a_disc_near_the_camera_is_smaller_than_one_far_from_it():
-    """The point of the weighting: equal size on screen, not in the world."""
     vertices, faces = _corridor()
     path = np.column_stack([np.zeros(20), np.linspace(-45, 45, 20), np.full(20, 1.5)])
     cloud = S.to_gaussians(vertices, faces,
@@ -197,17 +196,50 @@ def test_a_disc_near_the_camera_is_smaller_than_one_far_from_it():
 
     distance = np.abs(cloud["means"][:, 0])
     radius = cloud["scales"][:, 0]
-    close = radius[distance < 4.0].mean()
-    far = radius[distance > 16.0].mean()
-    assert far > close * 3.0
+    assert radius[distance > 16.0].mean() > radius[distance < 4.0].mean() * 1.5
 
-    # Radius proportional to distance is what makes the screen size constant.
-    # Not exactly: the weight is one number per triangle, taken at its centroid,
-    # while this measures each sample where it actually landed, so a couple of
-    # metres of triangle shows up as a few per cent of spread.
-    ratio = radius / np.maximum(distance, S.SplatOptions().viewpoint_floor)
+
+@pytest.mark.parametrize("falloff,power", [(2.0, 1.0), (1.0, 0.5)])
+def test_the_falloff_decides_how_the_radius_follows_the_distance(falloff, power):
+    """`falloff` of 2 gives equal size on screen; 1 spreads the budget wider.
+
+    Radius comes out of the density as ``1/sqrt(density)`` and density goes as
+    ``d**-falloff``, so radius goes as ``d**(falloff/2)``. Two is what makes a
+    disc cover the same fraction of the frame wherever it is — and is not the
+    default, because on a drive it hands the road half the budget.
+    """
+    vertices, faces = _corridor()
+    path = np.column_stack([np.zeros(20), np.linspace(-45, 45, 20), np.full(20, 1.5)])
+    cloud = S.to_gaussians(vertices, faces, options=S.SplatOptions(
+        count=60_000, viewpoints=path, falloff=falloff))
+
+    distance = np.maximum(np.abs(cloud["means"][:, 0]), S.SplatOptions().viewpoint_floor)
+    # One number per triangle, taken at its centroid, against a sample measured
+    # where it actually landed: a couple of metres of triangle is a few per cent.
+    ratio = cloud["scales"][:, 0] / distance ** power
     outer = ratio[distance > 6.0]
     assert outer.std() / outer.mean() < 0.10
+
+
+def test_emphasis_buys_a_mesh_more_of_the_budget_than_its_geometry_would(tmp_path):
+    """A wall carries windows and a carriageway carries nothing, and only a
+    name can say so — the geometry of the two is equally flat."""
+    trimesh = pytest.importorskip("trimesh")
+
+    scene = trimesh.Scene({"Roads": trimesh.creation.box(extents=(4.0, 4.0, 0.1)),
+                           "Buildings": trimesh.creation.box(extents=(4.0, 4.0, 0.1))})
+    path = str(tmp_path / "two.glb")
+    scene.export(path)
+
+    plain = S.from_mesh_file(path, options=S.SplatOptions(count=20_000))
+    lifted = S.from_mesh_file(path, options=S.SplatOptions(
+        count=20_000, emphasis={"Buildings": 4.0}))
+
+    # The two boxes sit on top of each other, so tell them apart by radius:
+    # whichever got more of the budget has the smaller discs.
+    assert len(np.unique(np.round(plain["scales"][:, 0], 6))) == 1
+    assert lifted["scales"][:, 0].max() / lifted["scales"][:, 0].min() == pytest.approx(
+        2.0, rel=0.05)
 
 
 def test_uniform_sampling_is_unchanged_when_no_viewpoints_are_given():
