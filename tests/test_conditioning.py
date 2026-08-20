@@ -475,3 +475,89 @@ def test_a_mask_is_soft_at_the_edges_so_a_thin_line_does_not_dash():
     mask = cover([stripe], camera)
     values = np.unique(mask[mask > 0])
     assert (values < 1.0).any(), "a sub-pixel line came back fully opaque"
+
+
+# ---------------------------------------------------------------------------
+# Carrying a frame forward: the sky, the gaps, and what must not be invented
+
+
+def test_a_straight_run_carries_the_sky_pixel_for_pixel():
+    from city_builder.conditioning import carry_sky
+
+    here = _straight_camera()
+    # Five metres further down the same road, pointing the same way.
+    ahead = _straight_camera()
+    ahead.view = here.view.copy()
+    ahead.view[:3, 3] = -here.view[:3, :3] @ np.array([5.0, 0.0, 1.5])
+
+    rgb = np.random.default_rng(0).random((here.height, here.width, 3)).astype(np.float32)
+    where = np.zeros((here.height, here.width), bool)
+    where[:10] = True
+
+    colour, valid = carry_sky(ahead, here, rgb, where)
+    assert valid[where].all()
+    # Sky is at infinity: driving does not move it.
+    assert np.allclose(colour[where], rgb[where], atol=1e-5)
+
+
+def test_the_sky_is_only_taken_where_it_was_asked_for():
+    from city_builder.conditioning import carry_sky
+
+    camera = _straight_camera()
+    rgb = np.ones((camera.height, camera.width, 3), np.float32)
+    where = np.zeros((camera.height, camera.width), bool)
+    where[0, 0] = True
+    _colour, valid = carry_sky(camera, camera, rgb, where)
+    assert valid.sum() == 1
+
+
+def test_a_gap_is_filled_with_the_light_around_it_rather_than_with_black():
+    from city_builder.conditioning import fill_gaps
+
+    colour = np.full((32, 32, 3), 0.7, np.float32)
+    valid = np.ones((32, 32), bool)
+    valid[8:16, 8:16] = False
+    colour[~valid] = 0.0
+
+    filled = fill_gaps(colour, valid)
+    # Blurring across a hole drags the mean down; if that is not put back the
+    # gap comes out darker than the frame and the model paints shadow there.
+    assert filled[~valid].mean() > 0.5
+    assert np.allclose(filled[valid], 0.7)
+
+
+def test_filling_a_frame_that_carried_nothing_does_not_divide_by_zero():
+    from city_builder.conditioning import fill_gaps
+
+    colour = np.zeros((8, 8, 3), np.float32)
+    filled = fill_gaps(colour, np.zeros((8, 8), bool))
+    assert np.isfinite(filled).all()
+
+
+def test_repainting_follows_the_light_the_model_chose():
+    from PIL import Image
+
+    from city_builder.conditioning import repaint
+
+    mask = np.zeros((16, 16), np.float32)
+    mask[8] = 1.0
+
+    dusk = Image.fromarray(np.full((16, 16, 3), 40, np.uint8))
+    noon = Image.fromarray(np.full((16, 16, 3), 180, np.uint8))
+    on_dusk = np.asarray(repaint(dusk, mask), np.float32)[8].mean()
+    on_noon = np.asarray(repaint(noon, mask), np.float32)[8].mean()
+
+    assert on_dusk > 40, "the paint is not brighter than the road it is on"
+    assert on_noon > on_dusk, "the paint ignored the light in the frame"
+
+
+def test_repainting_leaves_everything_the_mask_does_not_name():
+    from PIL import Image
+
+    from city_builder.conditioning import repaint
+
+    pixels = np.full((16, 16, 3), 90, np.uint8)
+    mask = np.zeros((16, 16), np.float32)
+    mask[8] = 1.0
+    out = np.asarray(repaint(Image.fromarray(pixels), mask))
+    assert (out[:8] == 90).all() and (out[9:] == 90).all()

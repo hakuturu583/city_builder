@@ -616,3 +616,83 @@ def cover(rings, camera: Camera, depth: np.ndarray | None = None, *,
 
     reduced = mask.reshape(camera.height, scale, camera.width, scale)
     return reduced.mean(axis=(1, 3))
+
+
+def carry_sky(camera: Camera, source: Camera, rgb: np.ndarray,
+              where: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The sky from a view that has one, brought to a view that does not.
+
+    `reproject` cannot answer for sky and should not try: it works by
+    unprojecting depth, and a ray that hit nothing has no distance to unproject.
+    So the sky comes out a hole in every carried-over frame, and a hole filled
+    with anything dark is a dark sky — which is what the model then paints.
+
+    But sky is the one part of a scene that needs no depth. It is at infinity,
+    so driving does not move it; only turning does. Each sky pixel's direction
+    is looked up in the source through rotation alone, and for a straight run
+    that is the identical pixel.
+    """
+    height, width = where.shape
+    rows, cols = np.nonzero(where)
+    if len(rows) == 0:
+        return np.zeros((height, width, 3), np.float32), np.zeros((height, width), bool)
+
+    rays = np.linalg.inv(camera.intrinsics) @ np.stack(
+        [cols + 0.5, rows + 0.5, np.ones(len(rows))])
+    # Out to the world and back in, carrying no translation with them.
+    turned = source.view[:3, :3] @ camera.view[:3, :3].T @ rays
+    pixels = source.intrinsics @ turned
+    ahead = pixels[2] > 1e-6
+    u = np.full(len(rows), -1.0)
+    v = np.full(len(rows), -1.0)
+    u[ahead] = pixels[0, ahead] / pixels[2, ahead]
+    v[ahead] = pixels[1, ahead] / pixels[2, ahead]
+    # Floor, not round: the rays were built from pixel centres, so the pixel a
+    # coordinate falls in is the one below it. Rounding sends the last column
+    # off the edge of the frame it came from.
+    ui, vi = np.floor(u).astype(int), np.floor(v).astype(int)
+    inside = (ahead & (ui >= 0) & (ui < source.width)
+              & (vi >= 0) & (vi < source.height))
+
+    colour = np.zeros((height, width, 3), np.float32)
+    valid = np.zeros((height, width), bool)
+    colour[rows[inside], cols[inside]] = rgb[vi[inside], ui[inside]]
+    valid[rows[inside], cols[inside]] = True
+    return colour, valid
+
+
+def fill_gaps(colour: np.ndarray, valid: np.ndarray, blur: int = 25) -> np.ndarray:
+    """Something to denoise from where nothing could be carried over.
+
+    Left black, a hole reads as shadow and a diffusion model paints shadow
+    there. A heavily blurred copy of what *is* known carries the frame's own
+    colour and light into the gap without carrying any structure, and structure
+    is what the control images are there to supply.
+    """
+    from PIL import Image, ImageFilter
+
+    known = Image.fromarray((colour * 255).clip(0, 255).astype(np.uint8))
+    spread = np.asarray(known.filter(ImageFilter.GaussianBlur(blur)), np.float32) / 255.0
+    if valid.any():
+        # Blurring across the holes drags the average down; put it back, or the
+        # gaps come out darker than the frame they sit in.
+        spread *= float(colour[valid].mean()) / max(float(spread.mean()), 1e-6)
+    return np.where(valid[..., None], colour, np.clip(spread, 0.0, 1.0))
+
+
+def repaint(image, mask: np.ndarray, *, lift: float = 2.1, blur: int = 9):
+    """Put a preserved surface back over what a model drew in its place.
+
+    Not a flat colour: road paint is a bright lambertian surface under the same
+    light as the tarmac beside it, so its brightness is read from a blurred copy
+    of the frame and lifted. Pasting a constant white would put a daylight line
+    into a scene the model decided was dusk.
+    """
+    from PIL import Image, ImageFilter
+
+    lit = np.asarray(image.filter(ImageFilter.GaussianBlur(blur)), np.float32)
+    paint = np.clip(lit * lift + 24.0, 0.0, 255.0)
+    under = np.asarray(image, np.float32)
+    alpha = mask[..., None]
+    return Image.fromarray(
+        (under * (1.0 - alpha) + paint * alpha).clip(0, 255).astype(np.uint8))
