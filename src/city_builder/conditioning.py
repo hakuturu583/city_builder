@@ -471,7 +471,8 @@ def read_depth(path: str) -> np.ndarray:
 
 
 def reproject(camera: Camera, depth: np.ndarray, sources, *,
-              tolerance: float = 0.15) -> tuple[np.ndarray, np.ndarray]:
+              tolerance: float = 0.15,
+              magnify: float | None = None) -> tuple[np.ndarray, np.ndarray]:
     """``(colour, valid)`` for one view, gathered from views already rendered.
 
     What it is for: carrying a picture from cameras that have one into a camera
@@ -495,6 +496,14 @@ def reproject(camera: Camera, depth: np.ndarray, sources, *,
     depth at that pixel disagrees with how far the point actually is — by more
     than ``tolerance`` of the distance, because a fixed margin is wrong at both
     two metres and eighty — the answer is thrown away.
+
+    **Stretch is checked, when ``magnify`` is set.** A surface seen at forty
+    metres and now at ten covers sixteen times the pixels it did, and the old
+    frame simply does not hold that much of it; carrying it anyway spreads one
+    pixel across a block and the drive arrives at a wall of steps. The ratio of
+    the two distances is how far it has been stretched, and past ``magnify``
+    the answer is refused so that whatever fills the gap is generated at the
+    resolution it is now being seen at.
     """
     height, width = depth.shape[:2]
     world = unproject(depth, camera)
@@ -526,6 +535,12 @@ def reproject(camera: Camera, depth: np.ndarray, sources, *,
         agrees = np.zeros(len(local), bool)
         near = inside & (there > 0)
         agrees[near] = np.abs(there[near] - local[near, 2]) < tolerance * local[near, 2]
+        if magnify is not None:
+            # How much closer it is now than it was: the factor its pixels have
+            # been stretched by.
+            wanted = depth[want]
+            stretch = np.where(wanted > 1e-6, local[:, 2] / np.maximum(wanted, 1e-6), 0.0)
+            agrees &= stretch <= magnify
         if not agrees.any():
             continue
 

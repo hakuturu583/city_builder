@@ -561,3 +561,51 @@ def test_repainting_leaves_everything_the_mask_does_not_name():
     mask[8] = 1.0
     out = np.asarray(repaint(Image.fromarray(pixels), mask))
     assert (out[:8] == 90).all() and (out[9:] == 90).all()
+
+
+def test_a_surface_stretched_past_its_own_resolution_is_refused():
+    from city_builder.conditioning import Camera, reproject
+
+    # Two cameras on the same axis, one ten metres behind the other, so a wall
+    # thirty metres from the first is twenty from the second: a modest stretch.
+    def at(x):
+        rotation = np.array([[0.0, -1.0, 0.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0]])
+        view = np.eye(4)
+        view[:3, :3] = rotation
+        view[:3, 3] = -rotation @ np.array([x, 0.0, 0.0])
+        return Camera(frame=0, view=view, width=16, height=12,
+                      intrinsics=np.array([[40.0, 0.0, 8.0],
+                                           [0.0, 40.0, 6.0],
+                                           [0.0, 0.0, 1.0]]))
+
+    behind, here = at(0.0), at(20.0)
+    far = np.full((12, 16), 30.0, np.float32)
+    near = np.full((12, 16), 10.0, np.float32)
+    rgb = np.ones((12, 16, 3), np.float32)
+
+    # Three times closer than it was seen: kept when nine pixels from one is
+    # acceptable, refused when it is not.
+    _c, loose = reproject(here, near, [(behind, far, rgb)], magnify=4.0)
+    _c, tight = reproject(here, near, [(behind, far, rgb)], magnify=1.5)
+    assert loose.sum() > tight.sum()
+    assert tight.sum() == 0
+
+
+def test_without_a_limit_nothing_is_refused_for_stretch():
+    from city_builder.conditioning import Camera, reproject
+
+    rotation = np.array([[0.0, -1.0, 0.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0]])
+
+    def at(x):
+        view = np.eye(4)
+        view[:3, :3] = rotation
+        view[:3, 3] = -rotation @ np.array([x, 0.0, 0.0])
+        return Camera(frame=0, view=view, width=16, height=12,
+                      intrinsics=np.array([[40.0, 0.0, 8.0],
+                                           [0.0, 40.0, 6.0],
+                                           [0.0, 0.0, 1.0]]))
+
+    got, _valid = reproject(at(20.0), np.full((12, 16), 10.0, np.float32),
+                            [(at(0.0), np.full((12, 16), 30.0, np.float32),
+                              np.ones((12, 16, 3), np.float32))])
+    assert got.any()
