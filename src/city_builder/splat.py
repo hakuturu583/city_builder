@@ -685,3 +685,57 @@ def render(cloud: dict[str, Any], path: str, *, width: int = 1280, height: int =
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     Image.fromarray(picture).save(path)
     return path
+
+
+def sky_dome(centre, *, radius: float = 400.0, count: int = 200_000,
+             colour=(0.62, 0.66, 0.70), opacity: float = 0.9) -> dict[str, Any]:
+    """A shell of splats far enough away to stand for the sky.
+
+    A mesh has no sky, so a cloud sampled from one has nowhere to put a cloud, a
+    sunset or the sun. That is not a gap the renderer fills with background and
+    forgets: when frames generated under a real sky are burned into a cloud that
+    has no sky, the sky lands on whatever surface was behind it. Measured on the
+    t-junction drive, the sun and its starburst ended up painted across a
+    building's brickwork, moving with the wall as the camera moved.
+
+    So the sky is given somewhere to be. Far enough out that forty metres of
+    driving cannot see round it — at four hundred metres, that is a hundredth of
+    a degree of parallax — which is what makes it safe to treat as a surface at
+    all.
+
+    Over the horizon only: below it is ground, and a dome that continued would
+    put sky under the road.
+    """
+    centre = np.asarray(centre, dtype=float)
+    step = np.arange(count)
+    # Fibonacci over the hemisphere, which spaces them evenly without seams.
+    rise = 1.0 - step / max(count - 1, 1)
+    ring = np.sqrt(np.maximum(1.0 - rise ** 2, 0.0))
+    angle = np.pi * (3.0 - np.sqrt(5.0)) * step
+    directions = np.column_stack(
+        [np.cos(angle) * ring, np.sin(angle) * ring, rise])
+
+    points = centre + directions * radius
+    # Big enough to tile the shell at this count, so it reads as a surface
+    # rather than as a field of dots.
+    tile = 2.5 * radius / np.sqrt(max(count, 1))
+    return {
+        "means": points,
+        "normals": -directions,
+        "quats": normals_to_quaternions(-directions),
+        "scales": np.full((count, 3), tile),
+        "opacities": np.full(count, opacity),
+        "colours": np.tile(np.asarray(colour, dtype=float), (count, 1)),
+    }
+
+
+def merge(*clouds) -> dict[str, Any]:
+    """Concatenate clouds, keeping only what every one of them carries."""
+    shared = set(clouds[0])
+    for cloud in clouds[1:]:
+        shared &= set(cloud)
+    stackable = [key for key in shared
+                 if isinstance(clouds[0][key], np.ndarray)
+                 and clouds[0][key].ndim >= 1]
+    return {key: np.concatenate([np.asarray(c[key]) for c in clouds])
+            for key in stackable}

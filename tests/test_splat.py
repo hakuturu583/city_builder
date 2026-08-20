@@ -511,3 +511,56 @@ def test_colour_survives_the_spherical_harmonic_it_is_stored_as(tmp_path):
         handle.read(handle.read(4096).index(b"end_header\n") + len("end_header\n"))
     back = S.read_ply(path)
     assert np.allclose(back["colours"], (0.25, 0.5, 0.75), atol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# Somewhere for the sky to be
+
+
+def test_a_dome_sits_at_the_radius_it_was_asked_for():
+    from city_builder.splat import sky_dome
+
+    dome = sky_dome((10.0, -5.0, 0.0), radius=400.0, count=2000)
+    reach = np.linalg.norm(dome["means"] - np.array([10.0, -5.0, 0.0]), axis=1)
+    assert np.allclose(reach, 400.0)
+
+
+def test_a_dome_stops_at_the_horizon():
+    from city_builder.splat import sky_dome
+
+    dome = sky_dome((0.0, 0.0, 1.5), radius=100.0, count=2000)
+    # Below the centre is ground; a shell that continued would put sky there.
+    assert (dome["means"][:, 2] >= 1.5 - 1e-6).all()
+
+
+def test_a_dome_faces_the_middle_so_it_is_seen_from_inside():
+    from city_builder.splat import sky_dome
+
+    dome = sky_dome((0.0, 0.0, 0.0), radius=50.0, count=500)
+    outward = dome["means"] / np.linalg.norm(dome["means"], axis=1, keepdims=True)
+    assert np.allclose(dome["normals"], -outward, atol=1e-6)
+
+
+def test_a_dome_splat_is_wide_enough_to_tile_the_shell():
+    from city_builder.splat import sky_dome
+
+    sparse = sky_dome((0.0, 0.0, 0.0), radius=400.0, count=10_000)
+    dense = sky_dome((0.0, 0.0, 0.0), radius=400.0, count=250_000)
+    # More of them means each covers less; a fixed size would leave gaps at one
+    # count and a solid wall of overlap at the other.
+    assert sparse["scales"][0, 0] > dense["scales"][0, 0]
+    # And the spacing they have to cover is the shell's area over the count.
+    spacing = np.sqrt(4 * np.pi * 400.0 ** 2 / 2 / 250_000)
+    assert 0.5 * spacing < dense["scales"][0, 0] < 5 * spacing
+
+
+def test_merging_keeps_every_splat_and_only_the_shared_fields():
+    from city_builder.splat import merge, sky_dome
+
+    a = sky_dome((0.0, 0.0, 0.0), radius=100.0, count=30)
+    b = dict(sky_dome((0.0, 0.0, 0.0), radius=200.0, count=70))
+    b["radius"] = 1.0          # a scalar one of them happens to carry
+    joined = merge(a, b)
+    assert len(joined["means"]) == 100
+    assert "radius" not in joined, "a scalar cannot be concatenated"
+    assert set(joined) <= set(a)
