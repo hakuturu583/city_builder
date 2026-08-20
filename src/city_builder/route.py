@@ -83,6 +83,59 @@ def longest_route(succ: dict[int, list[int]], lines: dict[int, list[Point]], *,
     return best
 
 
+def routes_covering(succ: dict[int, list[int]], lines: dict[int, list[Point]], *,
+                    attempts: int = 400, seed: int = 0,
+                    least: float = 4.0) -> list[list[int]]:
+    """Routes that between them drive every lanelet, longest gain first.
+
+    `longest_route` answers "where can I drive for a minute", which is the right
+    question for a demonstration video and the wrong one for building an asset.
+    A T junction's longest route is its crossbar; the stem is never driven, and
+    every splat on it keeps the flat colour the mesh gave it.
+
+    So each round asks for the walk that adds the most *unvisited* road, rather
+    than the longest walk. A route may pass back through lanelets already
+    driven — it has to, to reach anything beyond them — but only what is new
+    counts towards choosing it.
+
+    Stops when the best a round can find is under ``least`` metres, because a
+    two-metre spur is not worth a drive, and returns what it has.
+    """
+    remaining = {i for i in lines if i in succ or any(i in v for v in succ.values())}
+    remaining &= set(lines)
+    found: list[list[int]] = []
+    starts = [i for i in lines]
+    if not starts:
+        return []
+
+    while remaining:
+        rng = random.Random(seed + len(found))
+        best: list[int] = []
+        gained = 0.0
+        for _ in range(attempts):
+            current = rng.choice(starts)
+            walk, seen = [current], {current}
+            while True:
+                options = [n for n in succ.get(walk[-1], ())
+                           if n not in seen and n in lines]
+                if not options:
+                    break
+                # Prefer somewhere new, so a walk does not wander back over
+                # ground it has already covered while road stands unvisited.
+                fresh = [n for n in options if n in remaining]
+                step = rng.choice(fresh or options)
+                walk.append(step)
+                seen.add(step)
+            new = sum(_length(lines[i]) for i in walk if i in remaining)
+            if new > gained:
+                best, gained = walk, new
+        if gained < least:
+            break
+        found.append(best)
+        remaining -= set(best)
+    return found
+
+
 def route_polyline(route: Sequence[int], lines: dict[int, list[Point]]) -> list[Point]:
     """One polyline for the whole route, without the duplicated joins."""
     points: list[Point] = []

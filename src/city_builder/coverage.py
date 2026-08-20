@@ -27,25 +27,50 @@ import numpy as np
 
 @dataclass(frozen=True)
 class Pass:
-    """One drive of the same route, looking somewhere other than ahead."""
+    """One drive: which road, how high, and where it is looking."""
 
+    #: Which of the covering routes to drive.
+    route: int = 0
     #: Degrees off the direction of travel, anticlockwise.
     yaw: float = 0.0
     #: Metres across the lane, positive to the left.
     sideways: float = 0.0
+    #: Metres above the road. A driver's eye by default; higher sees over
+    #: parked cars and hedges, and down onto surfaces a car never looks at.
+    height: float = 1.5
 
     @property
     def name(self) -> str:
-        return f"yaw{round(self.yaw):+04d}_x{self.sideways:+.1f}"
+        return (f"r{self.route}_yaw{round(self.yaw):+04d}"
+                f"_x{self.sideways:+.1f}_z{self.height:.1f}")
 
 
-#: Outwards from straight ahead, alternating sides. The last four move the
-#: camera across the lane instead of turning it, which is what is left once
-#: turning has run out of new surfaces to find.
-SWEEP = (
-    Pass(0.0), Pass(-55.0), Pass(55.0), Pass(-110.0), Pass(110.0), Pass(180.0),
-    Pass(0.0, -2.0), Pass(0.0, 2.0), Pass(-75.0, 1.5), Pass(75.0, -1.5),
+#: What one route is worth looking at, outwards from straight ahead and
+#: alternating sides. The raised pass is last of the turns because height buys
+#: less than direction does — a wall is still a wall from half a metre up — but
+#: it is the only thing that sees the top of anything.
+LOOKS = (
+    Pass(yaw=0.0), Pass(yaw=-55.0), Pass(yaw=55.0),
+    Pass(yaw=-110.0), Pass(yaw=110.0), Pass(yaw=180.0),
+    Pass(yaw=-40.0, height=4.0), Pass(yaw=40.0, height=4.0),
 )
+
+
+def sweep(routes: int, looks=LOOKS) -> list[Pass]:
+    """Every route seen every way, but the roads first.
+
+    Ordered by look and then by route, not the other way round. A sweep is
+    stopped when it stops paying, and driving one street eight ways before
+    touching the next would leave whole roads at the flat colour the mesh gave
+    them while the first was being polished.
+    """
+    return [Pass(route=index, yaw=look.yaw, sideways=look.sideways,
+                 height=look.height)
+            for look in looks for index in range(routes)]
+
+
+#: The default sweep, for a map with a single route worth driving.
+SWEEP = tuple(sweep(1))
 
 
 def turned(path, look: Pass):
@@ -71,19 +96,30 @@ def turned(path, look: Pass):
     return out
 
 
-def enough(history, *, target: float, least: float) -> str | None:
+def enough(history, *, target: float, least: float, routes: int = 1) -> str | None:
     """Why a sweep should stop, or None to keep going.
 
-    Two reasons, and they are different. Reaching the target is success. A pass
-    that adds less than `least` is the sweep telling you that turning the camera
-    has stopped finding new surfaces, and the answer to that is a different
-    route rather than another look down this one.
+    Two reasons, and they are different. Reaching the target is success. A round
+    that adds almost nothing means looking has run out of new surfaces, and the
+    answer to that is a different map rather than another pass over this one.
+
+    The round, not the pass. A sweep is ordered route-major — every road driven
+    one way before any road is driven a second — so a single pass adding nothing
+    means *that road* had nothing new, which is exactly what happens when two
+    routes run down the same street in opposite directions. Stopping there
+    abandons every look not yet tried: measured, a sweep quit at 91.9% on a
+    route that repeated itself, with six directions still to go.
     """
     if not history:
         return None
     if history[-1]["coverage"] >= target:
         return f"target reached: {history[-1]['coverage']:.1f}% >= {target:.1f}%"
-    if len(history) > 1 and history[-1]["gained"] < least:
-        return (f"a pass added {history[-1]['gained']:.1f}%, below {least:.1f}%; "
-                f"stopping at {history[-1]['coverage']:.1f}%")
+
+    round_size = max(routes, 1)
+    if len(history) <= round_size:
+        return None
+    gained = sum(entry["gained"] for entry in history[-round_size:])
+    if gained < least:
+        return (f"a round of {round_size} added {gained:.1f}%, below "
+                f"{least:.1f}%; stopping at {history[-1]['coverage']:.1f}%")
     return None

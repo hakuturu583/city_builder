@@ -17,7 +17,7 @@ import math
 
 import numpy as np
 
-from city_builder.coverage import SWEEP, Pass, enough, turned
+from city_builder.coverage import Pass, enough, turned
 
 
 def _straight(length=5):
@@ -28,47 +28,51 @@ def _straight(length=5):
 
 def test_looking_ahead_changes_nothing():
     path = _straight()
-    assert np.allclose(np.array(turned(path, Pass(0.0))), np.array(path))
+    assert np.allclose(np.array(turned(path, Pass(yaw=0.0))), np.array(path))
 
 
 def test_turning_the_camera_leaves_the_drive_where_it_was():
     # A driver who glances left is still in the same lane.
     path = _straight()
-    for eye, _target in turned(path, Pass(-55.0)):
+    for eye, _target in turned(path, Pass(yaw=-55.0)):
         assert eye in [p[0] for p in path]
 
 
 def test_turning_left_puts_the_target_to_the_left():
-    (eye, target), = turned([((0.0, 0.0, 1.5), (10.0, 0.0, 1.5))], Pass(90.0))
+    (eye, target), = turned([((0.0, 0.0, 1.5), (10.0, 0.0, 1.5))], Pass(yaw=90.0))
     across = np.asarray(target) - np.asarray(eye)
     # +y is to the left of travel along +x.
     assert across[1] > 9.0 and abs(across[0]) < 1e-6
 
 
 def test_turning_right_is_the_other_way():
-    (eye, target), = turned([((0.0, 0.0, 1.5), (10.0, 0.0, 1.5))], Pass(-90.0))
+    (eye, target), = turned([((0.0, 0.0, 1.5), (10.0, 0.0, 1.5))], Pass(yaw=-90.0))
     assert (np.asarray(target) - np.asarray(eye))[1] < -9.0
 
 
 def test_a_turn_keeps_the_distance_it_was_looking():
     path = [((0.0, 0.0, 1.5), (10.0, 0.0, 1.2))]
     for angle in (-110.0, -55.0, 55.0, 180.0):
-        (eye, target), = turned(path, Pass(angle))
+        (eye, target), = turned(path, Pass(yaw=angle))
         reach = np.linalg.norm(np.asarray(target) - np.asarray(eye))
         assert abs(reach - math.dist((0, 0, 1.5), (10, 0, 1.2))) < 1e-6
 
 
 def test_moving_across_the_lane_moves_it_to_the_side():
     (eye, _target), = turned([((0.0, 0.0, 1.5), (10.0, 0.0, 1.5))],
-                             Pass(0.0, sideways=2.0))
+                             Pass(yaw=0.0, sideways=2.0))
     assert abs(eye[1] - 2.0) < 1e-6 and abs(eye[2] - 1.5) < 1e-6
 
 
 def test_the_sweep_works_outwards_and_alternates_sides():
-    turns = [p.yaw for p in SWEEP if p.sideways == 0.0]
-    assert turns[0] == 0.0
-    # Stopping early should leave a balanced set, not everything to one side.
-    for left, right in zip(turns[1::2], turns[2::2]):
+    from city_builder.coverage import LOOKS
+
+    assert LOOKS[0].yaw == 0.0, "the first look should be where the car is going"
+    # Every turn comes with its mirror, immediately after it, so a sweep that
+    # is stopped early leaves a balanced set rather than everything to one side.
+    turns = [p.yaw for p in LOOKS if p.yaw not in (0.0, 180.0)]
+    assert len(turns) % 2 == 0
+    for left, right in zip(turns[::2], turns[1::2]):
         assert left == -right
 
 
@@ -78,11 +82,27 @@ def test_a_sweep_that_reached_the_target_says_so():
 
 
 def test_a_sweep_that_stopped_paying_says_something_different():
-    # Not the same event: this one means turning the camera has run out of new
-    # surfaces, and the answer is a different route rather than another look.
+    # Not the same event: this one means looking has run out of new surfaces,
+    # and the answer is a different map rather than another pass.
     why = enough([{"coverage": 70.0, "gained": 9.0},
                   {"coverage": 70.4, "gained": 0.4}], target=90.0, least=1.5)
     assert why and "target reached" not in why and "0.4" in why
+
+
+def test_one_road_repeating_itself_does_not_stop_the_sweep():
+    # Two routes down the same street in opposite directions see the same
+    # walls, so the second adds nothing — and six directions are still to go.
+    history = [{"coverage": 55.1, "gained": 55.1},
+               {"coverage": 91.9, "gained": 36.8},
+               {"coverage": 91.9, "gained": 0.0}]
+    assert enough(history, target=96.0, least=0.8, routes=4) is None
+
+
+def test_a_whole_round_finding_nothing_does_stop_it():
+    history = [{"coverage": 91.9, "gained": 36.8}] + [
+        {"coverage": 91.9, "gained": 0.0} for _ in range(4)]
+    why = enough(history, target=96.0, least=0.8, routes=4)
+    assert why and "a round of 4" in why
 
 
 def test_a_first_pass_is_never_a_reason_to_stop():
@@ -92,3 +112,36 @@ def test_a_first_pass_is_never_a_reason_to_stop():
 
 def test_a_sweep_with_nothing_in_it_keeps_going():
     assert enough([], target=90.0, least=1.5) is None
+
+
+def test_a_sweep_drives_every_road_before_looking_twice_at_one():
+    from city_builder.coverage import sweep
+
+    passes = sweep(routes=3)
+    # Whole streets left at the mesh's flat colour while the first is polished
+    # is the failure this ordering exists to avoid.
+    assert {p.route for p in passes[:3]} == {0, 1, 2}
+    assert len({p.yaw for p in passes[:3]}) == 1
+
+
+def test_a_sweep_covers_every_route_and_every_look():
+    from city_builder.coverage import LOOKS, sweep
+
+    passes = sweep(routes=2)
+    assert len(passes) == 2 * len(LOOKS)
+    assert {p.route for p in passes} == {0, 1}
+
+
+def test_a_raised_pass_is_the_only_one_that_looks_down():
+    from city_builder.coverage import LOOKS
+
+    assert any(p.height > 1.5 for p in LOOKS)
+    assert all(p.height >= 1.5 for p in LOOKS)
+
+
+def test_a_pass_is_named_by_everything_that_makes_it_different():
+    from city_builder.coverage import Pass
+
+    a = Pass(route=1, yaw=-55.0, height=4.0)
+    b = Pass(route=1, yaw=-55.0, height=1.5)
+    assert a.name != b.name, "two different drives would share a directory"

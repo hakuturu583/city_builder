@@ -107,3 +107,64 @@ def test_drive_path_crosses_junctions():
     path = route.drive_path(groups, ends, step=0.5)
     assert path
     assert max(p[0][0] for p in path) > 20.0  # got past the junction
+
+
+# ---------------------------------------------------------------------------
+# Driving all of it, rather than the longest part of it
+
+
+def _tee():
+    """A crossbar with a stem hanging off the middle of it.
+
+    ids 1,2 run along the bar; 3 turns off it; 4 runs down the stem.
+    """
+    lines = {
+        1: [(0.0, 0.0, 0.0), (10.0, 0.0, 0.0)],
+        2: [(10.0, 0.0, 0.0), (20.0, 0.0, 0.0)],
+        3: [(10.0, 0.0, 0.0), (10.0, -5.0, 0.0)],
+        4: [(10.0, -5.0, 0.0), (10.0, -15.0, 0.0)],
+    }
+    succ = {1: [2, 3], 2: [], 3: [4], 4: []}
+    return succ, lines
+
+
+def test_the_longest_route_misses_the_stem():
+    # The thing that makes covering necessary: a T's longest drive is its bar.
+    walk = route.longest_route(*_tee())
+    assert set(walk) != {1, 2, 3, 4}
+
+
+def test_covering_drives_every_lanelet():
+    succ, lines = _tee()
+    driven = set()
+    for walk in route.routes_covering(succ, lines, least=1.0):
+        driven |= set(walk)
+    assert driven == set(lines)
+
+
+def test_covering_takes_the_biggest_gain_first():
+    succ, lines = _tee()
+    walks = route.routes_covering(succ, lines, least=1.0)
+    # 1-3-4 is twenty metres of new road; 1-2 is twenty as well but the walk
+    # that reaches the stem is the one that has to happen at all.
+    assert len(walks) >= 2
+    assert len(walks[0]) >= len(walks[-1])
+
+
+def test_a_spur_too_short_to_drive_is_left_alone():
+    succ = {1: [2], 2: []}
+    lines = {1: [(0.0, 0.0, 0.0), (30.0, 0.0, 0.0)],
+             2: [(30.0, 0.0, 0.0), (30.5, 0.0, 0.0)]}
+    walks = route.routes_covering(succ, lines, least=4.0)
+    # The half-metre stub is not worth a drive of its own.
+    assert all(set(w) != {2} for w in walks)
+
+
+def test_covering_a_map_with_no_road_returns_nothing():
+    assert route.routes_covering({}, {}) == []
+
+
+def test_covering_is_the_same_for_the_same_seed():
+    succ, lines = _tee()
+    assert (route.routes_covering(succ, lines, seed=3)
+            == route.routes_covering(succ, lines, seed=3))
