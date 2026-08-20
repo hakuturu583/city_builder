@@ -35,6 +35,7 @@ ADE20K = {
     "water": (61, 230, 250),
     "fence": (255, 184, 6),
     "path": (255, 31, 0),
+    "pole": (51, 0, 255),
 }
 
 #: Which ADE20K class each of this package's surface groups is said to be.
@@ -61,6 +62,8 @@ AS_ADE20K = {
     "ViaductPiers": "wall",
     "Water": "water",
     "Fences": "fence",
+    "Poles": "pole",
+    "Trees": "tree",
 }
 
 

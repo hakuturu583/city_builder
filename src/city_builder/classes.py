@@ -128,6 +128,17 @@ CLASSES: dict[str, SurfaceClass] = {
                  "centimetres under it is still Ground",
         ),
         SurfaceClass(
+            "Poles", "pole", GENERATE, "concrete", (0.20, 0.20, 0.95), 18,
+            note="lamp posts and utility poles on the pavement; a street "
+                 "without them reads as a model, and a conditioned generator "
+                 "cannot add one the geometry says is not there",
+        ),
+        SurfaceClass(
+            "Trees", "tree", GENERATE, "ground", (0.10, 0.75, 0.10), 19,
+            note="street trees: a trunk and a lump of canopy, which is all the "
+                 "silhouette a control image needs",
+        ),
+        SurfaceClass(
             "Fences", "fence", GENERATE, "fence", (0.95, 0.55, 0.00), 17,
             note="pedestrian railings on the ground — round standing water and "
                  "along a drop; a guardrail on the carriageway is road furniture "

@@ -68,6 +68,7 @@ def build_city(
     extend_options: ExtendOptions | None = None,
     cover_options=None,
     fence_options=None,
+    furniture_options=None,
     verbose: bool = True,
 ) -> BuildResult:
     """Read a map and produce every surface, without touching Blender.
@@ -113,6 +114,9 @@ def build_city(
     clipped = clip_crosswalks(groups, surface_options.crosswalk_lift
                               if surface_options else SurfaceOptions().crosswalk_lift)
     buried = clip_curbs(groups)
+    # Kept before the clip: a walkway is a ribbon here and a mesh afterwards,
+    # and the furniture needs to know which of its two bounds is the kerb.
+    footways = list(groups.get("Walkways", ()))
     paved_over = clip_walkways(groups)
 
     stats = {name: len(shapes) for name, shapes in groups.items()}
@@ -287,6 +291,24 @@ def build_city(
                     print(f"[build] fences: {railings['metres']:.0f} m in "
                           f"{railings['runs']} run(s), {railings['posts']} post(s) — "
                           f"{railings['shoreline_runs']} along water")
+
+        # Poles and trees go on the pavement, which is why they are here and
+        # not in the map: the survey says where people walk, and this stands
+        # the things that make it read as a street on top. A conditioned
+        # generator cannot add either — the depth pass says the kerb is beside
+        # a flat wall, and a class render that never names a pole is a class
+        # render that forbids one.
+        if footways:
+            from . import furniture as furniture_module
+
+            street = furniture_module.build(footways, options=furniture_options)
+            for name in ("Poles", "Trees"):
+                if name in street:
+                    groups[name] = [street[name]]
+            stats["furniture"] = street["stats"]
+            if verbose and any(street["stats"].values()):
+                print(f"[build] street furniture: {street['stats']['poles']} pole(s), "
+                      f"{street['stats']['trees']} tree(s)")
 
         # An elevated lanelet is surveyed as a driving surface and nothing
         # else: no slab, no soffit, no columns. Which *parts* of it are a bridge
@@ -571,7 +593,8 @@ def build_city_from_config(input_path: str, config, *, buildings: bool = False,
                            ref_lat: float | None = None, ref_lon: float | None = None,
                            projector: str = "utm", z_datum: float | None = None,
                            z_offset: float = 0.0, cover_options=None,
-                           fence_options=None, verbose: bool = True) -> BuildResult:
+                           fence_options=None,
+    furniture_options=None, verbose: bool = True) -> BuildResult:
     """:func:`build_city`, with every option group taken from a
     :class:`city_builder.config.CityConfig`.
 

@@ -26,6 +26,7 @@ def test_generated_surfaces_are_the_rest():
     assert set(generated) == {
         "Ground", "Roads", "Junctions", "Crosswalks", "Walkways", "Curbs", "Buildings", "Roofs",
         "ViaductDecks", "ViaductParapets", "ViaductPiers", "RoadInfill", "Water", "Fences",
+        "Poles", "Trees",
     }
 
 
