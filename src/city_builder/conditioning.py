@@ -534,3 +534,85 @@ def reproject(camera: Camera, depth: np.ndarray, sources, *,
         valid[rows[agrees], cols[agrees]] = True
 
     return colour, valid
+
+
+def rings_of(shapes) -> list[np.ndarray]:
+    """Every shape in a build group as closed world-space rings.
+
+    A ribbon becomes one ring by walking its left bound and coming back down
+    its right; a polygon is already one; an infill is triangulated, and each
+    face goes separately so the hole in a junction stays a hole.
+    """
+    out: list[np.ndarray] = []
+    for shape in shapes:
+        if hasattr(shape, "left"):
+            found = [list(shape.left) + list(shape.right)[::-1]]
+        elif hasattr(shape, "points"):
+            found = [list(shape.points)]
+        else:
+            found = [[shape.vertices[i] for i in face] for face in shape.faces]
+        out.extend(np.asarray(ring, dtype=float) for ring in found if len(ring) >= 3)
+    return out
+
+
+def cover(rings, camera: Camera, depth: np.ndarray | None = None, *,
+          tolerance: float = 0.25, scale: int = 2) -> np.ndarray:
+    """Which pixels a set of world-space rings covers, seen from a camera.
+
+    For surfaces the build paints into a texture rather than leaving as objects
+    of their own — lane markings above all — which is why they cannot simply be
+    read back out of a class render.
+
+    Filled at ``scale`` times the frame and reduced, because a lane line forty
+    metres away is thinner than a pixel and an aliased mask makes it dash.
+
+    ``depth`` is the frame's depth pass. Given it, a ring hidden behind
+    something is dropped. The distance to compare against is worked out per
+    pixel, from where that pixel's ray crosses the ring's own plane — one
+    distance for the whole ring is only right for a small one, and a lane
+    marking is twenty metres long, so it takes the near end of every line with
+    it.
+    """
+    from PIL import Image, ImageDraw
+
+    size = (camera.width * scale, camera.height * scale)
+    matrix = camera.intrinsics * np.array([[scale], [scale], [1.0]])
+    rotation, translation = camera.view[:3, :3], camera.view[:3, 3]
+    centre = -rotation.T @ translation
+
+    u, v = np.meshgrid(np.arange(size[0]) + 0.5, np.arange(size[1]) + 0.5)
+    rays = np.linalg.inv(matrix) @ np.stack([u.ravel(), v.ravel(), np.ones(u.size)])
+    forward = (rotation.T @ rays).T
+
+    wanted = None
+    if depth is not None:
+        wanted = np.asarray(
+            Image.fromarray(depth).resize(size, Image.NEAREST), np.float32).ravel()
+
+    mask = np.zeros(u.size, bool)
+    for ring in rings:
+        local = (rotation @ ring.T).T + translation
+        if (local[:, 2] <= 0.05).any():
+            continue
+        pixels = (matrix @ local.T).T
+        pixels = pixels[:, :2] / pixels[:, 2:3]
+        if (pixels[:, 0].max() < 0 or pixels[:, 1].max() < 0
+                or pixels[:, 0].min() > size[0] or pixels[:, 1].min() > size[1]):
+            continue
+
+        patch = Image.new("1", size, 0)
+        ImageDraw.Draw(patch).polygon([tuple(p) for p in pixels], fill=1)
+        here = np.array(patch, bool).ravel()
+        if not here.any():
+            continue
+
+        if wanted is not None:
+            plane = float(ring[:, 2].mean())
+            with np.errstate(divide="ignore", invalid="ignore"):
+                along = (plane - centre[2]) / forward[:, 2]
+            reach = along * rays[2]
+            here &= np.isfinite(reach) & (along > 0) & (reach <= wanted + tolerance)
+        mask |= here
+
+    reduced = mask.reshape(camera.height, scale, camera.width, scale)
+    return reduced.mean(axis=(1, 3))

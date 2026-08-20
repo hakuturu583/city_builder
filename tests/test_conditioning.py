@@ -364,3 +364,114 @@ def test_the_most_recent_source_wins():
     colour, valid = C.reproject(camera, depth,
                                 [(camera, depth, newest), (camera, depth, oldest)])
     assert np.allclose(colour[valid], 0.9)
+
+
+# ---------------------------------------------------------------------------
+# The surfaces the build paints into a texture, recovered from the map
+
+
+def _straight_camera(width=64, height=48, height_m=1.5):
+    """Looking down +X from the origin, eye above the road plane at z=0."""
+    from city_builder.conditioning import Camera
+
+    # world +X forward, +Y left, +Z up  ->  camera +X right, +Y down, +Z forward
+    rotation = np.array([[0.0, -1.0, 0.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0]])
+    view = np.eye(4)
+    view[:3, :3] = rotation
+    view[:3, 3] = -rotation @ np.array([0.0, 0.0, height_m])
+    focal = 60.0
+    intrinsics = np.array([[focal, 0.0, width / 2],
+                           [0.0, focal, height / 2],
+                           [0.0, 0.0, 1.0]])
+    return Camera(frame=0, view=view, intrinsics=intrinsics,
+                  width=width, height=height)
+
+
+def test_a_ribbon_becomes_one_ring_that_closes_round_it():
+    from city_builder.conditioning import rings_of
+    from city_builder.geometry import Ribbon
+
+    ribbon = Ribbon(id=1, left=[(0, 1, 0), (5, 1, 0)], right=[(0, -1, 0), (5, -1, 0)])
+    rings = rings_of([ribbon])
+    assert len(rings) == 1
+    # Down one bound and back up the other, so the ring encloses the strip.
+    assert rings[0].shape == (4, 3)
+    assert rings[0][0].tolist() == [0, 1, 0]
+    assert rings[0][-1].tolist() == [0, -1, 0]
+
+
+def test_an_infill_gives_one_ring_per_face_so_a_hole_stays_a_hole():
+    from city_builder.conditioning import rings_of
+    from city_builder.geometry import Mesh
+
+    mesh = Mesh(vertices=[(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)],
+                faces=[[0, 1, 2], [0, 2, 3]])
+    assert len(rings_of([mesh])) == 2
+
+
+def test_a_ring_too_small_to_be_a_surface_is_dropped():
+    from city_builder.conditioning import rings_of
+    from city_builder.geometry import Polygon
+
+    assert rings_of([Polygon(id=1, points=[(0, 0, 0), (1, 0, 0)])]) == []
+
+
+def test_paint_on_the_road_lands_below_the_horizon():
+    from city_builder.conditioning import cover
+
+    camera = _straight_camera()
+    stripe = np.array([(4.0, 0.2, 0.0), (30.0, 0.2, 0.0),
+                       (30.0, -0.2, 0.0), (4.0, -0.2, 0.0)])
+    mask = cover([stripe], camera)
+    assert mask.any()
+    rows = np.nonzero(mask.any(axis=1))[0]
+    # The road is under the camera, so every pixel of it is below centre.
+    assert rows.min() >= camera.height // 2
+
+
+def test_a_wall_in_the_way_hides_the_paint_behind_it():
+    from city_builder.conditioning import cover
+
+    camera = _straight_camera()
+    stripe = np.array([(20.0, 0.2, 0.0), (30.0, 0.2, 0.0),
+                       (30.0, -0.2, 0.0), (20.0, -0.2, 0.0)])
+    open_road = np.full((camera.height, camera.width), 1000.0, np.float32)
+    assert cover([stripe], camera, open_road).any()
+
+    # Something solid at five metres: the paint is twenty metres further on.
+    blocked = np.full((camera.height, camera.width), 5.0, np.float32)
+    assert not cover([stripe], camera, blocked).any()
+
+
+def test_the_near_end_of_a_long_line_survives_the_occlusion_test():
+    from city_builder.conditioning import cover
+
+    camera = _straight_camera()
+    # Twenty metres long: judged by one distance for the whole ring, its near
+    # end reads as further away than the road it is painted on and vanishes.
+    stripe = np.array([(4.0, 0.2, 0.0), (24.0, 0.2, 0.0),
+                       (24.0, -0.2, 0.0), (4.0, -0.2, 0.0)])
+    ground = np.zeros((camera.height, camera.width), np.float32)
+    u, v = np.meshgrid(np.arange(camera.width) + 0.5, np.arange(camera.height) + 0.5)
+    rays = np.linalg.inv(camera.intrinsics) @ np.stack(
+        [u.ravel(), v.ravel(), np.ones(u.size)])
+    forward = (camera.view[:3, :3].T @ rays).T
+    with np.errstate(divide="ignore", invalid="ignore"):
+        along = (0.0 - 1.5) / forward[:, 2]
+    ground = np.where(along > 0, along * rays[2], 1000.0).reshape(
+        camera.height, camera.width).astype(np.float32)
+
+    mask = cover([stripe], camera, ground)
+    rows = np.nonzero(mask.any(axis=1))[0]
+    assert rows.max() > camera.height * 0.75, "the near end of the line was dropped"
+
+
+def test_a_mask_is_soft_at_the_edges_so_a_thin_line_does_not_dash():
+    from city_builder.conditioning import cover
+
+    camera = _straight_camera(width=64, height=48)
+    stripe = np.array([(4.0, 0.05, 0.0), (40.0, 0.05, 0.0),
+                       (40.0, -0.05, 0.0), (4.0, -0.05, 0.0)])
+    mask = cover([stripe], camera)
+    values = np.unique(mask[mask > 0])
+    assert (values < 1.0).any(), "a sub-pixel line came back fully opaque"
