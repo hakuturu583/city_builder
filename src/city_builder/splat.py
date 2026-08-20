@@ -739,3 +739,32 @@ def merge(*clouds) -> dict[str, Any]:
                  and clouds[0][key].ndim >= 1]
     return {key: np.concatenate([np.asarray(c[key]) for c in clouds])
             for key in stackable}
+
+
+def keep_only(cloud: dict[str, Any], keep) -> dict[str, Any]:
+    """The cloud, with only the splats a mask names.
+
+    For dropping what no camera ever reached. A splat nobody saw never got a
+    gradient, so it still carries the flat colour the mesh gave it, and the
+    first viewpoint that does reach it finds a patch of the untextured model
+    sitting in the middle of a photographed street. Most of them are surfaces
+    that no camera on the road can see at all — the backs of buildings, the
+    undersides of things — and carrying them is paying memory for a defect.
+
+    The scalar summaries a cloud may carry are recomputed rather than kept,
+    because a median radius over splats that are no longer there describes a
+    cloud that no longer exists.
+    """
+    keep = np.asarray(keep, dtype=bool)
+    count = len(np.asarray(cloud["means"]))
+    if len(keep) != count:
+        raise ValueError(f"the mask names {len(keep)} splats, the cloud has {count}")
+
+    out = {key: np.asarray(value)[keep]
+           for key, value in cloud.items()
+           if isinstance(value, np.ndarray) and len(value) == count}
+    if "scales" in out and len(out["scales"]):
+        radius = out["scales"][:, 0]
+        out["radius"] = float(np.median(radius))
+        out["radius_range"] = (float(radius.min()), float(radius.max()))
+    return out

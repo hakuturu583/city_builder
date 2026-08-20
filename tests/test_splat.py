@@ -564,3 +564,38 @@ def test_merging_keeps_every_splat_and_only_the_shared_fields():
     assert len(joined["means"]) == 100
     assert "radius" not in joined, "a scalar cannot be concatenated"
     assert set(joined) <= set(a)
+
+
+def test_keeping_a_subset_keeps_every_field_in_step():
+    from city_builder.splat import keep_only, sky_dome
+
+    cloud = sky_dome((0.0, 0.0, 0.0), radius=10.0, count=10)
+    keep = np.zeros(10, bool)
+    keep[[1, 4, 7]] = True
+    out = keep_only(cloud, keep)
+    assert len(out["means"]) == 3
+    for field in ("quats", "scales", "opacities", "colours", "normals"):
+        assert len(out[field]) == 3
+    assert np.allclose(out["means"], np.asarray(cloud["means"])[keep])
+
+
+def test_a_mask_of_the_wrong_length_is_refused_rather_than_broadcast():
+    import pytest
+
+    from city_builder.splat import keep_only, sky_dome
+
+    cloud = sky_dome((0.0, 0.0, 0.0), radius=10.0, count=10)
+    with pytest.raises(ValueError):
+        keep_only(cloud, np.ones(9, bool))
+
+
+def test_the_summary_describes_the_cloud_that_is_left():
+    from city_builder.splat import keep_only
+
+    cloud = {"means": np.zeros((4, 3)),
+             "scales": np.array([[1.0, 1, 1], [2, 2, 2], [3, 3, 3], [9, 9, 9]]),
+             "radius": 2.5, "radius_range": (1.0, 9.0)}
+    out = keep_only(cloud, np.array([True, True, True, False]))
+    # A median over splats that are no longer there describes nothing.
+    assert out["radius"] == 2.0
+    assert out["radius_range"] == (1.0, 3.0)
