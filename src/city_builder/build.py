@@ -789,6 +789,7 @@ def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | Non
                 ground_texture: str | None = None, tile_metres: float = 12.0,
                 road_tile_metres: float | None = None,
                 roof_texture: str | None = None, roof_tile_metres: float = 3.0,
+                foliage_texture: str | None = None, foliage_tile_metres: float = 1.2,
                 facade_dir: str | None = None, road_texture: str | None = None,
                 marking_options: MarkingOptions | None = None,
                 cover_options=None, cover_path: str | None = None,
@@ -869,6 +870,18 @@ def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | Non
         if verbose:
             print(f"[scene] Roofs: tiled {os.path.basename(roof_texture)} every "
                   f"{roof_tile_metres:g} m")
+
+    if foliage_texture:
+        # Tiled small. A canopy is a lump a couple of metres across and the leaf
+        # texture has to read as leaves at arm's length from a pavement, not as
+        # a green tarpaulin; at the roof's three metres one leaf covers a whole
+        # tree.
+        trees = objects.get("Trees")
+        if trees is not None:
+            scene.apply_tiled_texture(trees, foliage_texture, foliage_tile_metres)
+            if verbose:
+                print(f"[scene] Trees: tiled {os.path.basename(foliage_texture)} "
+                      f"every {foliage_tile_metres:g} m")
 
     if cover_options is not None:
         from . import cover as cover_module

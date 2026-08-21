@@ -134,7 +134,7 @@ CLASSES: dict[str, SurfaceClass] = {
                  "cannot add one the geometry says is not there",
         ),
         SurfaceClass(
-            "Trees", "tree", GENERATE, "ground", (0.10, 0.75, 0.10), 19,
+            "Trees", "tree", GENERATE, "foliage", (0.10, 0.75, 0.10), 19,
             note="street trees: a trunk and a lump of canopy, which is all the "
                  "silhouette a control image needs",
         ),

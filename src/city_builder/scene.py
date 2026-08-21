@@ -62,6 +62,12 @@ def build_materials() -> dict[str, object]:
         # below anything else in this list, which is what makes it reflect.
         "water": _material("CityWater", (0.02, 0.04, 0.05), 0.06, 0.7),
         "fence": _material("CityFence", (0.30, 0.31, 0.30), 0.45, 0.4),
+        # A street tree's canopy. Given a colour of its own rather than sharing
+        # the ground's, because a splat nobody's camera reached keeps whatever
+        # the mesh gave it — and foliage that starts as bare earth reads as a
+        # dead grey lump wherever the bake did not reach, which on the
+        # t-junction was a quarter of everything three to nine metres up.
+        "foliage": _material("CityFoliage", (0.13, 0.22, 0.09), 0.90),
     }
 
 

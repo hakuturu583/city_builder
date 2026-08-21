@@ -87,6 +87,19 @@ COVER_PROMPTS: dict[str, str] = {
 ROOF_PROMPT = ("top-down photograph of grey Japanese kawara roof tiles in even courses, "
                "overcast daylight, seamless texture")
 
+# Beside the roof rather than in `COVER_PROMPTS`, and for the same reason the
+# roof is: the cover table is what lies *between* the roads, and a tile put in
+# there gets laid on the ground. This one goes on the canopies of street trees,
+# which the bake often cannot reach — a quarter of everything three to nine
+# metres up on the t-junction — and a canopy left the colour of bare earth is a
+# dead grey lump in every view that did not.
+FOLIAGE_PROMPT = ("photograph of dense green deciduous tree leaves filling the frame, "
+                  "summer, overcast daylight, seamless texture")
+
+#: How many tiles a full materials stage makes: the ground cover, plus the two
+#: that are not ground — the roof and the canopy.
+TILES_MADE = len(COVER_PROMPTS) + 2
+
 # "Seamless texture" is the phrase that gets a tileable image out of the model
 # and also the phrase that pulls it towards stock clipart, which arrives on a
 # white background. Saying no to the background is cheaper than losing the
@@ -273,7 +286,7 @@ def _materials(map_path, out_dir, config, recipe, state, *, force, verbose):
 
     tiles = os.path.join(out_dir, "tiles")
     os.makedirs(tiles, exist_ok=True)
-    wanted = {**COVER_PROMPTS, "kawara": ROOF_PROMPT}
+    wanted = {**COVER_PROMPTS, "kawara": ROOF_PROMPT, "foliage": FOLIAGE_PROMPT}
     made, skipped, scores, poor = [], 0, {}, []
     for name, prompt in wanted.items():
         path = os.path.join(tiles, f"{name}.png")
@@ -297,6 +310,7 @@ def _materials(map_path, out_dir, config, recipe, state, *, force, verbose):
             print(f"[pipeline] {name}: blown {got['blown']:.3f}, sd {got['sd']:.1f}, "
                   f"seam {got['seam']:.2f}, x{got['tries']}{mark}")
     state["roof_texture"] = os.path.join(tiles, "kawara.png")
+    state["foliage_texture"] = os.path.join(tiles, "foliage.png")
     return {"made": len(made), "kept": skipped, "unusable": poor, "tiles": scores}
 
 
@@ -377,6 +391,7 @@ def _reconstruct(map_path, out_dir, config, recipe, state, *, force, verbose):
     summary = district.rebuild(
         handle, models, facade_dir=_dir(out_dir, "facades"),
         roof_texture=_file(out_dir, "tiles", "kawara.png"),
+        foliage_texture=_file(out_dir, "tiles", "foliage.png"),
         roof_tile_metres=recipe.roof_tile_metres, brush_up=recipe.brush_up,
         resolution=recipe.resolution, seed=recipe.seed, keep_below=recipe.keep_below,
         attempts=recipe.attempts, limit=recipe.limit, min_area=recipe.min_area,
@@ -506,6 +521,7 @@ def _scene(map_path, out_dir, config, recipe, state, *, force, verbose):
         placed = district.place(
             handle, ledger, facade_dir=_dir(out_dir, "facades"),
             roof_texture=_file(out_dir, "tiles", "kawara.png"),
+        foliage_texture=_file(out_dir, "tiles", "foliage.png"),
             roof_tile_metres=recipe.roof_tile_metres,
             cover_options=_cover(out_dir, config),
             cover_path=os.path.join(out_dir, "ground.png"),
@@ -514,6 +530,7 @@ def _scene(map_path, out_dir, config, recipe, state, *, force, verbose):
     else:
         build_scene(result, facade_dir=_dir(out_dir, "facades"),
                     roof_texture=_file(out_dir, "tiles", "kawara.png"),
+        foliage_texture=_file(out_dir, "tiles", "foliage.png"),
                     roof_tile_metres=recipe.roof_tile_metres,
                     cover_options=_cover(out_dir, config),
                     cover_path=os.path.join(out_dir, "ground.png"),

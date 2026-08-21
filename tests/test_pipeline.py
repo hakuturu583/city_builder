@@ -238,14 +238,14 @@ def test_a_tile_that_is_already_there_is_not_made_again(stubbed, tmp_path):
         P.run("map.osm", str(tmp_path), recipe=P.Recipe(renders=False, glb=False),
               stages=("ground", "materials"), verbose=False)
     made = len(_named(stubbed, "tile"))
-    assert made == len(P.COVER_PROMPTS) + 1, "the second run paid for the tiles again"
+    assert made == P.TILES_MADE, "the second run paid for the tiles again"
 
 
 def test_forcing_a_stage_makes_it_run_anyway(stubbed, tmp_path):
     for force in ((), ("materials",)):
         P.run("map.osm", str(tmp_path), recipe=P.Recipe(renders=False, glb=False),
               stages=("ground", "materials"), force=force, verbose=False)
-    assert len(_named(stubbed, "tile")) == 2 * (len(P.COVER_PROMPTS) + 1)
+    assert len(_named(stubbed, "tile")) == 2 * P.TILES_MADE
 
 
 def test_facades_already_drawn_are_left_alone(stubbed, tmp_path):
