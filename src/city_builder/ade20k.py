@@ -64,6 +64,8 @@ AS_ADE20K = {
     "Fences": "fence",
     "Poles": "pole",
     "Trees": "tree",
+    # ADE20K has no class for a trunk, and it is part of the tree.
+    "TreeTrunks": "tree",
 }
 
 

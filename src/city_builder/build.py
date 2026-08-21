@@ -302,7 +302,7 @@ def build_city(
             from . import furniture as furniture_module
 
             street = furniture_module.build(footways, options=furniture_options)
-            for name in ("Poles", "Trees"):
+            for name in ("Poles", "Trees", "TreeTrunks"):
                 if name in street:
                     groups[name] = [street[name]]
             stats["furniture"] = street["stats"]
@@ -790,6 +790,7 @@ def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | Non
                 road_tile_metres: float | None = None,
                 roof_texture: str | None = None, roof_tile_metres: float = 3.0,
                 foliage_texture: str | None = None, foliage_tile_metres: float = 1.2,
+                bark_texture: str | None = None, bark_tile_metres: float = 0.5,
                 facade_dir: str | None = None, road_texture: str | None = None,
                 marking_options: MarkingOptions | None = None,
                 cover_options=None, cover_path: str | None = None,
@@ -882,6 +883,16 @@ def build_scene(result: BuildResult, *, blend: str | None = None, glb: str | Non
             if verbose:
                 print(f"[scene] Trees: tiled {os.path.basename(foliage_texture)} "
                       f"every {foliage_tile_metres:g} m")
+
+    if bark_texture:
+        # Half a metre: a trunk is a third of that across, so the tile has to
+        # be small enough that a fissure is a fissure rather than a stripe.
+        trunks = objects.get("TreeTrunks")
+        if trunks is not None:
+            scene.apply_tiled_texture(trunks, bark_texture, bark_tile_metres)
+            if verbose:
+                print(f"[scene] TreeTrunks: tiled {os.path.basename(bark_texture)} "
+                      f"every {bark_tile_metres:g} m")
 
     if cover_options is not None:
         from . import cover as cover_module

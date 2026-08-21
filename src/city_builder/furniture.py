@@ -107,7 +107,7 @@ def build(walkways, options: FurnitureOptions | None = None) -> dict:
     """
     options = options or FurnitureOptions()
     rng = np.random.default_rng(options.seed)
-    made = {"Poles": ([], []), "Trees": ([], [])}
+    made = {"Poles": ([], []), "Trees": ([], []), "TreeTrunks": ([], [])}
     counts = {"poles": 0, "trees": 0}
 
     def add(group, vertices, faces):
@@ -146,8 +146,11 @@ def build(walkways, options: FurnitureOptions | None = None) -> dict:
             index = int(np.argmin(np.linalg.norm(kerb[:, :2] - place[:2], axis=1)))
             base = foot(index, place, options.canopy_radius * 0.35)
             trunk = options.tree_height * 0.55
-            add("Trees", *_prism(base, options.trunk_radius, base[2], base[2] + trunk,
-                                 sides=6))
+            # Its own group, because a trunk is bark and a canopy is leaves, and
+            # a texture can only be tiled onto a whole mesh at once: sharing one
+            # put foliage down the trunk.
+            add("TreeTrunks", *_prism(base, options.trunk_radius, base[2],
+                                      base[2] + trunk, sides=6))
             canopy = options.canopy_radius * float(rng.uniform(0.8, 1.15))
             add("Trees", *_blob((base[0], base[1], base[2] + trunk + canopy * 0.7),
                                 canopy))

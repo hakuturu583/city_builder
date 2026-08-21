@@ -139,6 +139,12 @@ CLASSES: dict[str, SurfaceClass] = {
                  "silhouette a control image needs",
         ),
         SurfaceClass(
+            "TreeTrunks", "tree", GENERATE, "bark", (0.60, 0.10, 0.30), 20,
+            note="the trunk under a street tree's canopy; bark rather than "
+                 "leaves, which needs its own mesh because a tiled texture "
+                 "goes on all of one",
+        ),
+        SurfaceClass(
             "Fences", "fence", GENERATE, "fence", (0.95, 0.55, 0.00), 17,
             note="pedestrian railings on the ground — round standing water and "
                  "along a drop; a guardrail on the carriageway is road furniture "

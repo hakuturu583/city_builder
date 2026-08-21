@@ -68,6 +68,7 @@ def build_materials() -> dict[str, object]:
         # dead grey lump wherever the bake did not reach, which on the
         # t-junction was a quarter of everything three to nine metres up.
         "foliage": _material("CityFoliage", (0.13, 0.22, 0.09), 0.90),
+        "bark": _material("CityBark", (0.16, 0.11, 0.07), 0.95),
     }
 
 

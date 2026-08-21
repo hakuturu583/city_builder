@@ -36,20 +36,22 @@ def test_nothing_stands_on_the_carriageway():
     # out over the road is what a street tree does, and a class render that
     # shows foliage above the carriageway is showing the truth.
     made = furniture.build([_pavement()])
-    for group in ("Poles", "Trees"):
+    for group in ("Poles", "Trees", "TreeTrunks"):
         if group not in made:
             continue
         points = np.array(made[group].vertices)
         standing = points[points[:, 2] < 0.5]
+        if not len(standing):
+            continue
         assert standing[:, 1].min() >= -1e-6, f"{group} has its foot on the road"
 
 
 def test_a_canopy_may_reach_over_the_road_but_its_trunk_may_not():
     made = furniture.build([_pavement(width=3.0)],
                            FurnitureOptions(pole_spacing=1e6, canopy_radius=2.0))
-    points = np.array(made["Trees"].vertices)
-    assert points[points[:, 2] < 0.5][:, 1].min() >= -1e-6
-    assert points[:, 1].min() < 0.0, "no street tree ever kept to the pavement"
+    assert np.array(made["TreeTrunks"].vertices)[:, 1].min() >= -1e-6
+    assert np.array(made["Trees"].vertices)[:, 1].min() < 0.0, \
+        "no street tree ever kept to the pavement"
 
 
 def test_a_pole_stands_on_the_ground_and_reaches_its_height():
@@ -83,9 +85,13 @@ def test_a_tree_is_a_trunk_under_a_canopy_and_clears_the_ground():
                            FurnitureOptions(pole_spacing=1e6, tree_spacing=20.0,
                                             tree_height=6.0, canopy_radius=2.0))
     assert made["stats"]["trees"] >= 1
-    z = np.array(made["Trees"].vertices)[:, 2]
-    assert abs(z.min()) < 1e-6, "the trunk does not reach the pavement"
-    assert z.max() > 6.0, "the canopy is not above the trunk"
+    # Separate meshes, because a texture is tiled onto all of one: sharing put
+    # foliage down the trunk.
+    trunk = np.array(made["TreeTrunks"].vertices)[:, 2]
+    canopy = np.array(made["Trees"].vertices)[:, 2]
+    assert abs(trunk.min()) < 1e-6, "the trunk does not reach the pavement"
+    assert canopy.min() > trunk.min(), "the canopy starts at the ground"
+    assert canopy.max() > 6.0, "the canopy is not above the trunk"
 
 
 def test_the_same_seed_stands_them_in_the_same_places():
@@ -103,6 +109,6 @@ def test_every_group_it_makes_has_a_class_and_a_name_in_ade20k():
     from city_builder.ade20k import ADE20K, AS_ADE20K
     from city_builder.classes import CLASSES
 
-    for group in ("Poles", "Trees"):
+    for group in ("Poles", "Trees", "TreeTrunks"):
         assert group in CLASSES, f"{group} has no class, so no control image names it"
         assert ADE20K[AS_ADE20K[group]]
