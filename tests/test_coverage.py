@@ -127,7 +127,7 @@ def test_a_sweep_drives_every_road_before_looking_twice_at_one():
 def test_a_sweep_covers_every_route_and_every_look():
     from city_builder.coverage import LOOKS, sweep
 
-    passes = sweep(routes=2)
+    passes = sweep(routes=2, both_ways=False)
     assert len(passes) == 2 * len(LOOKS)
     assert {p.route for p in passes} == {0, 1}
 
@@ -145,3 +145,27 @@ def test_a_pass_is_named_by_everything_that_makes_it_different():
     a = Pass(route=1, yaw=-55.0, height=4.0)
     b = Pass(route=1, yaw=-55.0, height=1.5)
     assert a.name != b.name, "two different drives would share a directory"
+
+
+def test_both_directions_come_before_any_turning():
+    from city_builder.coverage import sweep
+
+    passes = sweep(routes=2)
+    # A wall approached from one end only is fixed at how it looked from that
+    # end, and the far face of a pole is never seen at all; that is worth more
+    # than a second angle on what has already been seen.
+    first_turn = next(i for i, p in enumerate(passes) if p.yaw != 0.0)
+    assert {p.reverse for p in passes[:first_turn]} == {False, True}
+
+
+def test_driving_both_ways_doubles_the_sweep():
+    from city_builder.coverage import LOOKS, sweep
+
+    assert len(sweep(routes=3)) == 3 * len(LOOKS) * 2
+    assert len(sweep(routes=3, both_ways=False)) == 3 * len(LOOKS)
+
+
+def test_the_two_directions_of_one_route_are_told_apart():
+    from city_builder.coverage import Pass
+
+    assert Pass(route=1).name != Pass(route=1, reverse=True).name

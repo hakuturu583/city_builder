@@ -38,10 +38,15 @@ class Pass:
     #: Metres above the road. A driver's eye by default; higher sees over
     #: parked cars and hedges, and down onto surfaces a car never looks at.
     height: float = 1.5
+    #: Drive the route the other way. A splat carries one colour, so a surface
+    #: only ever approached from one end is fixed at how it looked from that
+    #: end — and the far side of a pole, a tree or a kerb is never seen at all.
+    reverse: bool = False
 
     @property
     def name(self) -> str:
-        return (f"r{self.route}_yaw{round(self.yaw):+04d}"
+        way = "rev" if self.reverse else "fwd"
+        return (f"r{self.route}{way}_yaw{round(self.yaw):+04d}"
                 f"_x{self.sideways:+.1f}_z{self.height:.1f}")
 
 
@@ -56,17 +61,23 @@ LOOKS = (
 )
 
 
-def sweep(routes: int, looks=LOOKS) -> list[Pass]:
-    """Every route seen every way, but the roads first.
+def sweep(routes: int, looks=LOOKS, *, both_ways: bool = True) -> list[Pass]:
+    """Every route seen every way, but the roads first, and both ways early.
 
-    Ordered by look and then by route, not the other way round. A sweep is
-    stopped when it stops paying, and driving one street eight ways before
-    touching the next would leave whole roads at the flat colour the mesh gave
-    them while the first was being polished.
+    Ordered by look, then by direction, then by route — not the other way
+    round. A sweep is stopped when it stops paying, and driving one street eight
+    ways before touching the next would leave whole roads at the flat colour the
+    mesh gave them while the first was being polished.
+
+    Both directions come before any turning because they are worth more. A
+    splat carries a single colour, so a wall approached from one end only is
+    fixed at how it looked from that end, and the far face of anything standing
+    on the pavement is never seen at all.
     """
+    ways = (False, True) if both_ways else (False,)
     return [Pass(route=index, yaw=look.yaw, sideways=look.sideways,
-                 height=look.height)
-            for look in looks for index in range(routes)]
+                 height=look.height, reverse=backwards)
+            for look in looks for backwards in ways for index in range(routes)]
 
 
 #: The default sweep, for a map with a single route worth driving.
