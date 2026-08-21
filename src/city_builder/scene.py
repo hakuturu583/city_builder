@@ -614,49 +614,72 @@ def render_animation(output_path: str, *, frames: int, fps: int = 30,
 # ---------------------------------------------------------------------------
 
 
+def painted_page(page_path: str, asphalt, paint, asphalt_image: str | None = None) -> str:
+    """The mask page with the asphalt already under it, written beside it.
+
+    A mask driving the factor of a mix is the natural way to say "paint here",
+    and it renders correctly in Blender. glTF cannot say it: a material there
+    carries one base-colour image, so an exporter walking this graph takes the
+    only image it can use — the mask — and every carriageway leaves the scene as
+    white lines on black. Measured on a T junction, the exported road texture
+    came out at a mean of 0.001, and everything downstream believed it: the
+    splat cloud started black, the seed showed a black road to the next pass,
+    and the generator painted the black asphalt it was being shown.
+
+    So the composite is done once, in image space, and the result is a single
+    image any format can carry. ``asphalt_image`` contributes its average tone
+    rather than its tiling: the page and the tile are laid out on different UVs,
+    and inventing a repeat count here would be a claim about scale that nothing
+    checked. The tile's detail is the texturing pass's job anyway.
+    """
+    import numpy as np
+    from PIL import Image
+
+    def as_srgb(linear):
+        """A base-colour socket is linear; an eight-bit PNG is not.
+
+        Writing 0.055 straight into the file and letting Blender decode it as
+        sRGB gives 0.004 linear — an asphalt twelve times too dark, which is
+        most of the way back to the black this function exists to stop.
+        """
+        x = np.clip(np.asarray(linear, dtype=np.float32)[:3], 0.0, 1.0)
+        return np.where(x <= 0.0031308, x * 12.92, 1.055 * x ** (1 / 2.4) - 0.055)
+
+    mask = np.asarray(Image.open(page_path).convert("L"), dtype=np.float32) / 255.0
+    under = as_srgb(asphalt)
+    if asphalt_image:
+        # Already an sRGB file, so its average is already in the page's space.
+        tile = np.asarray(Image.open(asphalt_image).convert("RGB"), dtype=np.float32) / 255.0
+        under = tile.reshape(-1, 3).mean(0)
+    over = as_srgb(paint)
+
+    blended = under[None, None, :] * (1.0 - mask[..., None]) + over[None, None, :] * mask[..., None]
+    out = os.path.splitext(page_path)[0] + "_on_asphalt.png"
+    Image.fromarray((np.clip(blended, 0.0, 1.0) * 255).astype("uint8")).save(out)
+    return out
+
+
 def marking_material(name: str, page_path: str, options, *, asphalt=(0.055, 0.055, 0.058),
                      asphalt_image: str | None = None, tile_metres: float = 12.0):
-    """Asphalt with the paint mixed over it, from a mask page.
+    """Asphalt with the paint already over it, from a mask page.
 
-    One image, one mix. The mask is the whole point: it is also the record of
-    what a texturing pass may repaint, so it stays a channel rather than being
-    flattened into the colour.
+    One image. The mask is still the record of what a texturing pass may
+    repaint — it stays on disk as the page it came from — but the material
+    carries the composite, because a mix driven by a mask survives Blender and
+    does not survive export. See :func:`painted_page`.
     """
     import bpy
 
     mat, nodes, links, bsdf = _material_nodes(name)
 
-    mask = nodes.new("ShaderNodeTexImage")
-    mask.location = (-700, 200)
-    mask.image = bpy.data.images.load(os.path.abspath(page_path))
-    mask.image.colorspace_settings.name = "Non-Color"  # it is a mask, not a colour
-    mask.extension = "CLIP"
-    mask.interpolation = "Linear"
+    surface = nodes.new("ShaderNodeTexImage")
+    surface.location = (-400, 0)
+    surface.image = bpy.data.images.load(
+        os.path.abspath(painted_page(page_path, asphalt, options.colour, asphalt_image)))
+    surface.extension = "CLIP"
+    surface.interpolation = "Linear"
 
-    base = nodes.new("ShaderNodeMixRGB") if "ShaderNodeMixRGB" in dir(bpy.types) else nodes.new("ShaderNodeMix")
-    base.location = (-250, 0)
-    if base.bl_idname == "ShaderNodeMix":
-        base.data_type = "RGBA"
-        factor, colour_a, colour_b, result = base.inputs[0], base.inputs[6], base.inputs[7], base.outputs[2]
-    else:
-        factor, colour_a, colour_b, result = base.inputs[0], base.inputs[1], base.inputs[2], base.outputs[0]
-
-    if asphalt_image:
-        surface = nodes.new("ShaderNodeTexImage")
-        surface.location = (-700, -200)
-        surface.image = bpy.data.images.load(os.path.abspath(asphalt_image))
-        surface.extension = "REPEAT"
-        coords = nodes.new("ShaderNodeUVMap")
-        coords.location = (-900, -200)
-        coords.uv_map = "AsphaltUV"
-        links.new(coords.outputs["UV"], surface.inputs["Vector"])
-        links.new(surface.outputs["Color"], colour_a)
-    else:
-        colour_a.default_value = (*asphalt, 1.0)
-
-    colour_b.default_value = (*options.colour, 1.0)
-    links.new(mask.outputs["Color"], factor)
-    links.new(result, bsdf.inputs["Base Color"])
+    links.new(surface.outputs["Color"], bsdf.inputs["Base Color"])
     bsdf.inputs["Roughness"].default_value = 0.85
     return mat
 

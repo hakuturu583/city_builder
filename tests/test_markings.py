@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
+
 import numpy as np
 import pytest
 
@@ -304,3 +307,38 @@ def test_junction_lane_lines_can_be_asked_for():
     }
     pages, _ = M.bake(groups, MarkingOptions(page_pixels=1024, lane_lines_in_junctions=True))
     assert pages and pages[0].max() == 255
+
+
+def test_the_carriageway_leaves_the_scene_as_asphalt_and_not_as_black():
+    """The page is a mask; what a mesh format carries has to be a colour.
+
+    A mix driven by the mask renders correctly in Blender and cannot be
+    exported, so an exporter takes the mask itself and the road leaves as white
+    lines on black. That is what happened: an exported carriageway texture came
+    out at a mean of 0.001, the splat cloud built from it started black, and the
+    generator, seeded with a render of that cloud, painted the black road it was
+    being shown. The composite has to exist as pixels before export.
+    """
+    from PIL import Image
+
+    from city_builder.scene import painted_page
+
+    page = np.zeros((64, 64), dtype=np.uint8)
+    page[30:34, :] = 255                      # one painted line across it
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "page00.png")
+        Image.fromarray(page).save(path)
+
+        asphalt = (0.055, 0.055, 0.058)
+        out = painted_page(path, asphalt, (0.9, 0.9, 0.88))
+        baked = np.asarray(Image.open(out).convert("RGB"), dtype=float) / 255.0
+
+    # The page is an eight-bit file and a base colour socket is linear, so the
+    # asphalt has to arrive encoded or it comes back twelve times too dark.
+    linear = np.mean(asphalt)
+    expected = 1.055 * linear ** (1 / 2.4) - 0.055
+    unpainted = baked[0]
+    assert unpainted.mean() == pytest.approx(expected, abs=0.01), \
+        "off the paint the road has to be the asphalt, in the file's own space"
+    assert baked[32].mean() > 0.8, "the line itself still has to be painted"
+    assert baked.mean() > 0.2, "a road that averages near zero is the bug"
