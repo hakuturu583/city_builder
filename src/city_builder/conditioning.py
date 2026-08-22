@@ -199,6 +199,20 @@ def to_linear(value: float) -> float:
     return value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
 
 
+def to_srgb(linear):
+    """The inverse of :func:`to_linear`: what to write into an 8-bit file.
+
+    Vectorised, because the caller writing a file usually has a whole image.
+    A base-colour socket is linear and a PNG is not; writing a linear 0.055
+    straight into the file and letting the decoder undo the transform gives
+    0.004 back — an asphalt twelve times too dark.
+    """
+    import numpy as np
+
+    x = np.clip(np.asarray(linear, dtype=np.float32), 0.0, 1.0)
+    return np.where(x <= 0.0031308, x * 12.92, 1.055 * x ** (1 / 2.4) - 0.055)
+
+
 def class_colours() -> dict[str, tuple[float, float, float, float]]:
     """The emission colour per surface class, pre-compensated for the transform.
 

@@ -335,8 +335,9 @@ def test_the_carriageway_leaves_the_scene_as_asphalt_and_not_as_black():
 
     # The page is an eight-bit file and a base colour socket is linear, so the
     # asphalt has to arrive encoded or it comes back twelve times too dark.
-    linear = np.mean(asphalt)
-    expected = 1.055 * linear ** (1 / 2.4) - 0.055
+    from city_builder.conditioning import to_srgb
+
+    expected = float(to_srgb(np.mean(asphalt)))
     unpainted = baked[0]
     assert unpainted.mean() == pytest.approx(expected, abs=0.01), \
         "off the paint the road has to be the asphalt, in the file's own space"

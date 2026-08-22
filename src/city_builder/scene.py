@@ -635,26 +635,27 @@ def painted_page(page_path: str, asphalt, paint, asphalt_image: str | None = Non
     import numpy as np
     from PIL import Image
 
-    def as_srgb(linear):
-        """A base-colour socket is linear; an eight-bit PNG is not.
+    from .conditioning import to_srgb
 
-        Writing 0.055 straight into the file and letting Blender decode it as
-        sRGB gives 0.004 linear — an asphalt twelve times too dark, which is
-        most of the way back to the black this function exists to stop.
-        """
-        x = np.clip(np.asarray(linear, dtype=np.float32)[:3], 0.0, 1.0)
-        return np.where(x <= 0.0031308, x * 12.92, 1.055 * x ** (1 / 2.4) - 0.055)
+    out = os.path.splitext(page_path)[0] + "_on_asphalt.png"
+    # Both carriageway objects share the page list, so every page is asked for
+    # once per object with identical inputs — and a 4096-square composite is a
+    # few seconds each. The inputs are files and constants, so file mtimes
+    # answer whether the work is already done.
+    sources = [page_path] + ([asphalt_image] if asphalt_image else [])
+    if os.path.exists(out) and all(
+            os.path.getmtime(out) >= os.path.getmtime(src) for src in sources):
+        return out
 
     mask = np.asarray(Image.open(page_path).convert("L"), dtype=np.float32) / 255.0
-    under = as_srgb(asphalt)
+    under = to_srgb(np.asarray(asphalt, dtype=np.float32)[:3])
     if asphalt_image:
         # Already an sRGB file, so its average is already in the page's space.
         tile = np.asarray(Image.open(asphalt_image).convert("RGB"), dtype=np.float32) / 255.0
         under = tile.reshape(-1, 3).mean(0)
-    over = as_srgb(paint)
+    over = to_srgb(np.asarray(paint, dtype=np.float32)[:3])
 
     blended = under[None, None, :] * (1.0 - mask[..., None]) + over[None, None, :] * mask[..., None]
-    out = os.path.splitext(page_path)[0] + "_on_asphalt.png"
     Image.fromarray((np.clip(blended, 0.0, 1.0) * 255).astype("uint8")).save(out)
     return out
 
